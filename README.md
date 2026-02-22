@@ -228,12 +228,19 @@ This starts two things:
 - **The daemon** — runs in the background, monitoring markets and making decisions
 - **The dashboard** — a web UI at `http://localhost:5100`
 
-The daemon will:
-- Check in with Claude every 15 minutes during market hours
-- Scan for opportunities and stage them for your review
-- Manage open positions (adjust stops, close at profit targets)
-- Run end-of-day sync and reconciliation at market close
-- Idle overnight and on weekends
+The daemon currently:
+- Checks in with Claude every 15 minutes during market hours
+- Scans for opportunities and stages them for your review
+- Manages open positions (adjust stops, close at profit targets)
+- Runs end-of-day sync and reconciliation at market close
+- Idles overnight and on weekends
+
+Coming soon (under active development):
+- Analyse past trades on a regular schedule to find what's working
+- Detect new patterns across hundreds of trades (e.g., "Friday puts outperform Monday puts")
+- Design A/B experiments to test improvements safely
+- Evaluate experiment results and only adopt changes that are statistically proven
+- Automatically tune strategy parameters based on real performance data
 
 ### 3. Use the Dashboard
 
