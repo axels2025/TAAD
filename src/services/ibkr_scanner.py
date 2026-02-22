@@ -201,8 +201,15 @@ class IBKRScannerService:
     def __init__(self):
         self._ib: Optional[IB] = None
 
-    def connect(self) -> None:
-        """Connect to IBKR TWS/Gateway."""
+    def connect(self, frozen: bool = True) -> None:
+        """Connect to IBKR TWS/Gateway.
+
+        Args:
+            frozen: If True (default), request market data type 2 (Frozen).
+                    This returns live data during market hours and last-known
+                    values outside hours (the "diamond icon" data in TWS).
+                    Safe to always enable — no downside during market hours.
+        """
         if not IB_AVAILABLE:
             raise ImportError("ib_insync not installed. Run: pip install ib_insync")
 
@@ -213,7 +220,13 @@ class IBKRScannerService:
 
         logger.info(f"Scanner connecting to IBKR at {host}:{port} (client_id={self.CLIENT_ID})")
         self._ib.connect(host, port, clientId=self.CLIENT_ID, timeout=10)
-        logger.info("Scanner connected to IBKR")
+
+        if frozen:
+            # Type 2 = Frozen: live during hours, last close values outside
+            self._ib.reqMarketDataType(2)
+            logger.info("Scanner connected to IBKR (market data type: frozen)")
+        else:
+            logger.info("Scanner connected to IBKR (market data type: live)")
 
     def disconnect(self) -> None:
         """Disconnect from IBKR."""
@@ -361,7 +374,7 @@ class IBKRScannerService:
                 logger.warning("VIX: could not qualify contract")
                 return None
 
-            ticker = self._ib.reqMktData(qualified[0], "", True, False)
+            ticker = self._ib.reqMktData(qualified[0], "", False, False)
             self._ib.sleep(2)
             price = safe_price(ticker)
             self._ib.cancelMktData(qualified[0])
@@ -436,8 +449,9 @@ class IBKRScannerService:
 
         qualified = qualified_list[0]
 
-        # Get stock price via snapshot
-        ticker = self._ib.reqMktData(qualified, "", True, False)
+        # Get stock price via streaming (not snapshot — snapshots may not
+        # return frozen data outside market hours)
+        ticker = self._ib.reqMktData(qualified, "", False, False)
         self._ib.sleep(2)
         stock_price = safe_price(ticker)
         self._ib.cancelMktData(qualified)
@@ -566,10 +580,12 @@ class IBKRScannerService:
                 logger.debug(f"Chain {symbol} ${strike}: reqMktData failed: {e}")
 
         # Wait for Greeks (up to 4 seconds)
+        # Check both modelGreeks (live) and lastGreeks (frozen/close)
         for _ in range(8):
             self._ib.sleep(0.5)
             all_have = all(
-                hasattr(t, "modelGreeks") and t.modelGreeks and t.modelGreeks.delta is not None
+                (hasattr(t, "modelGreeks") and t.modelGreeks and t.modelGreeks.delta is not None)
+                or (hasattr(t, "lastGreeks") and t.lastGreeks and t.lastGreeks.delta is not None)
                 for t, _ in tickers.values()
             )
             if all_have:
@@ -584,8 +600,14 @@ class IBKRScannerService:
                 theta_val = None
                 iv_val = None
 
-                if hasattr(ticker, "modelGreeks") and ticker.modelGreeks:
+                # Try modelGreeks first (live), then lastGreeks (frozen/close)
+                greeks = None
+                if hasattr(ticker, "modelGreeks") and ticker.modelGreeks and ticker.modelGreeks.delta is not None:
                     greeks = ticker.modelGreeks
+                elif hasattr(ticker, "lastGreeks") and ticker.lastGreeks and ticker.lastGreeks.delta is not None:
+                    greeks = ticker.lastGreeks
+
+                if greeks:
                     if greeks.delta is not None:
                         delta_val = round(abs(greeks.delta), 4)
                     if greeks.impliedVol is not None:
@@ -602,6 +624,14 @@ class IBKRScannerService:
 
                 bid = round(bid, 2) if bid and bid > 0 else 0.0
                 ask = round(ask, 2) if ask and ask > 0 else 0.0
+
+                # Frozen data fallback: if bid/ask are 0, use close price
+                if bid == 0.0 and ask == 0.0:
+                    close_price = safe_field(ticker, "close")
+                    if close_price and close_price > 0:
+                        bid = round(close_price, 2)
+                        ask = bid  # spread = 0 for frozen data
+
                 mid = round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else bid or ask
 
                 otm_pct = round((stock_price - strike) / stock_price, 4) if stock_price > 0 else 0.0
