@@ -13,7 +13,7 @@
 
 You are an expert Python developer tasked with building a self-learning agentic AI trading system. Your role is to:
 
-1. **Read the specification** (`SPEC_TRADING_SYSTEM.md`) carefully before starting any work
+1. **Read the specification** (`docs/SPEC_TRADING_SYSTEM.md`) carefully before starting any work
 2. **Implement each phase sequentially** - never skip ahead
 3. **Validate completion criteria** after each step before proceeding
 4. **Write production-quality code** following the standards in this document
@@ -721,7 +721,7 @@ CREATE TABLE patterns (
 ### Phase-Based Development
 
 1. **Read Specification**
-   - Review `SPEC_TRADING_SYSTEM.md`
+   - Review `docs/SPEC_TRADING_SYSTEM.md`
    - Understand current phase requirements
    - Identify success criteria
 
