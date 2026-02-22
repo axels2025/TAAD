@@ -114,6 +114,7 @@ The system implements a proven strategy: selling short-dated (0-7 DTE) put optio
 ## Prerequisites
 
 - **Python 3.11+**
+- **PostgreSQL 14+** (recommended) or SQLite (for quick testing only)
 - **Interactive Brokers** account with TWS or IB Gateway
   - Paper trading account recommended for development
   - API connections enabled (Edit > Global Configuration > API > Settings)
@@ -123,8 +124,8 @@ The system implements a proven strategy: selling short-dated (0-7 DTE) put optio
 
 ```bash
 # Clone the repository
-git clone https://github.com/axels2025/trading_agent.git
-cd trading_agent
+git clone https://github.com/axels2025/TAAD.git
+cd TAAD
 
 # Create and activate virtual environment
 python3.11 -m venv venv
@@ -133,19 +134,44 @@ source venv/bin/activate  # Linux/macOS
 
 # Install dependencies
 pip install -r requirements.txt
+```
 
-# Copy environment template and fill in your credentials
-cp .env.example .env
-# Edit .env with your IBKR and Anthropic settings
+### Database Setup
 
-# Initialize the database
+**PostgreSQL (recommended for production/paper trading):**
+
+```bash
+# Create the database
+createdb trading_agent
+
+# Initialize schema and run migrations
 python scripts/setup_database.py
 alembic upgrade head
 ```
 
+The system uses PostgreSQL schemas (`import`, `enrichment`, `analysis`) for the Trade Archaeology & Alpha Discovery (TAAD) subsystem, and pgvector for semantic decision search. These are created automatically on first run.
+
+**SQLite (quick start / testing only):**
+
+```bash
+# Set DATABASE_URL in .env to use SQLite instead
+DATABASE_URL=sqlite:///data/databases/trades.db
+
+python scripts/setup_database.py
+alembic upgrade head
+```
+
+SQLite works for basic testing but lacks PostgreSQL-specific features (schemas, pgvector similarity search, concurrent connections).
+
 ### Environment Variables
 
-Create a `.env` file in the project root:
+Copy the template and fill in your credentials:
+
+```bash
+cp .env.example .env
+```
+
+Key settings in `.env`:
 
 ```bash
 # IBKR Connection
@@ -157,13 +183,16 @@ IBKR_ACCOUNT=DU123456       # Your paper trading account ID
 # Anthropic API
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 
-# Database
-DATABASE_URL=sqlite:///data/databases/trades.db
+# Database (PostgreSQL recommended)
+DATABASE_URL=postgresql://localhost/trading_agent
+# DATABASE_URL=sqlite:///data/databases/trades.db  # SQLite alternative
 
 # Safety
 PAPER_TRADING=true
 LOG_LEVEL=INFO
 ```
+
+See `.env.example` for the full list of configuration options including risk limits, position sizing, market data settings, and more.
 
 ## Usage
 
@@ -278,7 +307,7 @@ trading_agent/
 | Language | Python 3.11+ |
 | Broker API | ib_insync (Interactive Brokers) |
 | AI Reasoning | Anthropic Claude (Sonnet) |
-| Database | SQLite (dev) / PostgreSQL (prod) |
+| Database | PostgreSQL 14+ (recommended) / SQLite (testing) |
 | ORM | SQLAlchemy 2.0 + Alembic migrations |
 | CLI | Typer + Rich |
 | Web UI | Flask |
