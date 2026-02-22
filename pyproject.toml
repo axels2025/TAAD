@@ -1,15 +1,12 @@
-[tool.poetry]
-name = "trading-agent"
+[project]
+name = "taad"
 version = "0.1.0"
-description = "Self-Learning Agentic AI Trading System"
-authors = ["Trading Agent Team"]
+description = "The Autonomous Agentic Trading Daemon"
 readme = "README.md"
-packages = [{include = "src"}]
+license = {text = "MIT"}
+requires-python = ">=3.11"
 
-[tool.poetry.dependencies]
-python = "^3.11"
-
-[tool.poetry.scripts]
+[project.scripts]
 nakedtrader = "src.cli.main:main"
 
 [tool.black]
@@ -113,5 +110,8 @@ exclude_lines = [
 ]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]

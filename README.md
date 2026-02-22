@@ -147,7 +147,12 @@ source venv/bin/activate  # Linux/macOS
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Install the nakedtrader CLI command
+pip install -e .
 ```
+
+This gives you the `nakedtrader` command you'll use for everything.
 
 ### Database Setup
 
@@ -213,13 +218,13 @@ See `.env.example` for the full list of options including risk limits, position 
 
 ```bash
 # Start the trading daemon (also starts the web dashboard)
-python -m src.cli.main daemon start
+nakedtrader daemon start
 
 # Check if it's running
-python -m src.cli.main daemon status
+nakedtrader daemon status
 
 # Stop it
-python -m src.cli.main daemon stop
+nakedtrader daemon stop
 ```
 
 Once started, the daemon will:
@@ -232,22 +237,22 @@ Once started, the daemon will:
 
 ```bash
 # Scan for options to sell
-python -m src.cli.main scanner run
+nakedtrader scanner run
 
 # Sell a naked put (dry run — shows what it would do)
-python -m src.cli.main nakedtrader sell XSP --dry-run
+nakedtrader nakedtrader sell XSP --dry-run
 
 # Sell a naked put (actually places the order in paper trading)
-python -m src.cli.main nakedtrader sell XSP --live --yes
+nakedtrader nakedtrader sell XSP --live --yes
 
 # Watch your open positions
-python -m src.cli.main nakedtrader sell-watch
+nakedtrader nakedtrader sell-watch
 
 # View trade history
-python -m src.cli.main nakedtrader sell-status
+nakedtrader nakedtrader sell-status
 
 # Ask Claude to analyze your performance
-python -m src.cli.main analyze --ai
+nakedtrader analyze --ai
 ```
 
 ### Dashboard
