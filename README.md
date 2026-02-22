@@ -6,7 +6,7 @@
 [![Status](https://img.shields.io/badge/status-active%20development-orange.svg)]()
 [![Built with Claude](https://img.shields.io/badge/built%20with-Claude%20Code-blueviolet.svg)](https://claude.ai/claude-code)
 
-A self-learning autonomous trading system that sells naked put options, learns from outcomes, and continuously improves. Built with Python, Interactive Brokers, and Claude AI.
+An AI trading system that sells put options, watches the market, and gets smarter over time. It uses Claude AI to reason about what to do, Interactive Brokers to place trades, and a learning engine that studies every past trade to find what works.
 
 > **Status: Under very active development.** This project is being built and iterated on daily. APIs, database schemas, and behavior may change without notice. Use at your own risk.
 
@@ -20,18 +20,18 @@ A self-learning autonomous trading system that sells naked put options, learns f
 
 ## What It Does
 
-TAAD is an event-driven daemon that:
+TAAD runs as a background process (daemon) during market hours and does the following:
 
-1. **Scans** for naked put opportunities using delta-based strike selection
-2. **Stages** candidates for human review or autonomous execution
-3. **Reasons** about market conditions using Claude AI every 15 minutes
-4. **Executes** trades through Interactive Brokers with bracket orders (profit target + stop loss)
-5. **Learns** from every trade outcome — detecting patterns, running A/B experiments, and optimizing parameters over time
-6. **Self-corrects** by adjusting strategy parameters based on statistically validated improvements
+1. **Scans** for options to sell — finds put options that match your risk criteria (how far out-of-the-money, how much premium, how many days until expiration)
+2. **Shows you what it found** — stages candidates on a dashboard for you to review, or executes them automatically if you've given it permission
+3. **Checks in every 15 minutes** — asks Claude AI to look at your open positions, market conditions, and decide if anything needs attention
+4. **Manages your trades** — places orders through Interactive Brokers with automatic profit targets and stop losses
+5. **Learns from results** — after each trade closes, it records what happened and looks for patterns (e.g., "trades opened when VIX is below 15 win more often")
+6. **Improves itself** — runs A/B experiments to test new ideas and only adopts changes that are statistically proven to work
 
-The system implements a proven strategy: selling short-dated (0-7 DTE) put options on indices (SPX, XSP, SPY) and quality stocks, targeting specific delta ranges and premium levels.
+The default strategy is selling short-dated (0-7 day) put options on stock indices (SPX, XSP, SPY) and quality stocks.
 
-## Architecture
+## How It Works
 
 ```
                     +-----------------+
@@ -40,73 +40,86 @@ The system implements a proven strategy: selling short-dated (0-7 DTE) put optio
                     +--------+--------+
                              |
                     +--------v--------+
-                    |  Working Memory |  Positions, decisions, anomalies,
-                    |  (state store)  |  market context, reflections
-                    +--------+--------+
+                    |  Working Memory |  What positions are open? What
+                    |  (state store)  |  happened recently? What's the
+                    +--------+--------+  market doing?
                              |
               +--------------+--------------+
               |              |              |
      +--------v---+  +------v------+  +----v--------+
-     | Guardrails |  | Claude      |  | Autonomy    |
-     | (Phase 6)  |  | Reasoning   |  | Governor    |
-     | Pre/post   |  | Engine      |  | (L1-L4)     |
+     | Guardrails |  | Claude AI   |  | Autonomy    |
+     | Safety     |  | "What       |  | Governor    |
+     | checks     |  |  should     |  | "Am I       |
+     | before &   |  |  we do?"    |  |  allowed    |
+     | after AI   |  |             |  |  to do it?" |
      +--------+---+  +------+------+  +----+--------+
               |              |              |
               +--------------+--------------+
                              |
                     +--------v--------+
-                    | Action Executor |  MONITOR_ONLY, EXECUTE_TRADES,
-                    | (order mgmt)   |  CLOSE_POSITION, ADJUST_STOPS
+                    | Action Executor |  Do nothing, place a trade,
+                    |                 |  close a position, adjust stops
                     +--------+--------+
                              |
                     +--------v--------+
-                    |  IBKR Client    |  Orders, quotes, positions
-                    |  (ib_insync)    |  via TWS/Gateway
+                    | Interactive     |  Sends orders, gets quotes,
+                    | Brokers (IBKR)  |  checks positions
                     +-----------------+
 ```
 
+Every 15 minutes during market hours, this pipeline runs. Claude sees your positions, P&L, market conditions, and staged candidates — then decides what action to take. Safety guardrails check Claude's reasoning before and after, and the autonomy governor controls what it's actually allowed to execute.
+
 ### Key Components
 
-- **Daemon** (`src/agentic/daemon.py`): Main event loop with 8-step pipeline
-- **Reasoning Engine** (`src/agentic/reasoning_engine.py`): Claude-powered decision making
-- **Working Memory** (`src/agentic/working_memory.py`): Persistent state across events
-- **Guardrails** (`src/agentic/guardrails/`): Context validation, output validation, execution gates, numerical grounding
-- **Learning Loop** (`src/agentic/learning_loop.py`): Pattern detection, experiments, parameter optimization
-- **Scanner** (`src/services/ibkr_scanner.py`): IBKR market scanner integration
-- **NakedTrader** (`src/nakedtrader/`): Daily put-selling workflow with bracket orders
-- **Dashboard** (`src/agentic/dashboard_api.py`): Flask web UI for monitoring decisions
+| Component | What it does |
+|-----------|-------------|
+| **Daemon** | The main loop — wakes up on events and runs the pipeline above |
+| **Reasoning Engine** | Sends context to Claude and parses the response into an action |
+| **Working Memory** | Keeps track of everything between check-ins (positions, recent decisions, anomalies) |
+| **Guardrails** | Safety checks — validates context before Claude sees it, validates Claude's output, blocks suspicious actions |
+| **Learning Loop** | Analyzes closed trades for patterns, runs experiments, suggests parameter changes |
+| **Scanner** | Finds options that match your criteria using IBKR's market scanner |
+| **Dashboard** | Web UI showing what the AI is thinking and doing |
 
 ### Autonomy Levels
 
-| Level | Behavior |
-|-------|----------|
-| L1 | Monitor only — all actions require human approval |
-| L2 | Can close positions and adjust stops autonomously |
-| L3 | Can execute pre-approved (staged) trades |
-| L4 | Full autonomy within risk limits |
+You control how much independence the system has:
+
+| Level | What it can do |
+|-------|---------------|
+| L1 | Watch only — every action needs your approval |
+| L2 | Can close losing positions and adjust stop losses on its own |
+| L3 | Can execute trades you've already reviewed and approved (staged) |
+| L4 | Full autonomy within risk limits (use with caution) |
+
+### How It Learns
+
+The system imports your trade history from Interactive Brokers and enriches each trade with context — what was VIX doing when you entered? What were the technicals? Then the learning engine looks for statistically significant patterns across hundreds of trades.
+
+When it finds something promising (e.g., "selling puts on Fridays has a 12% higher win rate"), it doesn't just adopt it. It runs an A/B experiment — applying the new rule to a portion of trades while keeping the baseline for the rest. Only after enough data proves the improvement is real (with statistical significance) does it update the strategy.
 
 ## Screenshots
 
 <details>
-<summary><strong>AI Decision Log</strong> — Every 15 minutes, Claude reasons about market conditions and open positions</summary>
+<summary><strong>AI Decision Log</strong> — Every 15 minutes, Claude looks at everything and makes a call</summary>
 <br>
 <img src="docs/images/decisions-log.png" alt="AI Decisions" width="800">
 </details>
 
 <details>
-<summary><strong>Staged Candidates</strong> — Scanned opportunities awaiting human review or auto-execution</summary>
+<summary><strong>Staged Candidates</strong> — Trades the scanner found, waiting for your approval or auto-execution</summary>
 <br>
 <img src="docs/images/staged-candidates.png" alt="Staged Candidates" width="800">
 </details>
 
 <details>
-<summary><strong>Option Scanner</strong> — Configurable scanner with delta, premium, and budget filters</summary>
+<summary><strong>Option Scanner</strong> — Find options to sell, with filters for risk level, premium, and budget</summary>
 <br>
 <img src="docs/images/scanner.png" alt="Option Scanner" width="800">
 </details>
 
 <details>
-<summary><strong>Settings</strong> — Claude model, autonomy levels, and risk parameters</summary>
+<summary><strong>Settings</strong> — Choose your AI model, set autonomy level, and configure risk limits</summary>
 <br>
 <img src="docs/images/settings.png" alt="Settings" width="800">
 </details>
@@ -116,9 +129,9 @@ The system implements a proven strategy: selling short-dated (0-7 DTE) put optio
 - **Python 3.11+**
 - **PostgreSQL 14+** (recommended) or SQLite (for quick testing only)
 - **Interactive Brokers** account with TWS or IB Gateway
-  - Paper trading account recommended for development
-  - API connections enabled (Edit > Global Configuration > API > Settings)
-- **Anthropic API key** for Claude reasoning ([console.anthropic.com](https://console.anthropic.com))
+  - Paper trading account recommended (free, unlimited virtual money)
+  - API connections enabled (in TWS: Edit > Global Configuration > API > Settings)
+- **Anthropic API key** for Claude AI ([console.anthropic.com](https://console.anthropic.com) — costs ~$0.25/day with Sonnet)
 
 ## Installation
 
@@ -138,34 +151,34 @@ pip install -r requirements.txt
 
 ### Database Setup
 
-**PostgreSQL (recommended for production/paper trading):**
+**PostgreSQL (recommended):**
 
 ```bash
 # Create the database
 createdb trading_agent
 
-# Initialize schema and run migrations
+# Initialize tables and run migrations
 python scripts/setup_database.py
 alembic upgrade head
 ```
 
-The system uses PostgreSQL schemas (`import`, `enrichment`, `analysis`) for the Trade Archaeology & Alpha Discovery (TAAD) subsystem, and pgvector for semantic decision search. These are created automatically on first run.
+PostgreSQL is recommended because the system uses it for concurrent access (daemon + dashboard + CLI all running at once), separate schemas for trade history analysis, and vector search to find similar past decisions.
 
 **SQLite (quick start / testing only):**
 
 ```bash
-# Set DATABASE_URL in .env to use SQLite instead
+# Just set this in your .env and it'll use a local file instead
 DATABASE_URL=sqlite:///data/databases/trades.db
 
 python scripts/setup_database.py
 alembic upgrade head
 ```
 
-SQLite works for basic testing but lacks PostgreSQL-specific features (schemas, pgvector similarity search, concurrent connections).
+SQLite works for trying things out but doesn't support some features (vector search, concurrent connections, separate schemas).
 
 ### Environment Variables
 
-Copy the template and fill in your credentials:
+Copy the template and fill in your details:
 
 ```bash
 cp .env.example .env
@@ -192,57 +205,59 @@ PAPER_TRADING=true
 LOG_LEVEL=INFO
 ```
 
-See `.env.example` for the full list of configuration options including risk limits, position sizing, market data settings, and more.
+See `.env.example` for the full list of options including risk limits, position sizing, and market data settings.
 
 ## Usage
 
 ### Start the Daemon
 
 ```bash
-# Start the autonomous trading daemon
+# Start the trading daemon (also starts the web dashboard)
 python -m src.cli.main daemon start
 
-# Check daemon status
+# Check if it's running
 python -m src.cli.main daemon status
 
-# Stop the daemon
+# Stop it
 python -m src.cli.main daemon stop
 ```
+
+Once started, the daemon will:
+- Emit a `MARKET_OPEN` event when markets open
+- Check in with Claude every 15 minutes during market hours
+- Run end-of-day sync and reconciliation at market close
+- Idle overnight and on weekends
 
 ### Manual Trading Commands
 
 ```bash
-# Scan for opportunities
+# Scan for options to sell
 python -m src.cli.main scanner run
 
-# Sell a naked put (dry run)
+# Sell a naked put (dry run — shows what it would do)
 python -m src.cli.main nakedtrader sell XSP --dry-run
 
-# Sell a naked put (paper trading)
+# Sell a naked put (actually places the order in paper trading)
 python -m src.cli.main nakedtrader sell XSP --live --yes
 
-# Monitor open positions
+# Watch your open positions
 python -m src.cli.main nakedtrader sell-watch
 
 # View trade history
 python -m src.cli.main nakedtrader sell-status
 
-# Analyze performance
+# Ask Claude to analyze your performance
 python -m src.cli.main analyze --ai
 ```
 
 ### Dashboard
 
-```bash
-# Start the web dashboard (default: http://localhost:5100)
-python -m src.cli.main daemon start  # Dashboard starts with daemon
-```
+The web dashboard starts automatically with the daemon at `http://localhost:5100`. It shows:
 
-The dashboard shows:
-- Recent AI decisions with full reasoning
-- Open positions and P&L
-- Event history and system health
-- Staged candidates awaiting execution
+- What the AI decided and why (full reasoning for every check-in)
+- Your open positions with live P&L
+- Staged candidates waiting for approval
+- System health and event history
 
 ## Development
 
@@ -255,10 +270,10 @@ pytest
 # Unit tests only
 pytest tests/unit
 
-# With coverage
+# With coverage report
 pytest --cov=src --cov-report=html
 
-# Specific test file
+# A specific test file
 pytest tests/unit/test_pattern_detector.py -v
 ```
 
@@ -278,26 +293,26 @@ mypy src/
 ### Project Structure
 
 ```
-trading_agent/
+TAAD/
 ├── src/
-│   ├── agentic/          # Daemon, reasoning, memory, guardrails
-│   ├── cli/              # Command-line interface (Typer)
-│   ├── config/           # Configuration management
-│   ├── data/             # Database models, repositories, migrations
-│   ├── execution/        # Order lifecycle management
-│   ├── learning/         # Pattern detection, experiments, optimization
+│   ├── agentic/          # The brain — daemon, AI reasoning, memory, guardrails
+│   ├── cli/              # Command-line interface
+│   ├── config/           # Settings and configuration
+│   ├── data/             # Database models and migrations
+│   ├── execution/        # Order placement and position management
+│   ├── learning/         # Pattern detection, A/B experiments, optimization
 │   ├── nakedtrader/      # Daily put-selling workflow
-│   ├── services/         # Market conditions, scanners, reconciliation
-│   ├── strategies/       # Strategy definitions
-│   ├── tools/            # IBKR client, screener, options finder
-│   └── web/              # Flask dashboard
+│   ├── services/         # Market data, scanners, reconciliation
+│   ├── strategies/       # Trading strategy definitions
+│   ├── tools/            # IBKR client wrapper, screener, options finder
+│   └── web/              # Dashboard web UI
 ├── tests/
 │   ├── unit/             # ~1800+ unit tests
-│   ├── integration/      # IBKR and DB integration tests
-│   └── e2e/              # End-to-end workflow tests
+│   ├── integration/      # Tests that talk to IBKR and the database
+│   └── e2e/              # Full workflow tests
 ├── config/               # YAML configuration files
-├── scripts/              # Database setup, data import utilities
-└── docs/                 # Architecture and design documentation
+├── scripts/              # Database setup and utility scripts
+└── docs/                 # Documentation, architecture, screenshots
 ```
 
 ## Tech Stack
@@ -305,24 +320,32 @@ trading_agent/
 | Category | Technology |
 |----------|-----------|
 | Language | Python 3.11+ |
-| Broker API | ib_insync (Interactive Brokers) |
-| AI Reasoning | Anthropic Claude (Sonnet) |
+| Broker | ib_insync (Interactive Brokers API) |
+| AI | Anthropic Claude (Sonnet by default) |
 | Database | PostgreSQL 14+ (recommended) / SQLite (testing) |
-| ORM | SQLAlchemy 2.0 + Alembic migrations |
-| CLI | Typer + Rich |
-| Web UI | Flask |
-| ML/Stats | scikit-learn, scipy |
+| ORM | SQLAlchemy 2.0 + Alembic for migrations |
+| CLI | Typer + Rich (for nice terminal output) |
+| Dashboard | Flask |
+| Statistics | scikit-learn, scipy (for pattern detection and A/B tests) |
 | Testing | pytest (1800+ tests) |
 | Code Quality | Black, Ruff, MyPy |
 
 ## Configuration
 
-The system is configured via `config/phase5.yaml` for daemon behavior and `config/daily_spx_options.yaml` for strategy parameters. Key settings:
+The system is configured via two YAML files:
 
-- **Autonomy level** (L1-L4): Controls what the daemon can do without human approval
-- **Claude model**: Which Claude model to use for reasoning (default: Sonnet)
-- **Risk limits**: Max margin utilization, position limits, daily loss caps
-- **Scheduling**: Event check intervals, market hours
+- **`config/phase5.yaml`** — Daemon behavior: autonomy level, which Claude model to use, how often to check in, cost caps
+- **`config/daily_spx_options.yaml`** — Strategy parameters: what delta to target, minimum premium, max days to expiration, position sizing
+
+Key settings you'll want to adjust:
+
+| Setting | What it controls | Default |
+|---------|-----------------|---------|
+| Autonomy level | How much the AI can do without asking you | L1 (watch only) |
+| Claude model | Which AI model to use (Sonnet = cheap, Opus = smart) | Sonnet |
+| Margin budget | What % of your margin the scanner can use | 20% |
+| Max positions | Maximum number of open trades | 10 |
+| Daily cost cap | Maximum daily spend on Claude API calls | $10 |
 
 ## Contributing
 
@@ -331,13 +354,13 @@ This project is under very active development. If you're interested in contribut
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/your-feature`)
 3. Write tests for your changes
-4. Ensure all tests pass (`pytest`)
+4. Make sure all tests pass (`pytest`)
 5. Run code quality checks (`black`, `ruff`, `mypy`)
 6. Submit a pull request
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
