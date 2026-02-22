@@ -22,6 +22,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from src.agentic.action_executor import ActionExecutor
@@ -40,7 +41,7 @@ from src.agentic.reasoning_engine import ClaudeReasoningEngine, DecisionOutput
 from src.agentic.working_memory import ReasoningContext, WorkingMemory
 from src.config.base import IBKRConfig, get_config
 from src.data.database import get_db_session, init_database
-from src.data.models import DaemonEvent, DecisionAudit, ScanOpportunity
+from src.data.models import DaemonEvent, DecisionAudit, GuardrailMetric, ScanOpportunity, Trade
 from src.services.market_calendar import MarketCalendar
 from src.tools.ibkr_client import IBKRClient
 
@@ -266,6 +267,8 @@ class TAADDaemon:
         # Run sync + reconcile on market close (before Claude reasoning)
         if event_type == "MARKET_CLOSE":
             await self._run_eod_sync(db)
+            self._calibrate_closed_trades(db)
+            self._persist_guardrail_metrics(db)
 
         try:
             # Step 1: Assemble context
@@ -591,6 +594,199 @@ class TAADDaemon:
             )
         db.commit()
         logger.info(f"EOD auto-unstage: expired {len(stale)} remaining staged candidates")
+
+    def _calibrate_closed_trades(self, db: Session) -> int:
+        """Feed today's closed trades into the confidence calibrator.
+
+        Queries trades closed today that have ai_confidence set.
+        Records: confidence=trade.ai_confidence, was_correct=(profit_loss > 0).
+
+        Args:
+            db: Database session
+
+        Returns:
+            Number of outcomes recorded
+        """
+        today = date.today()
+        closed_today = (
+            db.query(Trade)
+            .filter(
+                sa_func.date(Trade.exit_date) == today,
+                Trade.ai_confidence.isnot(None),
+                Trade.profit_loss.isnot(None),
+            )
+            .all()
+        )
+
+        count = 0
+        for trade in closed_today:
+            was_correct = trade.profit_loss > 0
+            self.confidence_calibrator.record_outcome(trade.ai_confidence, was_correct)
+            count += 1
+
+        if count:
+            cal = self.confidence_calibrator.compute_calibration()
+            logger.info(
+                f"Calibration: recorded {count} outcomes, "
+                f"error={cal['calibration_error']:.3f}"
+            )
+        return count
+
+    def _persist_guardrail_metrics(self, db: Session) -> None:
+        """Persist today's guardrail metrics to the GuardrailMetric table.
+
+        Writes three types of metric rows:
+        - "calibration" rows (one per confidence bucket)
+        - "entropy" row (reasoning diversity metrics)
+        - "daily_audit" row (block/warning/decision counts)
+
+        Idempotent: deletes any existing rows for today before writing.
+
+        Args:
+            db: Database session
+        """
+        today = date.today()
+
+        # Delete existing rows for today (idempotent on restart)
+        db.query(GuardrailMetric).filter(
+            GuardrailMetric.metric_date == today
+        ).delete()
+        db.flush()
+
+        # --- Calibration buckets ---
+        cal = self.confidence_calibrator.compute_calibration()
+        for bucket in cal.get("buckets", []):
+            db.add(GuardrailMetric(
+                metric_date=today,
+                metric_type="calibration",
+                confidence_bucket=bucket["range"],
+                predicted_accuracy=bucket["predicted_accuracy"],
+                actual_accuracy=bucket["actual_accuracy"],
+                sample_size=bucket["sample_size"],
+                calibration_error=bucket["calibration_error"],
+            ))
+
+        # --- Entropy metrics ---
+        similarity_scores = self.entropy_monitor.compute_similarity_scores()
+        avg_similarity = (
+            sum(similarity_scores) / len(similarity_scores)
+            if similarity_scores else 0.0
+        )
+        unique_ratio = self.entropy_monitor.compute_unique_factors_ratio()
+
+        # Average reasoning length
+        reasoning_lengths = [
+            len(r) for r in self.entropy_monitor._reasoning_history
+        ]
+        avg_reasoning_len = (
+            sum(reasoning_lengths) / len(reasoning_lengths)
+            if reasoning_lengths else 0.0
+        )
+
+        db.add(GuardrailMetric(
+            metric_date=today,
+            metric_type="entropy",
+            avg_reasoning_length=round(avg_reasoning_len, 1),
+            unique_key_factors_ratio=round(unique_ratio, 3),
+            reasoning_similarity_score=round(avg_similarity, 3),
+        ))
+
+        # --- Daily audit summary ---
+        decisions_today = (
+            db.query(DecisionAudit)
+            .filter(sa_func.date(DecisionAudit.timestamp) == today)
+            .all()
+        )
+
+        total_decisions = len(decisions_today)
+        blocks = 0
+        warnings = 0
+        symbols_flagged = set()
+        numbers_flagged = 0
+
+        for d in decisions_today:
+            flags = d.guardrail_flags or []
+            for flag in flags:
+                if not flag.get("passed", True):
+                    severity = flag.get("severity", "info")
+                    if severity == "block":
+                        blocks += 1
+                    elif severity == "warning":
+                        warnings += 1
+
+                    guard_name = flag.get("guard_name", "")
+                    if "symbol" in guard_name.lower():
+                        symbols_flagged.add(flag.get("reason", ""))
+                    if "numerical" in guard_name.lower() or "number" in guard_name.lower():
+                        numbers_flagged += 1
+
+        db.add(GuardrailMetric(
+            metric_date=today,
+            metric_type="daily_audit",
+            total_decisions=total_decisions,
+            guardrail_blocks=blocks,
+            guardrail_warnings=warnings,
+            symbols_flagged=len(symbols_flagged),
+            numbers_flagged=numbers_flagged,
+            calibration_error=cal.get("calibration_error", 0.0),
+            sample_size=cal.get("sample_size", 0),
+        ))
+
+        db.commit()
+
+        # Log the daily report
+        self._log_guardrail_daily_report(
+            total_decisions=total_decisions,
+            blocks=blocks,
+            warnings=warnings,
+            calibration=cal,
+            avg_similarity=avg_similarity,
+            unique_ratio=unique_ratio,
+        )
+
+    def _log_guardrail_daily_report(
+        self,
+        total_decisions: int,
+        blocks: int,
+        warnings: int,
+        calibration: dict,
+        avg_similarity: float,
+        unique_ratio: float,
+    ) -> None:
+        """Log a structured daily guardrail summary.
+
+        Args:
+            total_decisions: Number of decisions today
+            blocks: Number of guardrail blocks
+            warnings: Number of guardrail warnings
+            calibration: Calibration dict from compute_calibration()
+            avg_similarity: Average reasoning similarity score
+            unique_ratio: Unique key factors ratio
+        """
+        lines = [
+            "",
+            "=" * 50,
+            "DAILY GUARDRAIL REPORT",
+            "=" * 50,
+            f"  Decisions today:       {total_decisions}",
+            f"  Guardrail blocks:      {blocks}",
+            f"  Guardrail warnings:    {warnings}",
+            f"  Calibration error:     {calibration.get('calibration_error', 0.0):.3f}",
+            f"  Calibration samples:   {calibration.get('sample_size', 0)}",
+            f"  Reasoning similarity:  {avg_similarity:.3f}",
+            f"  Key factor diversity:  {unique_ratio:.3f}",
+        ]
+
+        for bucket in calibration.get("buckets", []):
+            lines.append(
+                f"    Bucket {bucket['range']}: "
+                f"predicted={bucket['predicted_accuracy']:.2f}, "
+                f"actual={bucket['actual_accuracy']:.2f}, "
+                f"n={bucket['sample_size']}"
+            )
+
+        lines.append("=" * 50)
+        logger.info("\n".join(lines))
 
     def _build_execution_context(self, context, event: DaemonEvent) -> dict:
         """Build execution context for autonomy gate evaluation.

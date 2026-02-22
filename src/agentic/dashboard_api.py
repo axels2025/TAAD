@@ -78,6 +78,16 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         """HTML config editor page."""
         return get_config_html()
 
+    # Include guardrails router
+    from src.agentic.guardrails_api import create_guardrails_router, get_guardrails_html
+
+    app.include_router(create_guardrails_router(verify_token))
+
+    @app.get("/guardrails", response_class=HTMLResponse)
+    def guardrails_page():
+        """HTML guardrails review page."""
+        return get_guardrails_html()
+
     @app.get("/api/status")
     def get_status(token: None = Depends(verify_token)):
         """Get daemon status with live process check."""
@@ -731,6 +741,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="display:flex;align-items:center;gap:16px;">
     <a href="/scanner" class="btn btn-control" style="text-decoration:none;">Option Scanner</a>
     <a href="/config" class="btn btn-control" style="text-decoration:none;">Settings</a>
+    <a href="/guardrails" class="btn btn-control" style="text-decoration:none;">Guardrails</a>
     <div class="controls" id="controls">
       <button class="btn btn-approve" onclick="apiCall('/api/start')" id="btn-start">Start Daemon</button>
       <button class="btn btn-reject" onclick="apiCall('/api/stop')" id="btn-stop">Stop Daemon</button>
@@ -1218,6 +1229,7 @@ _DECISION_DETAIL_HTML = """<!DOCTYPE html>
   <div style="display:flex;align-items:center;gap:12px;">
     <button class="btn" id="tz-toggle" onclick="toggleTimezone()" style="padding:2px 8px;font-size:10px;min-width:50px;background:var(--bg3);color:var(--text-dim);border:1px solid var(--border);border-radius:4px;cursor:pointer;">ET</button>
     <a href="/" class="back-link">Back to Dashboard</a>
+    <a href="/guardrails" class="back-link" style="margin-right:8px;">Guardrails</a>
   </div>
 </div>
 
