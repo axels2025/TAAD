@@ -1,0 +1,30 @@
+[Unit]
+Description=TAAD - The Autonomous Agentic Trading Daemon
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=axel
+WorkingDirectory=/Users/axel/projects/trading/trading_agent
+Environment=PATH=/Users/axel/projects/trading/trading_agent/venv/bin:/usr/local/bin:/usr/bin
+EnvironmentFile=/Users/axel/projects/trading/trading_agent/.env
+ExecStart=/Users/axel/projects/trading/trading_agent/venv/bin/nakedtrader daemon start --fg
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60
+
+# Logging
+StandardOutput=append:/Users/axel/projects/trading/trading_agent/logs/daemon.log
+StandardError=append:/Users/axel/projects/trading/trading_agent/logs/daemon-error.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/Users/axel/projects/trading/trading_agent/data
+ReadWritePaths=/Users/axel/projects/trading/trading_agent/logs
+ReadWritePaths=/Users/axel/projects/trading/trading_agent/run
+
+[Install]
+WantedBy=multi-user.target

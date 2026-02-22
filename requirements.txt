@@ -1,0 +1,32 @@
+# Trading & Market Data
+ib_insync==0.9.86
+pandas==2.2.0
+numpy==1.26.4
+yfinance>=0.2.30
+# AI & Machine Learning
+anthropic==0.76.0
+scikit-learn==1.4.0
+scipy==1.12.0
+# Database
+sqlalchemy==2.0.25
+alembic==1.13.1
+psycopg2-binary==2.9.9  # PostgreSQL adapter
+# Utilities
+python-dotenv==1.0.0
+pydantic==2.12.5
+pydantic-settings==2.1.0
+loguru==0.7.2
+typer>=0.21.1
+rich==13.7.0
+httpx==0.26.0  # For Barchart API requests
+playwright>=1.40.0  # Browser automation for Barchart web scraping
+flask==3.0.0  # Web interface for manual trade entry
+ntplib==0.4.0  # NTP clock synchronization (FINRA compliance)
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
+pytest-asyncio==0.21.1
+# Code Quality
+black==23.12.1
+ruff==0.1.9
+mypy==1.8.0

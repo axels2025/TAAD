@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}Manual Trades List{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px;">
+    <h2 style="color: #333;">Recent Manual Trades</h2>
+    <a href="{{ url_for('add_trade') }}" class="btn btn-primary" style="text-decoration: none;">
+        ➕ Add New Trade
+    </a>
+</div>
+
+{% if trades %}
+    <div style="background: #e3f2fd; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;">
+        <strong>{{ trades|length }}</strong> pending manual trades
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Symbol</th>
+                <th>Type</th>
+                <th>Strike</th>
+                <th>Expiration</th>
+                <th>Premium</th>
+                <th>Delta</th>
+                <th>Status</th>
+                <th>Notes</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for trade in trades %}
+            <tr>
+                <td>
+                    <strong style="color: #667eea;">{{ trade.symbol }}</strong>
+                </td>
+                <td>
+                    <span class="badge badge-{{ trade.option_type.lower() }}">
+                        {{ trade.option_type }}
+                    </span>
+                </td>
+                <td>${{ "%.2f"|format(trade.strike) }}</td>
+                <td>{{ trade.expiration.strftime('%Y-%m-%d') }}</td>
+                <td>
+                    {% if trade.premium %}
+                        ${{ "%.2f"|format(trade.premium) }}
+                    {% else %}
+                        <span style="color: #999;">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if trade.delta %}
+                        {{ "%.2f"|format(trade.delta) }}
+                    {% else %}
+                        <span style="color: #999;">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <span class="badge badge-pending">
+                        {{ trade.validation_status }}
+                    </span>
+                </td>
+                <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    {% if trade.entry_notes %}
+                        <span style="color: #666; font-size: 13px;">{{ trade.entry_notes }}</span>
+                    {% else %}
+                        <span style="color: #999;">—</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div style="margin-top: 30px; padding: 16px; background: #f8f9fa; border-radius: 6px;">
+        <p style="margin: 0; color: #666; font-size: 14px;">
+            💡 <strong>Tip:</strong> These manual trades will be imported when you run the <code>trade</code> command.
+            They will be validated with IBKR real-time data before execution.
+        </p>
+    </div>
+
+{% else %}
+    <div class="empty-state">
+        <svg fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm0 4a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1V8zm11-1a1 1 0 00-1 1v6a1 1 0 001 1h2a1 1 0 001-1V8a1 1 0 00-1-1h-2z" clip-rule="evenodd" />
+        </svg>
+        <h3 style="margin-bottom: 10px; color: #999;">No manual trades yet</h3>
+        <p style="color: #999; margin-bottom: 30px;">Add your first trade to get started</p>
+        <a href="{{ url_for('add_trade') }}" class="btn btn-primary" style="text-decoration: none;">
+            ➕ Add Your First Trade
+        </a>
+    </div>
+{% endif %}
+{% endblock %}

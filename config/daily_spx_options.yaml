@@ -1,0 +1,38 @@
+# Daily SPX Options Trading Configuration
+# Based on WealthyOption / BigERN mechanical strategy
+# Reference: docs/research/spx-options-trading-rulebook-2026-02-17.md
+
+instrument:
+  default_symbol: XSP            # SPX, XSP, or SPY
+  contracts: 1                    # Default contracts per trade
+  max_contracts: 10               # Safety cap
+
+strike:
+  delta_min: 0.05                 # Minimum absolute delta
+  delta_max: 0.12                 # Maximum absolute delta
+  delta_target: 0.065             # Ideal target delta (6.5)
+
+dte:
+  min: 1                          # Minimum DTE (never 0 DTE)
+  max: 4                          # Maximum DTE
+  prefer_shortest: true           # Pick closest expiration first
+
+premium:
+  min: 0.30                       # Minimum premium to accept ($)
+
+exit:
+  profit_target_pct: 0.70         # Close at 70% profit
+  profit_target_floor: 0.10       # BTC price floor ($0.10 minimum)
+  stop_loss_enabled: false        # No stop-loss by default (per rulebook Rule 7)
+  stop_loss_multiplier: 3.0       # If enabled: stop at Nx premium
+
+execution:
+  wait_for_open: true             # Wait for 9:30 ET
+  open_delay_seconds: 60          # Settle time after open
+  order_type: LMT                 # LMT or MKT for sell order
+  fill_timeout_seconds: 300       # Max wait for parent fill
+  latest_entry_time: "15:00"      # No new entries after 3 PM ET
+
+watch:
+  interval_seconds: 120           # Refresh interval for nt-watch
+  show_greeks: true               # Show Greeks in watch output

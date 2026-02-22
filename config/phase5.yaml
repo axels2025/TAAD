@@ -1,0 +1,71 @@
+# Phase 5: Continuous Agentic Trading Daemon Configuration
+# ========================================================
+# All values have safe defaults. Override as needed.
+
+autonomy:
+  initial_level: 1               # L1 = Recommend only
+  promotion_clean_days: 5        # Consecutive clean days before promotion
+  promotion_min_trades: 10       # Min trades at current level before promotion
+  promotion_min_win_rate: 0.60   # Min win rate for promotion
+  demotion_loss_streak: 3        # Consecutive losses trigger demotion
+  max_level: 2                   # Safety cap (1-4). Start at 2 for paper trading.
+
+claude:
+  reasoning_model: "claude-sonnet-4-5-20250929"
+  reflection_model: "claude-sonnet-4-5-20250929"
+  embedding_model: "text-embedding-3-small"
+  max_tokens: 4096
+  temperature: 0.2
+  daily_cost_cap_usd: 10.00      # Hard cap - no Claude calls after this
+  max_retries: 3
+
+daemon:
+  client_id: 10                  # IBKR client ID (avoids conflicts with CLI=1, watch=2/4, sell=5)
+  heartbeat_interval_seconds: 60
+  event_poll_interval_seconds: 5
+  max_events_per_cycle: 10
+  pid_file: "run/taad.pid"
+  graceful_shutdown_timeout_seconds: 30
+
+alerts:
+  log_all: true
+  email_medium_and_above: true
+  webhook_high_and_above: true
+
+dashboard:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8080
+  auth_token: ""                 # Set via DASHBOARD_AUTH_TOKEN env var
+
+learning:
+  eod_reflection_time: "16:30"   # 4:30 PM ET
+  min_trades_for_experiment: 10
+  max_concurrent_experiments: 3
+
+# Phase 6: Hallucination Guardrails
+guardrails:
+  enabled: true                      # Global toggle
+  # Output validation (post-Claude)
+  action_plausibility_enabled: true
+  symbol_crossref_enabled: true
+  reasoning_coherence_enabled: true
+  # Input validation (pre-Claude)
+  data_freshness_enabled: true
+  consistency_check_enabled: true
+  null_sanitization_enabled: true
+  # Numerical grounding
+  numerical_grounding_enabled: true
+  numerical_tolerance_pct: 0.10      # 10% tolerance for numerical comparisons
+  numerical_max_mismatches_before_block: 2
+  # Execution gate
+  execution_gate_enabled: true
+  vix_movement_block_pct: 15.0       # Block if VIX moves >15% since context
+  spy_movement_block_pct: 2.0        # Block if SPY moves >2% since context
+  max_orders_per_minute: 5
+  # Post-decision monitoring
+  confidence_calibration_enabled: true
+  reasoning_entropy_enabled: true
+  calibration_error_threshold: 0.15
+  reasoning_similarity_threshold: 0.80
+  reasoning_stagnation_count: 5

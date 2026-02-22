@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow_file_create": true,
+    "allow_file_edit": true,
+    "allow_bash": true,
+    "allow_mcp": true
+  }
+}

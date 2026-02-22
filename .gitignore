@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Environment
+.env
+.env.*
+*.bak
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data
+data/databases/*.db
+data/cache/
+data/
+*.csv
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IBKR SDK artifacts
+IBJts/
+META-INF/
+
+# Runtime
+run/
+
+# OS
+.DS_Store
+Thumbs.db
+log

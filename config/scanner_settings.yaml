@@ -1,0 +1,20 @@
+filters:
+  delta_min: 0.05
+  delta_max: 0.3
+  delta_target: 0.065
+  min_premium: 0.3
+  min_otm_pct: 0.1
+  max_dte: 7
+  dte_prefer_shortest: true
+ranking:
+  safety: 40
+  liquidity: 30
+  ai_score: 20
+  efficiency: 10
+budget:
+  margin_budget_pct: 0.2
+  max_positions: 10
+  max_per_sector: 5
+  price_threshold: 90.0
+  max_contracts_expensive: 3
+  max_contracts_cheap: 5
