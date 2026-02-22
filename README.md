@@ -214,55 +214,51 @@ See `.env.example` for the full list of options including risk limits, position 
 
 ## Usage
 
-### Start the Daemon
+### 1. Start IBKR
+
+Launch Trader Workstation (TWS) or IB Gateway and log into your paper trading account. The daemon needs this connection to get market data and place orders.
+
+### 2. Start the Daemon
 
 ```bash
-# Start the trading daemon (also starts the web dashboard)
 nakedtrader daemon start
-
-# Check if it's running
-nakedtrader daemon status
-
-# Stop it
-nakedtrader daemon stop
 ```
 
-Once started, the daemon will:
-- Emit a `MARKET_OPEN` event when markets open
+This starts two things:
+- **The daemon** — runs in the background, monitoring markets and making decisions
+- **The dashboard** — a web UI at `http://localhost:5100`
+
+The daemon will:
 - Check in with Claude every 15 minutes during market hours
+- Scan for opportunities and stage them for your review
+- Manage open positions (adjust stops, close at profit targets)
 - Run end-of-day sync and reconciliation at market close
 - Idle overnight and on weekends
 
-### Manual Trading Commands
+### 3. Use the Dashboard
+
+Open `http://localhost:5100` in your browser. From here you can:
+
+- **Review AI decisions** — see what Claude decided and why, with full reasoning
+- **Scan for trades** — run the option scanner and configure filters
+- **Approve or reject** staged candidates
+- **Monitor positions** — see open trades with live P&L
+- **Adjust settings** — change autonomy level, Claude model, risk limits
+
+The dashboard is your main interface for interacting with the system. You don't need to use the command line once the daemon is running.
+
+### Other Commands
 
 ```bash
-# Scan for options to sell
-nakedtrader scanner run
+# Check if the daemon is running
+nakedtrader daemon status
 
-# Sell a naked put (dry run — shows what it would do)
-nakedtrader nakedtrader sell XSP --dry-run
+# Stop the daemon
+nakedtrader daemon stop
 
-# Sell a naked put (actually places the order in paper trading)
-nakedtrader nakedtrader sell XSP --live --yes
-
-# Watch your open positions
-nakedtrader nakedtrader sell-watch
-
-# View trade history
-nakedtrader nakedtrader sell-status
-
-# Ask Claude to analyze your performance
-nakedtrader analyze --ai
+# Ask Claude to analyze your trading performance
+nakedtrader analyse --ai
 ```
-
-### Dashboard
-
-The web dashboard starts automatically with the daemon at `http://localhost:5100`. It shows:
-
-- What the AI decided and why (full reasoning for every check-in)
-- Your open positions with live P&L
-- Staged candidates waiting for approval
-- System health and event history
 
 ## Development
 
