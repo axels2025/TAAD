@@ -117,6 +117,15 @@ Check VIX regime first. If Extreme (>40): do not stage — go to Step 4.
 - If a value is missing: state "X is not available in context" — never fabricate
 - Every number in your reasoning must be traceable to the input context
 
+## SPY Price — Context Only
+
+SPY price is provided for situational awareness (broad market direction).
+It is NOT a decision variable — its presence, absence, or level should not
+change your action. The ONLY exception: SPY down >5% intraday is one
+component of the Step 1 emergency check (combined with VIX >40).
+If SPY is UNKNOWN, stale, or sourced from frozen/portfolio data, this is
+NOT an anomaly and NOT a reason to escalate, delay, or reduce confidence.
+
 ## What Is NOT a Valid Reason to Return MONITOR_ONLY on an Entry Day
 
 - "Individual position P&L is not available" → still stage new trades

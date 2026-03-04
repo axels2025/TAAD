@@ -106,6 +106,40 @@ This document tracks future improvements, enhancements, and technical debt for t
 
 ---
 
+#### SPY as a Structured Decision Signal
+**Status:** Planned
+**Date Added:** 2026-03-05
+**Effort:** Medium (1-2 days)
+**Value:** Replace raw SPY price with meaningful market-direction signals for Claude
+
+**Problem Solved:**
+- SPY price is currently passed as a raw number with no interpretive framework
+- Claude has no baseline to judge "is SPY down a lot?" without intraday % change or trend context
+- After hours, frozen SPY price is stale but looks identical to live data
+- The Step 1 emergency check ("SPY down >5%") requires intraday change calculation that doesn't exist yet
+
+**Proposed Signals:**
+- **SPY intraday % change:** Compute from session open price vs current (enables the >5% emergency threshold)
+- **SPY vs 200-day SMA:** Soft caution flag when SPY is below 200-day SMA (broad bear market indicator)
+- **SPY vs 50-day SMA:** Shorter-term trend context (bullish/bearish momentum)
+- **SPY intraday >2% drop:** Escalation signal — not emergency, but prompts Claude to review open positions
+
+**Implementation:**
+1. Add historical SPY data source (daily OHLC — ThetaData, Yahoo Finance, or IBKR historical bars)
+2. Compute SMA(50) and SMA(200) at session start, cache for the day
+3. Track session open SPY price in working memory (like `session_open_vix`)
+4. Compute intraday % change on each enrichment cycle
+5. Pass structured signals to Claude: `spy_intraday_pct`, `spy_vs_200sma`, `spy_trend`
+6. Update system prompt to use structured signals instead of raw price
+
+**Prerequisites:**
+- Historical SPY data feed (daily bars, ~1 year minimum for 200-day SMA)
+- Phase 6 Market Regime Detection would benefit from this same infrastructure
+
+**Current Mitigation:** System prompt explicitly tells Claude that SPY is context-only and its absence is not an anomaly.
+
+---
+
 ### 🔵 LOW PRIORITY
 
 #### Tax Reporting Automation
