@@ -28,6 +28,9 @@ data/cache/
 data/
 *.csv
 logs/
+Voices
+Voices/
+docs/DAEMON_GUIDE.docx
 
 # Testing
 .pytest_cache/
