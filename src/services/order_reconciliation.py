@@ -27,6 +27,7 @@ from src.services.assignment_detector import AssignmentEvent
 from src.tools.ibkr_client import IBKRClient
 from src.utils.calc import calc_pnl, calc_pnl_pct
 from src.utils.position_key import (
+    canonical_position_key,
     generate_trade_id,
     position_key_from_contract,
     position_key_from_trade,
@@ -662,10 +663,13 @@ class OrderReconciliation:
                     order_id=suffix_id, suffix=suffix_str,
                 )
 
-                # Check for duplicate trade_id before inserting
-                if self.trade_repo.get_by_id(trade_id):
+                # Check for duplicate by canonical key (catches all suffix variants)
+                canonical_key = canonical_position_key(symbol, strike, expiration, option_type)
+                existing = self.trade_repo.get_by_canonical_key(canonical_key)
+                if existing:
                     logger.info(
-                        f"Skipping duplicate orphan: {trade_id} already in DB"
+                        f"Skipping duplicate orphan order: {trade_id} — "
+                        f"already tracked as {existing.trade_id}"
                     )
                     continue
 
@@ -1263,9 +1267,11 @@ class OrderReconciliation:
                     logger.warning(f"Could not fetch stock price for {symbol}: {e}")
                     otm_pct = None
 
-                # Generate unique trade_id — check for duplicates
+                # Generate trade_id — check for duplicates by canonical key
+                # (catches existing trades regardless of suffix: _3279, _imported, etc.)
+                canonical_key = canonical_position_key(symbol, strike, expiration_str, option_type)
                 trade_id = generate_trade_id(symbol, strike, expiration_str, option_type, suffix="imported")
-                existing = self.trade_repo.get_by_id(trade_id)
+                existing = self.trade_repo.get_by_canonical_key(canonical_key)
                 if existing:
                     if dry_run:
                         logger.info(
