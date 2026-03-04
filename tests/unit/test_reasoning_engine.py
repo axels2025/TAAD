@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.agentic.reasoning_engine import (
+    SCHEDULED_CHECK_ACTIONS,
     VALID_ACTIONS,
     ClaudeReasoningEngine,
     CostTracker,
@@ -296,18 +297,21 @@ class TestCostTrackerRecord:
 class TestReasonClaude:
     """ClaudeReasoningEngine.reason() calls Claude and returns DecisionOutput."""
 
-    def test_reason_returns_decision_output(
+    def test_reason_returns_decision_output_list(
         self, db_session, sample_context, valid_claude_response
     ):
-        """reason() calls the reasoning agent and returns a DecisionOutput."""
+        """reason() calls the reasoning agent and returns a list of DecisionOutput."""
         mock_reasoning = MagicMock()
         mock_reasoning.send_message.return_value = valid_claude_response
         mock_reasoning.estimate_cost.return_value = 0.018
 
         engine = _make_engine(db_session, reasoning_agent=mock_reasoning)
 
-        result = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
+        results = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
 
+        assert isinstance(results, list)
+        assert len(results) == 1
+        result = results[0]
         assert isinstance(result, DecisionOutput)
         assert result.action == "MONITOR_ONLY"
         assert result.confidence == pytest.approx(0.85)
@@ -370,12 +374,13 @@ class TestReasonCostCapFallback:
         mock_reasoning = MagicMock()
         engine = _make_engine(db_session, reasoning_agent=mock_reasoning)
 
-        result = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
+        results = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
 
-        assert result.action == "MONITOR_ONLY"
-        assert result.confidence == 1.0
-        assert "cost cap" in result.reasoning.lower()
-        assert "cost_cap_exceeded" in result.key_factors
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+        assert results[0].confidence == 1.0
+        assert "cost cap" in results[0].reasoning.lower()
+        assert "cost_cap_exceeded" in results[0].key_factors
         # Claude should NOT have been called
         mock_reasoning.send_message.assert_not_called()
 
@@ -389,12 +394,13 @@ class TestReasonClaudeFailureFallback:
         mock_reasoning.send_message.side_effect = RuntimeError("API error")
 
         engine = _make_engine(db_session, reasoning_agent=mock_reasoning)
-        result = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
+        results = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
 
-        assert result.action == "MONITOR_ONLY"
-        assert result.confidence == 1.0
-        assert "failed" in result.reasoning.lower()
-        assert "reasoning_failure" in result.key_factors
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+        assert results[0].confidence == 1.0
+        assert "failed" in results[0].reasoning.lower()
+        assert "reasoning_failure" in results[0].key_factors
 
     def test_retries_once_then_falls_back(self, db_session, sample_context):
         """Claude is called twice (initial + 1 retry) before falling back."""
@@ -418,10 +424,11 @@ class TestReasonClaudeFailureFallback:
         mock_reasoning.estimate_cost.return_value = 0.01
 
         engine = _make_engine(db_session, reasoning_agent=mock_reasoning)
-        result = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
+        results = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
 
-        assert result.action == "MONITOR_ONLY"
-        assert "reasoning_failure" in result.key_factors
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+        assert "reasoning_failure" in results[0].key_factors
 
     def test_recovers_on_second_attempt(self, db_session, sample_context):
         """If first attempt fails but second succeeds, returns the second result."""
@@ -449,10 +456,11 @@ class TestReasonClaudeFailureFallback:
         mock_reasoning.estimate_cost.return_value = 0.018
 
         engine = _make_engine(db_session, reasoning_agent=mock_reasoning)
-        result = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
+        results = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
 
-        assert result.action == "EXECUTE_TRADES"
-        assert result.confidence == pytest.approx(0.90)
+        assert len(results) == 1
+        assert results[0].action == "EXECUTE_TRADES"
+        assert results[0].confidence == pytest.approx(0.90)
 
 
 # ===========================================================================
@@ -461,10 +469,10 @@ class TestReasonClaudeFailureFallback:
 
 
 class TestParseResponseValidJSON:
-    """_parse_response() handles valid JSON."""
+    """_parse_response() handles valid JSON (legacy single-action format)."""
 
     def test_parses_valid_json(self, db_session):
-        """Parses a well-formed JSON string into DecisionOutput."""
+        """Parses a well-formed JSON string into list of DecisionOutput."""
         engine = _make_engine(db_session)
 
         content = json.dumps(
@@ -478,9 +486,10 @@ class TestParseResponseValidJSON:
             }
         )
 
-        result = engine._parse_response(content)
+        results = engine._parse_response(content)
 
-        assert result is not None
+        assert len(results) == 1
+        result = results[0]
         assert result.action == "STAGE_CANDIDATES"
         assert result.confidence == pytest.approx(0.75)
         assert result.reasoning == "Sunday screening time"
@@ -493,9 +502,10 @@ class TestParseResponseValidJSON:
         engine = _make_engine(db_session)
         content = json.dumps({"action": "MONITOR_ONLY"})
 
-        result = engine._parse_response(content)
+        results = engine._parse_response(content)
 
-        assert result is not None
+        assert len(results) == 1
+        result = results[0]
         assert result.action == "MONITOR_ONLY"
         assert result.confidence == pytest.approx(0.5)  # default
         assert result.reasoning == ""
@@ -508,16 +518,16 @@ class TestParseResponseValidJSON:
         engine = _make_engine(db_session)
         content = json.dumps({"action": "MONITOR_ONLY", "confidence": 1.5})
 
-        result = engine._parse_response(content)
-        assert result.confidence == pytest.approx(1.0)
+        results = engine._parse_response(content)
+        assert results[0].confidence == pytest.approx(1.0)
 
     def test_clamps_confidence_below_zero(self, db_session):
         """Confidence below 0.0 is clamped to 0.0."""
         engine = _make_engine(db_session)
         content = json.dumps({"action": "MONITOR_ONLY", "confidence": -0.3})
 
-        result = engine._parse_response(content)
-        assert result.confidence == pytest.approx(0.0)
+        results = engine._parse_response(content)
+        assert results[0].confidence == pytest.approx(0.0)
 
     def test_parses_all_valid_actions(self, db_session):
         """Every action in VALID_ACTIONS is accepted."""
@@ -525,9 +535,9 @@ class TestParseResponseValidJSON:
 
         for action in VALID_ACTIONS:
             content = json.dumps({"action": action, "confidence": 0.7, "reasoning": f"Testing {action}"})
-            result = engine._parse_response(content)
-            assert result is not None
-            assert result.action == action
+            results = engine._parse_response(content)
+            assert len(results) == 1
+            assert results[0].action == action
 
 
 class TestParseResponseMarkdownCodeBlocks:
@@ -546,11 +556,11 @@ class TestParseResponseMarkdownCodeBlocks:
         )
         content = f"Here is my analysis:\n```json\n{inner_json}\n```\nEnd of response."
 
-        result = engine._parse_response(content)
+        results = engine._parse_response(content)
 
-        assert result is not None
-        assert result.action == "EXECUTE_TRADES"
-        assert result.confidence == pytest.approx(0.92)
+        assert len(results) == 1
+        assert results[0].action == "EXECUTE_TRADES"
+        assert results[0].confidence == pytest.approx(0.92)
 
     def test_parses_generic_code_block(self, db_session):
         """Extracts JSON from plain ``` ... ``` code block."""
@@ -558,47 +568,47 @@ class TestParseResponseMarkdownCodeBlocks:
 
         inner_json = json.dumps(
             {
-                "action": "CLOSE_POSITION",
+                "action": "CLOSE_ALL_POSITIONS",
                 "confidence": 0.80,
-                "reasoning": "Stop loss triggered",
-                "metadata": {"position_id": "POS-123"},
+                "reasoning": "Market crash in progress",
+                "metadata": {"reason": "VIX spike above 50"},
             }
         )
         content = f"```\n{inner_json}\n```"
 
-        result = engine._parse_response(content)
+        results = engine._parse_response(content)
 
-        assert result is not None
-        assert result.action == "CLOSE_POSITION"
-        assert result.metadata == {"position_id": "POS-123"}
+        assert len(results) == 1
+        assert results[0].action == "CLOSE_ALL_POSITIONS"
+        assert results[0].metadata == {"reason": "VIX spike above 50"}
 
 
 class TestParseResponseInvalidJSON:
-    """_parse_response() handles invalid JSON (returns None)."""
+    """_parse_response() handles invalid JSON (returns empty list)."""
 
-    def test_returns_none_for_plain_text(self, db_session):
-        """Returns None when content is plain text."""
+    def test_returns_empty_for_plain_text(self, db_session):
+        """Returns empty list when content is plain text."""
         engine = _make_engine(db_session)
         result = engine._parse_response("I think we should monitor the market.")
-        assert result is None
+        assert result == []
 
-    def test_returns_none_for_truncated_json(self, db_session):
-        """Returns None when JSON is truncated."""
+    def test_returns_empty_for_truncated_json(self, db_session):
+        """Returns empty list when JSON is truncated."""
         engine = _make_engine(db_session)
         result = engine._parse_response('{"action": "MONITOR_ONLY", "confidence":')
-        assert result is None
+        assert result == []
 
-    def test_returns_none_for_empty_string(self, db_session):
-        """Returns None for empty string."""
+    def test_returns_empty_for_empty_string(self, db_session):
+        """Returns empty list for empty string."""
         engine = _make_engine(db_session)
         result = engine._parse_response("")
-        assert result is None
+        assert result == []
 
-    def test_returns_none_for_empty_code_block(self, db_session):
-        """Returns None when code block contains non-JSON text."""
+    def test_returns_empty_for_empty_code_block(self, db_session):
+        """Returns empty list when code block contains non-JSON text."""
         engine = _make_engine(db_session)
         result = engine._parse_response("```\nNot JSON at all\n```")
-        assert result is None
+        assert result == []
 
 
 class TestParseResponseInvalidAction:
@@ -616,11 +626,11 @@ class TestParseResponseInvalidAction:
             }
         )
 
-        result = engine._parse_response(content)
+        results = engine._parse_response(content)
 
-        assert result is not None
-        assert result.action == "MONITOR_ONLY"
-        assert result.confidence == pytest.approx(0.95)
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+        assert results[0].confidence == pytest.approx(0.95)
 
     def test_defaults_to_monitor_only_for_missing_action(self, db_session):
         """Missing action key defaults to MONITOR_ONLY."""
@@ -633,10 +643,10 @@ class TestParseResponseInvalidAction:
             }
         )
 
-        result = engine._parse_response(content)
+        results = engine._parse_response(content)
 
-        assert result is not None
-        assert result.action == "MONITOR_ONLY"
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
 
     def test_defaults_to_monitor_only_for_empty_action(self, db_session):
         """Empty-string action defaults to MONITOR_ONLY."""
@@ -650,10 +660,10 @@ class TestParseResponseInvalidAction:
             }
         )
 
-        result = engine._parse_response(content)
+        results = engine._parse_response(content)
 
-        assert result is not None
-        assert result.action == "MONITOR_ONLY"
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
 
 
 # ===========================================================================
@@ -840,13 +850,401 @@ class TestValidActions:
             "MONITOR_ONLY",
             "STAGE_CANDIDATES",
             "EXECUTE_TRADES",
-            "CLOSE_POSITION",
+            "CLOSE_ALL_POSITIONS",
             "ADJUST_PARAMETERS",
             "RUN_EXPERIMENT",
             "REQUEST_HUMAN_REVIEW",
-            "EMERGENCY_STOP",
         }
         assert VALID_ACTIONS == expected
+        assert "CLOSE_POSITION" not in VALID_ACTIONS
+        assert "EMERGENCY_STOP" not in VALID_ACTIONS
 
     def test_valid_actions_is_a_set(self):
         assert isinstance(VALID_ACTIONS, set)
+
+    def test_scheduled_check_actions_equals_valid_actions(self):
+        """SCHEDULED_CHECK_ACTIONS now equals VALID_ACTIONS."""
+        assert SCHEDULED_CHECK_ACTIONS == VALID_ACTIONS
+
+    def test_close_all_positions_accepted_by_parser(self, db_session):
+        """CLOSE_ALL_POSITIONS is accepted by _parse_response."""
+        engine = _make_engine(db_session)
+        content = json.dumps({
+            "action": "CLOSE_ALL_POSITIONS",
+            "confidence": 0.95,
+            "reasoning": "VIX spike, market crash",
+            "metadata": {"reason": "VIX 52"},
+        })
+        results = engine._parse_response(content, valid_actions=VALID_ACTIONS)
+        assert len(results) == 1
+        assert results[0].action == "CLOSE_ALL_POSITIONS"
+
+    def test_close_position_rejected_by_scheduled_check(self, db_session):
+        """CLOSE_POSITION rejected to MONITOR_ONLY when valid_actions=SCHEDULED_CHECK_ACTIONS."""
+        engine = _make_engine(db_session)
+        content = json.dumps({
+            "action": "CLOSE_POSITION",
+            "confidence": 0.85,
+            "reasoning": "Take profits",
+            "metadata": {"trade_id": "T-123"},
+        })
+        results = engine._parse_response(content, valid_actions=SCHEDULED_CHECK_ACTIONS)
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+
+    def test_emergency_stop_rejected_by_valid_actions(self, db_session):
+        """EMERGENCY_STOP rejected to MONITOR_ONLY when valid_actions=VALID_ACTIONS."""
+        engine = _make_engine(db_session)
+        content = json.dumps({
+            "action": "EMERGENCY_STOP",
+            "confidence": 0.99,
+            "reasoning": "Halt everything",
+        })
+        results = engine._parse_response(content, valid_actions=VALID_ACTIONS)
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+
+
+# ===========================================================================
+# Multi-Action Plan Parsing Tests
+# ===========================================================================
+
+
+class TestParseResponseMultiAction:
+    """_parse_response() handles the multi-action {"actions": [...]} format."""
+
+    def test_parses_multi_action_plan(self, db_session):
+        """Parses a plan with multiple actions into a list of DecisionOutput."""
+        engine = _make_engine(db_session)
+
+        content = json.dumps({
+            "assessment": "Monday 10:00 ET. VIX=18.2, SPY=$542.",
+            "actions": [
+                {
+                    "action": "CLOSE_ALL_POSITIONS",
+                    "confidence": 0.85,
+                    "reasoning": "Emergency market crash",
+                    "key_factors": ["vix_spike"],
+                    "risks_considered": ["fill_quality"],
+                    "metadata": {"reason": "VIX above 50"},
+                },
+                {
+                    "action": "STAGE_CANDIDATES",
+                    "confidence": 0.78,
+                    "reasoning": "Monday entry day, no staged candidates",
+                    "key_factors": ["monday_entry_day"],
+                    "risks_considered": ["volatility"],
+                    "metadata": {},
+                },
+            ],
+        })
+
+        results = engine._parse_response(content)
+
+        assert len(results) == 2
+        assert results[0].action == "CLOSE_ALL_POSITIONS"
+        assert results[0].confidence == pytest.approx(0.85)
+        assert results[0].metadata["reason"] == "VIX above 50"
+        assert results[1].action == "STAGE_CANDIDATES"
+        assert results[1].confidence == pytest.approx(0.78)
+
+    def test_assessment_attached_to_first_action(self, db_session):
+        """The plan assessment is stored in first action's metadata."""
+        engine = _make_engine(db_session)
+
+        content = json.dumps({
+            "assessment": "Portfolio overview text",
+            "actions": [
+                {
+                    "action": "MONITOR_ONLY",
+                    "confidence": 0.90,
+                    "reasoning": "All stable",
+                },
+            ],
+        })
+
+        results = engine._parse_response(content)
+
+        assert len(results) == 1
+        assert results[0].metadata["_plan_assessment"] == "Portfolio overview text"
+
+    def test_empty_actions_fallback(self, db_session):
+        """Empty actions array falls back to MONITOR_ONLY."""
+        engine = _make_engine(db_session)
+
+        content = json.dumps({
+            "assessment": "Nothing to do",
+            "actions": [],
+        })
+
+        results = engine._parse_response(content)
+
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+        assert "No valid actions" in results[0].reasoning
+
+    def test_invalid_actions_filtered(self, db_session):
+        """Actions with invalid action names are replaced with MONITOR_ONLY."""
+        engine = _make_engine(db_session)
+
+        content = json.dumps({
+            "assessment": "Test",
+            "actions": [
+                {"action": "INVALID_ACTION", "confidence": 0.5, "reasoning": "bad"},
+                {"action": "STAGE_CANDIDATES", "confidence": 0.8, "reasoning": "good"},
+            ],
+        })
+
+        results = engine._parse_response(content)
+
+        assert len(results) == 2
+        assert results[0].action == "MONITOR_ONLY"  # Replaced
+        assert results[1].action == "STAGE_CANDIDATES"
+
+    def test_three_action_plan(self, db_session):
+        """Three-action plan: CLOSE_ALL_POSITIONS + ADJUST_PARAMETERS + STAGE_CANDIDATES."""
+        engine = _make_engine(db_session)
+
+        content = json.dumps({
+            "assessment": "3 open positions, Monday entry day",
+            "actions": [
+                {
+                    "action": "CLOSE_ALL_POSITIONS",
+                    "confidence": 0.90,
+                    "reasoning": "Market crash",
+                    "metadata": {"reason": "VIX above 50"},
+                },
+                {
+                    "action": "ADJUST_PARAMETERS",
+                    "confidence": 0.75,
+                    "reasoning": "Widen OTM targets",
+                    "metadata": {"parameter": "otm_pct"},
+                },
+                {
+                    "action": "STAGE_CANDIDATES",
+                    "confidence": 0.80,
+                    "reasoning": "Monday, no candidates",
+                    "metadata": {},
+                },
+            ],
+        })
+
+        results = engine._parse_response(content)
+
+        assert len(results) == 3
+        assert results[0].action == "CLOSE_ALL_POSITIONS"
+        assert results[0].metadata["reason"] == "VIX above 50"
+        assert results[1].action == "ADJUST_PARAMETERS"
+        assert results[1].metadata["parameter"] == "otm_pct"
+        assert results[2].action == "STAGE_CANDIDATES"
+
+    def test_position_exit_check_uses_legacy_format(self, db_session):
+        """POSITION_EXIT_CHECK events use single-action format — still works."""
+        engine = _make_engine(db_session)
+
+        from src.agentic.reasoning_engine import POSITION_EXIT_ACTIONS
+
+        content = json.dumps({
+            "action": "CLOSE_POSITION",
+            "confidence": 0.85,
+            "reasoning": "NVDA 800.0P at +72%",
+            "metadata": {"trade_id": "T-123"},
+        })
+
+        results = engine._parse_response(content, valid_actions=POSITION_EXIT_ACTIONS)
+
+        assert len(results) == 1
+        assert results[0].action == "CLOSE_POSITION"
+
+    def test_multi_action_with_markdown_code_block(self, db_session):
+        """Multi-action plan inside a ```json code block."""
+        engine = _make_engine(db_session)
+
+        inner = json.dumps({
+            "assessment": "Test",
+            "actions": [
+                {"action": "MONITOR_ONLY", "confidence": 0.9, "reasoning": "ok"},
+            ],
+        })
+        content = f"Analysis:\n```json\n{inner}\n```"
+
+        results = engine._parse_response(content)
+
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+
+
+class TestMultiActionReason:
+    """reason() returns list[DecisionOutput] with multi-action responses."""
+
+    def test_reason_returns_multi_action_plan(self, db_session, sample_context):
+        """reason() returns multiple decisions from a multi-action Claude response."""
+        multi_response = {
+            "content": json.dumps({
+                "assessment": "Monday assessment",
+                "actions": [
+                    {
+                        "action": "ADJUST_PARAMETERS",
+                        "confidence": 0.85,
+                        "reasoning": "Tighten delta target",
+                        "metadata": {"param": "delta"},
+                    },
+                    {
+                        "action": "STAGE_CANDIDATES",
+                        "confidence": 0.78,
+                        "reasoning": "Monday entry day",
+                        "metadata": {},
+                    },
+                ],
+            }),
+            "input_tokens": 1500,
+            "output_tokens": 300,
+            "model": "claude-opus-4-6",
+        }
+
+        mock_reasoning = MagicMock()
+        mock_reasoning.send_message.return_value = multi_response
+        mock_reasoning.estimate_cost.return_value = 0.025
+
+        engine = _make_engine(db_session, reasoning_agent=mock_reasoning)
+        results = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
+
+        assert len(results) == 2
+        assert results[0].action == "ADJUST_PARAMETERS"
+        assert results[0].metadata["param"] == "delta"
+        # Assessment should be attached to first action
+        assert results[0].metadata.get("_plan_assessment") == "Monday assessment"
+        assert results[1].action == "STAGE_CANDIDATES"
+
+    def test_scheduled_check_rejects_close_position(self, db_session, sample_context):
+        """CLOSE_POSITION during SCHEDULED_CHECK is filtered to MONITOR_ONLY."""
+        multi_response = {
+            "content": json.dumps({
+                "assessment": "Position at +72% profit",
+                "actions": [
+                    {
+                        "action": "CLOSE_POSITION",
+                        "confidence": 0.85,
+                        "reasoning": "Take profits on NVDA",
+                        "metadata": {"trade_id": "T-1"},
+                    },
+                    {
+                        "action": "STAGE_CANDIDATES",
+                        "confidence": 0.78,
+                        "reasoning": "Monday entry day",
+                        "metadata": {},
+                    },
+                ],
+            }),
+            "input_tokens": 1500,
+            "output_tokens": 300,
+            "model": "claude-opus-4-6",
+        }
+
+        mock_reasoning = MagicMock()
+        mock_reasoning.send_message.return_value = multi_response
+        mock_reasoning.estimate_cost.return_value = 0.025
+
+        engine = _make_engine(db_session, reasoning_agent=mock_reasoning)
+        results = engine.reason(sample_context, event_type="SCHEDULED_CHECK")
+
+        assert len(results) == 2
+        # CLOSE_POSITION should be replaced with MONITOR_ONLY
+        assert results[0].action == "MONITOR_ONLY"
+        assert results[1].action == "STAGE_CANDIDATES"
+
+    def test_market_open_rejects_close_position(self, db_session, sample_context):
+        """CLOSE_POSITION during MARKET_OPEN is also filtered to MONITOR_ONLY."""
+        response = {
+            "content": json.dumps({
+                "assessment": "Market open check",
+                "actions": [
+                    {
+                        "action": "CLOSE_POSITION",
+                        "confidence": 0.90,
+                        "reasoning": "Take profits",
+                        "metadata": {"trade_id": "T-2"},
+                    },
+                ],
+            }),
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "model": "claude-opus-4-6",
+        }
+
+        mock_reasoning = MagicMock()
+        mock_reasoning.send_message.return_value = response
+        mock_reasoning.estimate_cost.return_value = 0.018
+
+        engine = _make_engine(db_session, reasoning_agent=mock_reasoning)
+        results = engine.reason(sample_context, event_type="MARKET_OPEN")
+
+        assert len(results) == 1
+        assert results[0].action == "MONITOR_ONLY"
+
+
+class TestDecisionAuditPlanFields:
+    """DecisionAudit model has the new plan_id, plan_assessment, decision_metadata columns."""
+
+    def test_plan_fields_nullable(self, db_session):
+        """plan_id, plan_assessment, decision_metadata default to None."""
+        audit = DecisionAudit(
+            timestamp=datetime.utcnow(),
+            autonomy_level=1,
+            event_type="SCHEDULED_CHECK",
+            action="MONITOR_ONLY",
+            autonomy_approved=True,
+        )
+        db_session.add(audit)
+        db_session.commit()
+
+        loaded = db_session.query(DecisionAudit).get(audit.id)
+        assert loaded.plan_id is None
+        assert loaded.plan_assessment is None
+        assert loaded.decision_metadata is None
+
+    def test_plan_fields_set(self, db_session):
+        """plan_id and plan_assessment are stored and retrieved correctly."""
+        audit = DecisionAudit(
+            timestamp=datetime.utcnow(),
+            autonomy_level=2,
+            event_type="SCHEDULED_CHECK",
+            action="CLOSE_POSITION",
+            autonomy_approved=False,
+            plan_id="abc-123-def",
+            plan_assessment="VIX=18, 3 positions open",
+            decision_metadata={"trade_id": "T-42"},
+        )
+        db_session.add(audit)
+        db_session.commit()
+
+        loaded = db_session.query(DecisionAudit).get(audit.id)
+        assert loaded.plan_id == "abc-123-def"
+        assert loaded.plan_assessment == "VIX=18, 3 positions open"
+        assert loaded.decision_metadata == {"trade_id": "T-42"}
+
+    def test_shared_plan_id_across_actions(self, db_session):
+        """Multiple audits from the same plan share the same plan_id."""
+        plan_id = "shared-plan-001"
+        assessment = "Monday morning assessment"
+
+        for action in ["CLOSE_POSITION", "STAGE_CANDIDATES"]:
+            db_session.add(DecisionAudit(
+                timestamp=datetime.utcnow(),
+                autonomy_level=2,
+                event_type="SCHEDULED_CHECK",
+                action=action,
+                autonomy_approved=False,
+                plan_id=plan_id,
+                plan_assessment=assessment,
+            ))
+        db_session.commit()
+
+        audits = (
+            db_session.query(DecisionAudit)
+            .filter(DecisionAudit.plan_id == plan_id)
+            .all()
+        )
+        assert len(audits) == 2
+        assert all(a.plan_id == plan_id for a in audits)
+        assert all(a.plan_assessment == assessment for a in audits)

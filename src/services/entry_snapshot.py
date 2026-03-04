@@ -8,7 +8,7 @@ Phase 2.6B - Technical Indicators
 Extended to capture 18 additional technical indicator fields for pattern detection.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from loguru import logger
@@ -62,6 +62,7 @@ class EntrySnapshotService:
         strike_selection_method: Optional[str] = None,
         original_strike: Optional[float] = None,
         live_delta_at_selection: Optional[float] = None,
+        scanner_fallback: Optional[dict] = None,
     ) -> TradeEntrySnapshot:
         """Capture complete entry snapshot for a trade.
 
@@ -187,6 +188,31 @@ class EntrySnapshotService:
             self._capture_market_context(snapshot, symbol)
         except Exception as e:
             logger.info(f"Failed to capture market context: {e}")
+
+        # Defensive DTE recalculation: if dte==0 but expiration is in the future,
+        # something went wrong upstream (e.g. StagedOpportunity has no dte field)
+        if snapshot.dte == 0 and snapshot.expiration:
+            try:
+                from src.utils.timezone import market_now
+
+                exp_date = (
+                    snapshot.expiration
+                    if isinstance(snapshot.expiration, date)
+                    else date.fromisoformat(str(snapshot.expiration))
+                )
+                recalc_dte = max(0, (exp_date - market_now().date()).days)
+                if recalc_dte > 0:
+                    logger.debug(
+                        f"DTE recalculated from 0 → {recalc_dte} "
+                        f"(expiration={exp_date})"
+                    )
+                    snapshot.dte = recalc_dte
+            except Exception as e:
+                logger.debug(f"DTE recalculation failed: {e}")
+
+        # Apply scanner fallback for fields that are still None
+        if scanner_fallback:
+            self._apply_scanner_fallback(snapshot, scanner_fallback)
 
         # Calculate derived fields
         self._calculate_derived_fields(snapshot)
@@ -633,6 +659,68 @@ class EntrySnapshotService:
                 "is_opex_week": snapshot.is_opex_week,
             },
         )
+
+    def _apply_scanner_fallback(
+        self,
+        snapshot: TradeEntrySnapshot,
+        fallback: dict,
+    ) -> None:
+        """Fill missing snapshot fields from scanner/staged fallback data.
+
+        Only fills fields that are currently None — live IBKR data always wins.
+        Records which fields were filled and from which source in snapshot.notes.
+
+        Args:
+            snapshot: Snapshot object to fill gaps in
+            fallback: Dict with fallback values (from _build_scanner_fallback)
+        """
+        # Map fallback keys → snapshot attribute names
+        field_map = {
+            "delta": "delta",
+            "iv": "iv",
+            "gamma": "gamma",
+            "theta": "theta",
+            "vega": "vega",
+            "bid": "bid",
+            "ask": "ask",
+            "volume": "option_volume",
+            "open_interest": "open_interest",
+            "dte": "dte",
+            "stock_price": "stock_price",
+        }
+
+        filled_fields = []
+        source = fallback.get("_source", "scanner")
+
+        for fb_key, snap_attr in field_map.items():
+            fb_val = fallback.get(fb_key)
+            if fb_val is None:
+                continue
+
+            current_val = getattr(snapshot, snap_attr, None)
+            # Only fill if current value is None (or 0 for dte when fallback > 0)
+            if current_val is None or (snap_attr == "dte" and current_val == 0 and fb_val > 0):
+                setattr(snapshot, snap_attr, fb_val)
+                filled_fields.append(snap_attr)
+
+        if filled_fields:
+            # Recalculate mid from fallback bid/ask if both were filled
+            if "bid" in filled_fields and "ask" in filled_fields:
+                if snapshot.bid and snapshot.ask:
+                    snapshot.mid = (snapshot.bid + snapshot.ask) / 2
+
+            note = f"Scanner fallback ({source}) filled: {', '.join(filled_fields)}"
+            snapshot.notes = (
+                f"{snapshot.notes}; {note}" if snapshot.notes else note
+            )
+            logger.info(
+                f"Scanner fallback applied for {snapshot.symbol}: "
+                f"{', '.join(filled_fields)} (source={source})"
+            )
+        else:
+            logger.debug(
+                f"Scanner fallback for {snapshot.symbol}: no fields needed filling"
+            )
 
     def save_snapshot(self, snapshot: TradeEntrySnapshot, session: Session) -> None:
         """Save entry snapshot to database.

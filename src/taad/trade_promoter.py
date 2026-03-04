@@ -204,6 +204,7 @@ def _build_trade_from_match(
         dte=dte,
         commission=commission,
         trade_source="ibkr_import",
+        currency=open_imp.currency or "USD",
         account_id=open_imp.account_id,
         ibkr_execution_id=open_imp.ibkr_exec_id,
         enrichment_status="pending",

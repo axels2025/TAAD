@@ -212,6 +212,7 @@ def _persist_execution(
         net_cash=execution.net_cash,
         commission=execution.commission,
         multiplier=execution.multiplier,
+        currency=execution.currency,
         ibkr_exec_id=execution.exec_id,
         ibkr_trade_id=execution.trade_id,
         ibkr_order_id=execution.order_id,

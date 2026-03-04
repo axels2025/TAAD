@@ -20,6 +20,7 @@ class GuardrailConfig(BaseModel):
 
     # Phase 6.2: Input validation
     data_freshness_enabled: bool = True
+    data_freshness_max_age_seconds: int = Field(default=300, ge=30)
     consistency_check_enabled: bool = True
     null_sanitization_enabled: bool = True
 
@@ -33,6 +34,9 @@ class GuardrailConfig(BaseModel):
     vix_movement_block_pct: float = Field(default=15.0, ge=1.0)
     spy_movement_block_pct: float = Field(default=2.0, ge=0.5)
     max_orders_per_minute: int = Field(default=5, ge=1)
+    earnings_block_enabled: bool = True
+    earnings_block_days: int = Field(default=0, ge=0)  # same-day only
+    vix_absolute_block_threshold: float = Field(default=35.0, ge=10.0)
 
     # Phase 6.6: Monitoring
     confidence_calibration_enabled: bool = True

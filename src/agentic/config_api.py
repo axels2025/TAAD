@@ -56,8 +56,10 @@ def create_config_router(verify_token) -> "APIRouter":
     def get_config(token: None = Depends(verify_token)):
         """Return the current Phase 5 configuration."""
         config = load_phase5_config(str(CONFIG_PATH))
+        data = config.model_dump()
+
         return {
-            "config": config.model_dump(),
+            "config": data,
             "models": CLAUDE_MODELS,
             "config_path": str(CONFIG_PATH),
         }
@@ -167,16 +169,18 @@ _CONFIG_HTML = """<!DOCTYPE html>
   .card-body.collapsed { display: none; }
 
   .field-row { display: grid; grid-template-columns: 220px 1fr; gap: 12px; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(42, 74, 107, 0.3); }
+  .field-row.full-width { grid-template-columns: 1fr; }
   .field-row:last-child { border-bottom: none; }
   .field-label { font-size: 12px; color: var(--text-dim); }
   .field-label .field-key { color: var(--text); font-weight: 600; font-size: 11px; display: block; }
   .field-label .field-desc { font-size: 10px; margin-top: 2px; }
 
-  input[type="text"], input[type="number"], select {
+  input[type="text"], input[type="number"], select, textarea {
     background: var(--bg); border: 1px solid var(--border); color: var(--text);
     padding: 6px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; width: 100%; max-width: 300px;
   }
-  input:focus, select:focus { border-color: var(--accent); outline: none; }
+  textarea { max-width: 100%; min-height: 200px; resize: vertical; line-height: 1.5; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); outline: none; }
   select option { background: var(--bg2); color: var(--text); }
 
   input[type="checkbox"] { cursor: pointer; accent-color: var(--accent); width: 16px; height: 16px; }
@@ -250,7 +254,7 @@ function markDirty() {
 const SECTIONS = {
   claude: {
     label: 'Claude AI',
-    desc: 'Model selection and API parameters for the reasoning engine.',
+    desc: 'Model selection and API parameters for the reasoning engine. System prompts are managed on the <a href="/prompts" style="color:var(--accent);">Prompts</a> page.',
     fields: {
       reasoning_model: {desc: 'Primary model for trade decisions', type: 'model'},
       reflection_model: {desc: 'Model for self-reflection pass', type: 'model'},
@@ -271,6 +275,18 @@ const SECTIONS = {
       promotion_min_trades: {desc: 'Min trades before promotion eligible', type: 'number'},
       promotion_min_win_rate: {desc: 'Min win rate for promotion (0-1)', type: 'number', step: 0.05},
       demotion_loss_streak: {desc: 'Consecutive losses triggering demotion', type: 'number'},
+      disabled_triggers: {desc: 'Escalation triggers to disable (unchecked = active)', type: 'triggers',
+        options: [
+          {value: 'first_trade_of_day', label: 'First trade of day'},
+          {value: 'new_symbol', label: 'New symbol'},
+          {value: 'low_confidence', label: 'Low confidence (<0.6)'},
+          {value: 'loss_exceeds_threshold', label: 'Loss exceeds threshold'},
+          {value: 'margin_utilization_high', label: 'Margin utilization >60%'},
+          {value: 'vix_spike', label: 'VIX spike (>30 or +20%)'},
+          {value: 'consecutive_losses', label: 'Consecutive losses'},
+          {value: 'parameter_change', label: 'Parameter change'},
+          {value: 'stale_data', label: 'Stale data (>5 min)'},
+        ]},
     }
   },
   daemon: {
@@ -311,6 +327,15 @@ const SECTIONS = {
       host: {desc: 'Bind address', type: 'text'},
       port: {desc: 'Port number', type: 'number'},
       auth_token: {desc: 'Bearer token (empty = no auth)', type: 'text'},
+    }
+  },
+  exit_rules: {
+    label: 'Exit Rules',
+    desc: 'When to close positions. profit_target: 0.50 = exit at 50% of max profit. stop_loss: -2.00 = stop at 2x premium. time_exit_dte: days before expiry to close (-1 = let expire).',
+    fields: {
+      profit_target: {desc: 'Exit at X% of max profit (0.50 = 50%)', type: 'number', step: 0.05},
+      stop_loss: {desc: 'Stop loss as premium multiple (-2.0 = 2x received)', type: 'number', step: 0.25},
+      time_exit_dte: {desc: 'Close N days before expiry (-1 = let expire)', type: 'number'},
     }
   },
   guardrails: {
@@ -359,7 +384,7 @@ function renderConfig() {
 
   for (const [section, meta] of Object.entries(SECTIONS)) {
     const sectionData = _config[section] || {};
-    const collapsed = ['guardrails', 'dashboard', 'alerts'].includes(section) ? ' collapsed' : '';
+    const collapsed = ['claude', 'guardrails', 'dashboard', 'alerts'].includes(section) ? ' collapsed' : '';
 
     html += `<div class="card">
       <div class="card-header" onclick="toggleSection('${section}')">
@@ -367,12 +392,13 @@ function renderConfig() {
         <span class="toggle" id="toggle-${section}">${collapsed ? 'expand' : 'collapse'}</span>
       </div>
       <div class="card-body${collapsed}" id="section-${section}">
-        <div class="section-desc">${esc(meta.desc)}</div>`;
+        <div class="section-desc">${meta.desc}</div>`;
 
     for (const [key, fieldMeta] of Object.entries(meta.fields)) {
       const value = sectionData[key];
       const inputId = `${section}.${key}`;
-      html += `<div class="field-row">
+      const rowClass = fieldMeta.type === 'textarea' ? 'field-row full-width' : 'field-row';
+      html += `<div class="${rowClass}">
         <div class="field-label">
           <span class="field-key">${esc(key)}</span>
           <span class="field-desc">${esc(fieldMeta.desc)}</span>
@@ -388,6 +414,20 @@ function renderConfig() {
 }
 
 function renderField(id, meta, value) {
+  if (meta.type === 'triggers') {
+    const disabled = Array.isArray(value) ? value : [];
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:6px 16px;">';
+    for (const opt of (meta.options || [])) {
+      const isDisabled = disabled.includes(opt.value);
+      const cbId = id + '.' + opt.value;
+      html += `<div class="checkbox-wrap">
+        <input type="checkbox" id="${esc(cbId)}" data-trigger-group="${esc(id)}" value="${esc(opt.value)}" ${isDisabled ? 'checked' : ''} onchange="markDirty()">
+        <label for="${esc(cbId)}" style="font-size:11px;">${esc(opt.label)}</label>
+      </div>`;
+    }
+    html += '</div><div style="font-size:10px;color:var(--text-dim);margin-top:4px;">Checked = disabled (will NOT escalate)</div>';
+    return html;
+  }
   if (meta.type === 'bool') {
     const checked = value ? 'checked' : '';
     return `<div class="checkbox-wrap">
@@ -411,6 +451,9 @@ function renderField(id, meta, value) {
   if (meta.type === 'number') {
     const step = meta.step || 1;
     return `<input type="number" id="${esc(id)}" value="${value != null ? value : ''}" step="${step}" onchange="markDirty()">`;
+  }
+  if (meta.type === 'textarea') {
+    return `<textarea id="${esc(id)}" rows="12" onchange="markDirty()">${esc(value != null ? value : '')}</textarea>`;
   }
   // Default: text
   return `<input type="text" id="${esc(id)}" value="${esc(value != null ? value : '')}" onchange="markDirty()">`;
@@ -437,10 +480,17 @@ function collectConfig() {
       const el = document.getElementById(id);
       if (!el) continue;
 
-      if (fieldMeta.type === 'bool') {
+      if (fieldMeta.type === 'triggers') {
+        const groupId = `${section}.${key}`;
+        const cbs = document.querySelectorAll(`input[data-trigger-group="${groupId}"]`);
+        config[section][key] = Array.from(cbs).filter(cb => cb.checked).map(cb => cb.value);
+        continue;
+      } else if (fieldMeta.type === 'bool') {
         config[section][key] = el.checked;
       } else if (fieldMeta.type === 'number') {
         config[section][key] = parseFloat(el.value) || 0;
+      } else if (fieldMeta.type === 'textarea') {
+        config[section][key] = el.value;
       } else {
         config[section][key] = el.value;
       }

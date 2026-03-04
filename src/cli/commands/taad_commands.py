@@ -367,6 +367,7 @@ def _display_matched_trades(rows: list, sort_by: str) -> None:
 
         trades.append({
             "symbol": open_imp.underlying_symbol,
+            "currency": getattr(open_imp, "currency", None) or "USD",
             "strike": open_imp.strike,
             "put_call": open_imp.put_call,
             "expiry": open_imp.expiry,
@@ -390,18 +391,20 @@ def _display_matched_trades(rows: list, sort_by: str) -> None:
         trades.sort(key=lambda t: (t["symbol"], t["entry_date"]))
     # default is already date order from the query
 
-    # Summary stats
-    total_gross = sum(t["gross_pnl"] for t in trades)
-    total_net = sum(t["net_pnl"] for t in trades)
-    total_commission = sum(t["commission"] for t in trades)
+    # Summary stats (per-currency)
+    currencies = sorted(set(t["currency"] for t in trades))
     winners = sum(1 for t in trades if t["net_pnl"] > 0)
     losers = sum(1 for t in trades if t["net_pnl"] < 0)
     breakeven = sum(1 for t in trades if t["net_pnl"] == 0)
+
+    # Currency symbol helper
+    _ccy_symbol = {"USD": "$", "AUD": "A$", "EUR": "\u20ac", "GBP": "\u00a3"}
 
     # Build table
     table = Table(title=f"Matched Trade Lifecycles ({len(trades)} trades)")
     table.add_column("Entry Date", style="dim")
     table.add_column("Symbol")
+    table.add_column("CCY", style="dim")
     table.add_column("Strike", justify="right")
     table.add_column("P/C")
     table.add_column("Expiry")
@@ -432,6 +435,7 @@ def _display_matched_trades(rows: list, sort_by: str) -> None:
         table.add_row(
             str(t["entry_date"]),
             t["symbol"],
+            t["currency"],
             f"{t['strike']:.1f}",
             t["put_call"] or "",
             str(t["expiry"]) if t["expiry"] else "",
@@ -460,16 +464,33 @@ def _display_matched_trades(rows: list, sort_by: str) -> None:
     )
     win_rate = winners / len(trades) * 100 if trades else 0
 
-    net_style = "green" if total_net >= 0 else "red"
-    summary = (
-        f"  Total trades:   {len(trades)}\n"
-        f"  Winners:        [green]{winners}[/green]  |  Losers: [red]{losers}[/red]  |  Breakeven: {breakeven}\n"
-        f"  Win rate:       {win_rate:.1f}%\n"
-        f"  Avg days held:  {avg_days:.1f}\n"
-        f"  Gross P&L:      [{net_style}]${total_gross:>+,.2f}[/{net_style}]\n"
-        f"  Commissions:    [red]-${total_commission:,.2f}[/red]\n"
-        f"  Net P&L:        [{net_style}]${total_net:>+,.2f}[/{net_style}]"
-    )
+    summary_lines = [
+        f"  Total trades:   {len(trades)}",
+        f"  Winners:        [green]{winners}[/green]  |  Losers: [red]{losers}[/red]  |  Breakeven: {breakeven}",
+        f"  Win rate:       {win_rate:.1f}%",
+        f"  Avg days held:  {avg_days:.1f}",
+    ]
+
+    # Per-currency P&L breakdown
+    for ccy in currencies:
+        ccy_trades = [t for t in trades if t["currency"] == ccy]
+        ccy_gross = sum(t["gross_pnl"] for t in ccy_trades)
+        ccy_commission = sum(t["commission"] for t in ccy_trades)
+        ccy_net = sum(t["net_pnl"] for t in ccy_trades)
+        cs = _ccy_symbol.get(ccy, ccy)
+        ccy_style = "green" if ccy_net >= 0 else "red"
+        label = f" ({ccy})" if len(currencies) > 1 else ""
+        summary_lines.append(
+            f"  Gross P&L{label}:    [{ccy_style}]{cs}{ccy_gross:>+,.2f}[/{ccy_style}]"
+        )
+        summary_lines.append(
+            f"  Commissions{label}:  [red]-{cs}{ccy_commission:,.2f}[/red]"
+        )
+        summary_lines.append(
+            f"  Net P&L{label}:      [{ccy_style}]{cs}{ccy_net:>+,.2f}[/{ccy_style}]"
+        )
+
+    summary = "\n".join(summary_lines)
     console.print(Panel(summary, title="Summary", border_style="blue"))
 
     # Per-symbol breakdown
@@ -477,6 +498,7 @@ def _display_matched_trades(rows: list, sort_by: str) -> None:
     if len(symbols) > 1:
         sym_table = Table(title="Per-Symbol Breakdown")
         sym_table.add_column("Symbol")
+        sym_table.add_column("CCY", style="dim")
         sym_table.add_column("Trades", justify="right")
         sym_table.add_column("Win Rate", justify="right")
         sym_table.add_column("Gross P&L", justify="right")
@@ -484,6 +506,8 @@ def _display_matched_trades(rows: list, sort_by: str) -> None:
 
         for sym in symbols:
             sym_trades = [t for t in trades if t["symbol"] == sym]
+            sym_ccy = sym_trades[0]["currency"] if sym_trades else "USD"
+            cs = _ccy_symbol.get(sym_ccy, sym_ccy)
             sym_wins = sum(1 for t in sym_trades if t["net_pnl"] > 0)
             sym_gross = sum(t["gross_pnl"] for t in sym_trades)
             sym_net = sum(t["net_pnl"] for t in sym_trades)
@@ -492,10 +516,11 @@ def _display_matched_trades(rows: list, sort_by: str) -> None:
 
             sym_table.add_row(
                 sym,
+                sym_ccy,
                 str(len(sym_trades)),
                 f"{sym_wr:.0f}%",
-                f"[{pnl_style}]{sym_gross:>+,.2f}[/{pnl_style}]",
-                f"[{pnl_style}]{sym_net:>+,.2f}[/{pnl_style}]",
+                f"[{pnl_style}]{cs}{sym_gross:>+,.2f}[/{pnl_style}]",
+                f"[{pnl_style}]{cs}{sym_net:>+,.2f}[/{pnl_style}]",
             )
 
         console.print(sym_table)
@@ -505,7 +530,7 @@ def _add_symbol_subtotal(table: Table, symbol: str, count: int, pnl: float) -> N
     """Add a subtotal row for a symbol group."""
     style = "green" if pnl >= 0 else "red"
     table.add_row(
-        "", "", "", "", "", "", "", "", "",
+        "", "", "", "", "", "", "", "", "", "",
         f"[bold]{symbol}[/bold]",
         f"[bold]({count})[/bold]",
         f"[bold {style}]{pnl:>+,.2f}[/bold {style}]",

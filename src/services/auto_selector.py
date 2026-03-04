@@ -284,6 +284,7 @@ class AutoSelector:
 
         f = self.settings.filters
         candidates = []
+        reject_counts = {"no_delta": 0, "no_bid": 0, "delta_range": 0, "premium": 0, "otm": 0}
 
         for exp in chain_data.get("expirations", []):
             dte = exp.get("dte", 0)
@@ -292,16 +293,21 @@ class AutoSelector:
                 bid = put.get("bid", 0)
                 otm_pct = put.get("otm_pct", 0)
 
-                # Apply filters
+                # Apply filters (track rejection reasons for diagnostics)
                 if delta is None:
+                    reject_counts["no_delta"] += 1
                     continue
                 if bid <= 0:
+                    reject_counts["no_bid"] += 1
                     continue
                 if not (f.delta_min <= delta <= f.delta_max):
+                    reject_counts["delta_range"] += 1
                     continue
                 if bid < f.min_premium:
+                    reject_counts["premium"] += 1
                     continue
                 if otm_pct < f.min_otm_pct:
+                    reject_counts["otm"] += 1
                     continue
 
                 candidates.append(ScannerStrikeCandidate(
@@ -320,6 +326,18 @@ class AutoSelector:
                     open_interest=put.get("open_interest"),
                     otm_pct=otm_pct,
                 ))
+
+        total_rejected = sum(reject_counts.values())
+        if candidates:
+            logger.debug(
+                f"Filter {symbol}: {len(candidates)} passed, "
+                f"{total_rejected} rejected {reject_counts}"
+            )
+        elif total_rejected > 0:
+            logger.info(
+                f"Filter {symbol}: 0 candidates passed out of "
+                f"{total_rejected} puts — rejections: {reject_counts}"
+            )
 
         return candidates
 

@@ -1,6 +1,6 @@
 # Trading System Roadmap
 
-**Last Updated:** 2026-02-21
+**Last Updated:** 2026-02-23
 
 This document tracks future improvements, enhancements, and technical debt for the trading system.
 
@@ -17,108 +17,76 @@ This document tracks future improvements, enhancements, and technical debt for t
 
 ## Current Backlog
 
-### 🔴 CRITICAL
+### 🟡 HIGH PRIORITY
 
-#### Automated Candidate Selection (Auto-Select)
-**Status:** In Progress — Phase 1
-**Date Added:** 2026-02-21
-**Effort:** Large (12-16 days across 5 phases)
-**Value:** Eliminates manual scanning/selection bottleneck; risk-first trade selection
+#### Phase 6: Market Regime Detection
+**Status:** Planned (optional — validate core system first)
+**Date Added:** 2026-02-23
+**Effort:** Large (1-2 weeks)
+**Value:** Adapt strategy parameters to current market conditions automatically
 
 **Problem Solved:**
-- Scanner currently requires manual strike selection per stock and hardcodes `contracts: 1`
-- No budget/margin awareness at scan time — can stage more than account can handle
-- Claude "Ask AI" prompt only sees symbol names, not prices/IV/Greeks/margin
-- No automated way to find the lowest-risk strike that still meets premium threshold
+- System currently uses static parameters regardless of market environment
+- Naked put selling performs differently in high-vol vs low-vol regimes
+- No automatic detection of regime transitions (bull → bear, low VIX → high VIX)
 
-**Automation Levels:**
+**Capabilities:**
+- Classify current market regime (trending up, trending down, ranging, high volatility, crisis)
+- Adjust strategy parameters per regime (OTM%, DTE, position sizing)
+- Detect regime transitions and alert the daemon
+- Historical regime analysis to validate parameter adjustments
 
-| Level | Name | Description |
-|-------|------|-------------|
-| **A** | Assisted | Scanner suggests quantity + highlights best strikes; user clicks each |
-| **B** | Semi-Auto | "Auto-Select Best" button runs full pipeline; user reviews in Tonight's Lineup |
-| **C** | Full Auto | Daemon scans + selects + stages on schedule (e.g., Sunday 6 PM) |
-
-**Phased Implementation:**
-
-| Phase | Name | Key Deliverable |
-|-------|------|-----------------|
-| 1 | Foundation | Settings panel in Scanner, quantity input, budget display |
-| 2 | Smart Strike Selection | Best-strike algorithm per symbol, batch chains, improved Claude prompt |
-| 3 | Auto-Select (Level B) | One-click portfolio building within margin budget |
-| 4 | Full Automation (Level C) | Daemon-driven scheduled scanning + staging |
-| 5 | Learning Integration | Track config vs outcomes, A/B test scoring weights |
-
-**Key Design Decisions:**
-- Risk-first ranking: 40% safety + 30% liquidity + 20% AI + 10% efficiency (configurable)
-- Delta sweet spot: 0.065 (from SPX rulebook), search range 0.05-0.30, configurable
-- Min OTM: 10% (not 5%) for stock naked puts
-- One best strike per symbol: composite-scored including margin requirement
-- Shortest DTE preferred for faster capital turnover
-- Margin budget: 20% of NLV (conservative start, increase as confidence grows)
-- Max 5 underlyings per sector (up from 3)
-- **No IBKR = no trade** — no fallback to estimated margin or default budget
-- **Live data only** — both semi-auto and full-auto scan at market open with live data
-- Margin calculated per-strike during selection (Phase 2), not just portfolio ranking
-- Claude receives margin data to make better qualitative assessments
-- Override button for testing during closed markets (stale data warning)
-
-**References:**
-- Full implementation plan: `docs/AUTOSELECT_IMPLEMENTATION_PLAN.md`
-- SPX rulebook: `docs/research/spx-options-trading-rulebook-2026-02-17.md`
+**Prerequisites:**
+- 3-6 months of paper trading data from Phases 0-5
+- Proven core learning loop (patterns detected, promotions earned)
 
 ---
 
-### 🟡 HIGH PRIORITY
-
-#### Option C: IBKR Flex Queries for Nightly Sync
-**Status:** Logged for future implementation
-**Date Added:** 2026-02-07
-**Effort:** Medium (1-2 days setup + implementation)
-**Value:** Eliminates all execution tracking gaps
+#### Phase 7: Event Risk Analysis
+**Status:** Planned (optional — validate core system first)
+**Date Added:** 2026-02-23
+**Effort:** Large (1-2 weeks)
+**Value:** Avoid holding positions through high-risk events
 
 **Problem Solved:**
-- Captures same-day manual round-trips
-- 100% accurate entry/exit prices (no avgCost estimation)
-- No 24-hour API limitation
-- Official IBKR data as source of truth
+- System doesn't know about upcoming earnings, FOMC, CPI releases
+- Can be caught holding naked puts through binary events
+- No calendar-aware risk adjustment
 
-**Implementation Steps:**
-1. Set up Flex Web Service in IBKR Account Management
-2. Create Trade Confirmation Flex Query template
-3. Generate API token
-4. Implement `src/services/flex_query_sync.py`
-5. Add `reconcile-eod` command using Flex Query
-6. Schedule nightly via cron
+**Capabilities:**
+- Economic calendar integration (FOMC, CPI, NFP, GDP)
+- Earnings date tracking per underlying
+- Pre-event position sizing reduction or exit
+- Post-event opportunity detection (IV crush)
 
-**Dependencies:**
-- ibflex Python library
-- One-time IBKR Account Management setup
-
-**References:**
-- Research: `/docs/research/flex_queries_research_2026-02-07.md`
-- Flex Web Service: https://www.interactivebrokers.com/campus/ibkr-api-page/flex-web-service/
-- ibflex library: https://github.com/csingley/ibflex
+**Prerequisites:**
+- Phase 6 regime detection (events cause regime shifts)
+- Reliable external data source for economic calendar
 
 ---
 
 ### 🟢 MEDIUM PRIORITY
 
-#### Historical Trade Import via Flex Queries
-**Status:** Planned
-**Date Added:** 2026-02-07
-**Effort:** Small (1 day)
-**Value:** One-time backfill capability
+#### Phase 8: Portfolio Optimization
+**Status:** Planned (optional — validate core system first)
+**Date Added:** 2026-02-23
+**Effort:** Large (2-3 weeks)
+**Value:** Optimal capital allocation across positions
 
 **Problem Solved:**
-- Import trades from before system was active
-- Disaster recovery (rebuild database from IBKR)
-- Onboarding with existing trading history
+- Current position sizing is simple (fixed contracts or % of NLV)
+- No correlation-aware allocation (overlapping sector risk)
+- No portfolio-level Greeks management (total delta, gamma, vega exposure)
 
-**Implementation:**
-- New command: `import-historical-trades --start-date 2025-01-01 --end-date 2026-02-07`
-- Uses Activity Flex Query with date range
-- Creates trade records with full execution data
+**Capabilities:**
+- Portfolio-level Greeks tracking and limits
+- Correlation-aware position sizing (reduce allocation when positions are correlated)
+- Kelly criterion or similar optimal sizing
+- Rebalancing recommendations
+
+**Prerequisites:**
+- Phase 6 + 7 for regime and event awareness
+- 6+ months of trading data for correlation analysis
 
 ---
 
@@ -130,7 +98,7 @@ This document tracks future improvements, enhancements, and technical debt for t
 
 **Enhancement:**
 - Add `commission` field to trades table
-- Capture actual commissions from Flex Queries
+- Capture actual commissions from execution data
 - Calculate true net P&L after fees
 - Learning engine: analyze commission impact on profitability
 
@@ -156,6 +124,41 @@ This document tracks future improvements, enhancements, and technical debt for t
 ---
 
 ## Completed Items
+
+#### Autonomous Position Manager: Complete the Daemon Loop
+**Status:** Completed
+**Date Completed:** 2026-02-23
+**Effort:** Large (4 workstreams)
+**Value:** Closes the full autonomy loop — daemon can now scan, execute, monitor, exit, learn, and promote
+
+**What was built:**
+- Wired ExitManager + PositionMonitor into daemon with dashboard-configurable exit rules (`profit_target`, `stop_loss`, `time_exit_dte`)
+- `_monitor_positions()` runs every SCHEDULED_CHECK: reconciles pending exits, evaluates exits, executes closes
+- Expiration handling at MARKET_CLOSE
+- Fixed broken `ActionExecutor._handle_close()` to use injected ExitManager
+- Created `src/agentic/event_detector.py`: VIX spike detection (>15% from session open) + critical position alerts on 5-minute poll
+- Trade outcome feedback loop: immediate per-trade learning, governor win/loss tracking, promotion checks
+- Clean day recording at MARKET_CLOSE for autonomy promotion progress
+- Governor counter persistence (`_save_counters`/`_load_counters`) — promotion progress survives daemon restarts
+- Raised `max_level: 4` for full L1→L4 paper trading validation
+- 31 unit tests covering all workstreams
+
+---
+
+#### Guardrail Monitoring
+**Status:** Completed
+**Date Completed:** 2026-02-22
+**Effort:** Medium (2 days)
+**Value:** Safety layer — hallucination detection, execution gates, calibration monitoring
+
+**What was built:**
+- Output validation (hallucination detection, data freshness checks)
+- Reasoning entropy monitoring
+- Calibration error tracking
+- Daily audit dashboard
+- Execution gates (VIX/SPY movement thresholds, order rate limiting)
+
+---
 
 #### NakedTrader: Daily SPX/XSP/SPY Put Selling
 **Status:** Completed
@@ -184,43 +187,16 @@ This document tracks future improvements, enhancements, and technical debt for t
 **Resolution Date:** 2026-02-07
 **Resolution:** Manual fix applied for 5 affected trades
 **Prevention:** Option A approach (execute-two-tier only, nightly reconcile)
-**Long-term:** Option C (Flex Queries) eliminates root cause
 
 ---
 
 ## Decision Log
 
-### 2026-02-21: Auto-Select — Level B First, Risk-First Scoring
+### 2026-02-23: Phase 6-8 Added as Optional Roadmap Items
 
-**Context:** Need to automate the manual scan → select → stage workflow
+**Context:** Core Phases 0-5 complete. Spec recommends 3-6 months paper trading validation before adding intelligence agents.
 
-**Decisions:**
-- Start with Level B (semi-auto: one-click "Auto-Select Best") before Level C (full daemon automation)
-- Ranking weights: safety 40%, liquidity 30%, AI 20%, efficiency 10% — configurable via settings panel
-- Delta target: 0.065 (from SPX weekly rulebook), search range 0.05-0.30
-- Min OTM: 10% for stock naked puts (XSP/SPX system uses different rules)
-- Per-symbol: pick single best strike using composite score (includes margin)
-- DTE: prefer shortest expiration for faster capital turnover
-- Settings page: collapsible panel inside Scanner page (not a separate tab)
-- Track configuration snapshots per trade for learning engine correlation
-- Margin budget: 20% of NLV (conservative start). No fallback — IBKR required.
-- Max per sector: 5 underlyings (realistic diversification)
-- Both B and C run at market open with live data — better trades than Sunday staging
-- Auto-execute at open (L2+), user reviews results afterward (Australian timezone)
-- Override button for testing pipeline during closed markets
-
-**Rationale:**
-- Risk reduction is more important than premium collected
-- Liquidity ranked above efficiency because "can I exit?" is a risk concern
-- No IBKR fallback because margin calls are worse than missed trades
-- Live data at market open eliminates overnight gap staleness problem
-- Configurable weights enable future A/B testing via learning engine
-- 20% NLV budget is conservative — increase as paper trading proves the system
-
-**Trade-offs Accepted:**
-- Phase 1-3 still requires user to trigger "Auto-Select" manually during market hours
-- Full automation (Level C) deferred until confidence in scoring proven via paper trading
-- No trading when IBKR is offline — accepted as a feature, not a limitation
+**Decision:** Add Phases 6 (Market Regime Detection), 7 (Event Risk Analysis), and 8 (Portfolio Optimization) as planned roadmap items. Prioritize runtime validation of the core system first.
 
 ---
 
@@ -232,13 +208,10 @@ This document tracks future improvements, enhancements, and technical debt for t
 - Fix current data manually
 - Use execute-two-tier for all new positions
 - Run nightly reconcile-positions
-- Log Option C (Flex Queries) for future
 
 **Rationale:**
 - Option A works with current code
 - Minimal complexity
-- Option C deferred until proven need
-- Can implement Option C later without rework
 
 **Trade-offs Accepted:**
 - Cannot do same-day manual round-trips
@@ -248,6 +221,34 @@ This document tracks future improvements, enhancements, and technical debt for t
 ---
 
 ## Ideas / Exploratory
+
+### Daemon-Integrated NakedTrader (XSP Weekly Puts)
+**Status:** Planned — parked until current system is running well
+**Date Added:** 2026-02-23
+**Effort:** Moderate (1 day)
+**Value:** Fully automated mechanical XSP weekly put selling via the daemon
+
+**Problem Solved:**
+- NakedTrader currently requires manual CLI execution (`nakedtrader sell XSP`)
+- No way to run the mechanical SPX/XSP rulebook strategy alongside the AI-assisted stock scanner
+
+**Proposed Approach:**
+- Dashboard checkbox to enable/disable ("NakedTrader Weekly")
+- At MARKET_OPEN, daemon runs NT workflow before the stock auto-scan
+- Calls existing self-contained NT components directly: `get_underlying_price()` → `get_valid_expirations()` → `get_chain_with_greeks()` → `select_strike()` → `place_bracket_order()` → `record_trade()`
+- Purely mechanical — no Claude AI, no autonomy governor (per rulebook Rule 10: "No Timing, No Indicators, No Opinions")
+- Logs to working memory so Claude is aware of the position when reasoning about stock trades
+- Duplicate guard: skip if open NT position already exists
+
+**Config:** New `NakedTraderDaemonConfig` in phase5.yaml with `enabled`, `symbol` (XSP), `contracts` (3), `delay_seconds`, `skip_if_position_open`
+
+**Files to modify:** `config.py`, `daemon.py`, `config_api.py`, `phase5.yaml` (zero changes to `src/nakedtrader/` components)
+
+**Risks:** IBKR client contention (mitigated by sequential execution), margin overlap (mitigated by NT running first), duplicate positions (mitigated by open-position check)
+
+**Plan detail:** Full implementation plan available at `.claude/plans/polymorphic-munching-seahorse.md`
+
+---
 
 ### Adaptive Strike Selection at Market Open
 **Status:** Proposed
@@ -301,11 +302,43 @@ Instead of validate-or-kill on the original strike:
 
 ---
 
-### Market Regime Detection Enhancement
-**Status:** Exploratory idea
-**Date Added:** TBD
+### Automated TWS Startup via IBC (Interactive Brokers Controller)
+**Status:** Planned — investigate separately as part of installation process
+**Date Added:** 2026-03-04
+**Effort:** Medium (1-2 days setup + testing)
+**Value:** Eliminates the "forgot to start TWS" failure mode — fully autonomous startup chain
 
-Improve learning engine with market regime classification (high VIX, low VIX, trending, ranging)
+**Problem Solved:**
+- If TWS is not running when the daemon starts, the entire trading session is lost (March 3 US session: zero trades placed)
+- The daemon's reconnection logic (periodic retry) can recover once TWS is up, but if the user forgets to start TWS altogether, the session is wasted with no recovery
+- Current workflow requires manual TWS startup before or shortly after daemon start
+
+**Proposed Approach:**
+- Use [IBC](https://github.com/IbcAlpha/IBC) (Interactive Brokers Controller) to automate TWS/Gateway startup
+- IBC handles login, 2FA, and keeps TWS running with auto-restart on crash
+- Configure as a launchd service that starts before the daemon (dependency chain: IBC → TWS → daemon)
+- Daemon's periodic reconnection loop handles the timing gap (TWS takes ~30-60s to initialise after IBC starts it)
+
+**Installation Steps (to investigate):**
+1. Install IBC alongside TWS
+2. Configure `config.ini` with login credentials (encrypted) and TWS settings
+3. Create launchd plist for IBC service (start on boot/login)
+4. Ensure daemon's launchd plist depends on IBC service being loaded
+5. Test: reboot → IBC starts TWS → daemon connects automatically
+
+**Guards & Risks:**
+- IBC needs its own credential management (separate from .env)
+- TWS requires a display — may need headless mode (IB Gateway) or keep a GUI session active
+- Must not conflict with user manually opening TWS for interactive use
+- IBC auto-restarts TWS on crash — could mask underlying TWS issues
+- 2FA handling: IBC supports IBKR's 2FA but needs initial setup
+
+**References:**
+- IBC GitHub: https://github.com/IbcAlpha/IBC
+- IBC User Guide: https://github.com/IbcAlpha/IBC/wiki/User-Guide
+- Incident: `docs/LOG_ANALYSIS_2026-03-03_US.md` — full session lost due to TWS not running
+
+---
 
 ### Multi-Account Support
 **Status:** Future consideration

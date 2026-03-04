@@ -115,6 +115,7 @@ class IBKRRawImport(Base):
     net_cash = Column(Float, nullable=True)
     commission = Column(Float, nullable=True)
     multiplier = Column(Integer, nullable=True, default=100)
+    currency = Column(String(10), nullable=True, default="USD")
 
     # IBKR identifiers (for deduplication)
     ibkr_exec_id = Column(String(100), nullable=True, unique=True, index=True)

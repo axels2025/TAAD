@@ -35,11 +35,12 @@ def run_nt(
     delta: float | None = None,
     dte: int | None = None,
     skip_confirm: bool = False,
+    exchange: str | None = None,
 ) -> bool:
     """Execute the NakedTrader daily trade workflow.
 
     Args:
-        symbol: Underlying symbol (SPX, XSP, SPY).
+        symbol: Underlying symbol (SPX, XSP, SPY, XJO, BHP, etc.).
         client: Connected IBKR client.
         console: Rich console for output.
         config_path: Path to YAML config file.
@@ -50,6 +51,7 @@ def run_nt(
         delta: Override target delta.
         dte: Override max DTE.
         skip_confirm: Skip user confirmation.
+        exchange: Override exchange (US or ASX).
 
     Returns:
         True if trade was placed/simulated successfully.
@@ -62,10 +64,12 @@ def run_nt(
         delta=delta,
         dte=dte,
         stop_loss=stop_loss,
+        exchange=exchange,
     )
 
-    console.print(f"[bold]NakedTrader - Daily {symbol} Put Selling[/bold]")
-    console.print(f"[dim]Config: {config_path}[/dim]")
+    profile = config.profile
+    console.print(f"[bold]NakedTrader - {symbol} Put Selling ({profile.code})[/bold]")
+    console.print(f"[dim]Config: {config_path} | Exchange: {profile.code} | Currency: {profile.currency}[/dim]")
     console.print(
         f"[dim]Delta target: {config.strike.delta_target:.3f} "
         f"({config.strike.delta_min:.3f}-{config.strike.delta_max:.3f}), "

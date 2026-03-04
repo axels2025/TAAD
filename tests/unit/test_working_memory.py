@@ -344,14 +344,16 @@ class TestAddAnomaly:
         assert wm.anomalies[0]["description"] == "VIX spike above 30"
 
     def test_add_anomaly_adds_timestamp(self, db_session):
-        """add_anomaly() adds a timestamp field to the anomaly dict."""
+        """add_anomaly() adds a market-timezone timestamp field to the anomaly dict."""
         wm = WorkingMemory(db_session)
         anomaly = {"description": "gap down"}
         wm.add_anomaly(anomaly)
 
         assert "timestamp" in wm.anomalies[0]
-        # Verify it is a valid ISO format timestamp
-        datetime.fromisoformat(wm.anomalies[0]["timestamp"])
+        ts = wm.anomalies[0]["timestamp"]
+        # Market-timezone format: "YYYY-MM-DD HH:MM:SS TZ"
+        assert len(ts) > 10
+        assert "202" in ts  # Contains a year
 
     def test_add_anomaly_caps_at_20(self, db_session):
         """add_anomaly() keeps only the last 20 anomalies."""
@@ -402,12 +404,15 @@ class TestAddReflection:
         assert wm.reflection_reports[0]["summary"] == "Good day, 3 wins out of 4"
 
     def test_add_reflection_adds_timestamp(self, db_session):
-        """add_reflection() adds a timestamp field."""
+        """add_reflection() adds a market-timezone timestamp field."""
         wm = WorkingMemory(db_session)
         wm.add_reflection({"summary": "EOD review"})
 
         assert "timestamp" in wm.reflection_reports[0]
-        datetime.fromisoformat(wm.reflection_reports[0]["timestamp"])
+        ts = wm.reflection_reports[0]["timestamp"]
+        # Market-timezone format: "YYYY-MM-DD HH:MM:SS TZ"
+        assert len(ts) > 10
+        assert "202" in ts  # Contains a year
 
     def test_add_reflection_caps_at_30(self, db_session):
         """add_reflection() keeps only the last 30 reflections."""
@@ -495,6 +500,7 @@ class TestAssembleContext:
             symbol="AAPL",
             strike=180.0,
             expiration=date(2026, 3, 21),
+            option_type="PUT",
             entry_date=datetime(2026, 2, 15),
             entry_premium=1.50,
             contracts=2,
@@ -508,12 +514,40 @@ class TestAssembleContext:
         ctx = wm.assemble_context()
 
         assert len(ctx.open_positions) == 1
-        assert ctx.open_positions[0]["symbol"] == "AAPL"
-        assert ctx.open_positions[0]["strike"] == 180.0
-        assert ctx.open_positions[0]["entry_premium"] == 1.50
-        assert ctx.open_positions[0]["contracts"] == 2
-        assert ctx.open_positions[0]["dte"] == 34
+        pos = ctx.open_positions[0]
+        assert pos["symbol"] == "AAPL"
+        assert pos["strike"] == 180.0
+        assert pos["entry_premium"] == 1.50
+        assert pos["contracts"] == 2
+        assert pos["option_type"] == "PUT"
+        # DTE is computed dynamically: (expiration - today).days
+        from src.utils.timezone import trading_date
+        expected_dte = (date(2026, 3, 21) - trading_date()).days
+        assert pos["dte"] == expected_dte
         assert ctx.positions_summary == "1 open positions"
+
+    def test_assemble_context_call_option_type(self, db_session):
+        """assemble_context() preserves CALL option type from the trade."""
+        trade = Trade(
+            trade_id="call-001",
+            symbol="ALAB",
+            strike=150.0,
+            expiration=date(2026, 3, 13),
+            option_type="CALL",
+            entry_date=datetime(2026, 2, 20),
+            entry_premium=2.00,
+            contracts=1,
+            dte=21,
+            exit_date=None,
+        )
+        db_session.add(trade)
+        db_session.commit()
+
+        wm = WorkingMemory(db_session)
+        ctx = wm.assemble_context()
+
+        assert len(ctx.open_positions) == 1
+        assert ctx.open_positions[0]["option_type"] == "CALL"
 
     def test_assemble_context_excludes_closed_positions(self, db_session):
         """assemble_context() excludes trades that have been closed."""
@@ -665,14 +699,16 @@ class TestReasoningContextToPromptString:
         assert "## Autonomy Level: L1" in result
 
     def test_to_prompt_string_includes_open_positions(self):
-        """to_prompt_string() formats open positions."""
+        """to_prompt_string() formats open positions with option type and DTE."""
         ctx = ReasoningContext(
             autonomy_level=2,
             open_positions=[
                 {
                     "symbol": "AAPL",
                     "strike": 180.0,
+                    "option_type": "PUT",
                     "expiration": "2026-03-21",
+                    "dte": 21,
                     "pnl_pct": "45%",
                 },
             ],
@@ -681,8 +717,30 @@ class TestReasoningContextToPromptString:
 
         assert "## Open Positions (1)" in result
         assert "AAPL" in result
-        assert "180.0" in result
+        assert "180.0P" in result  # PUT shown as "P"
+        assert "DTE=21" in result
         assert "2026-03-21" in result
+
+    def test_to_prompt_string_call_option_shows_c(self):
+        """to_prompt_string() shows 'C' for CALL options, not 'P'."""
+        ctx = ReasoningContext(
+            autonomy_level=1,
+            open_positions=[
+                {
+                    "symbol": "ALAB",
+                    "strike": 150.0,
+                    "option_type": "CALL",
+                    "expiration": "2026-03-13",
+                    "dte": 16,
+                    "pnl_pct": "-772%",
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+
+        assert "150.0C" in result  # CALL shown as "C"
+        assert "150.0P" not in result
+        assert "DTE=16" in result
 
     def test_to_prompt_string_includes_market_context(self):
         """to_prompt_string() formats market context key-value pairs."""
@@ -863,7 +921,7 @@ class TestReasoningContextToPromptString:
             strategy_state={"mode": "aggressive"},
             market_context={"vix": 22.0, "regime": "elevated"},
             open_positions=[
-                {"symbol": "AAPL", "strike": 180.0, "expiration": "2026-03-21", "pnl_pct": "30%"},
+                {"symbol": "AAPL", "strike": 180.0, "option_type": "PUT", "expiration": "2026-03-21", "dte": 21, "pnl_pct": "30%"},
             ],
             recent_decisions=[
                 {"timestamp": "2026-02-18T10:00:00", "action": "sell_put", "confidence": 0.85},
@@ -989,3 +1047,194 @@ class TestRetrieveSimilarContext:
         results = wm.retrieve_similar_context(query_embedding=[0.1] * 1536)
 
         assert results == []
+
+
+# =========================================================================
+# ReasoningContext.to_prompt_string() — enriched candidate display
+# =========================================================================
+
+
+class TestPromptStringEnrichedCandidates:
+    """Tests for price deviation and staleness in to_prompt_string()."""
+
+    def test_staged_candidate_shows_price_deviation(self):
+        """to_prompt_string() shows stock@staged= -> now= with price change."""
+        ctx = ReasoningContext(
+            autonomy_level=2,
+            staged_candidates=[
+                {
+                    "symbol": "AAPL",
+                    "strike": 175.0,
+                    "expiration": "2026-03-07",
+                    "limit_price": 0.85,
+                    "contracts": 2,
+                    "state": "STAGED",
+                    "option_type": "PUT",
+                    "stock_price": 185.20,
+                    "current_stock_price": 179.50,
+                    "price_change_pct": -3.1,
+                    "price_deviation_passed": False,
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+
+        assert "stock@staged=$185.2" in result
+        assert "now=$179.5" in result
+        assert "-3.1%" in result
+
+    def test_staged_candidate_shows_deviation_warning(self):
+        """to_prompt_string() shows !!! when price_deviation_passed is False."""
+        ctx = ReasoningContext(
+            autonomy_level=2,
+            staged_candidates=[
+                {
+                    "symbol": "AAPL",
+                    "strike": 175.0,
+                    "expiration": "2026-03-07",
+                    "limit_price": 0.85,
+                    "contracts": 2,
+                    "state": "STAGED",
+                    "option_type": "PUT",
+                    "stock_price": 185.20,
+                    "current_stock_price": 179.50,
+                    "price_change_pct": -3.1,
+                    "price_deviation_passed": False,
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+        assert "!!!" in result
+
+    def test_staged_candidate_no_warning_when_passed(self):
+        """to_prompt_string() does NOT show !!! when price_deviation_passed is True."""
+        ctx = ReasoningContext(
+            autonomy_level=2,
+            staged_candidates=[
+                {
+                    "symbol": "MSFT",
+                    "strike": 400.0,
+                    "expiration": "2026-03-07",
+                    "limit_price": 1.20,
+                    "contracts": 1,
+                    "state": "READY",
+                    "option_type": "PUT",
+                    "stock_price": 410.0,
+                    "current_stock_price": 408.50,
+                    "price_change_pct": -0.4,
+                    "price_deviation_passed": True,
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+        assert "stock@staged=$410.0" in result
+        assert "now=$408.5" in result
+        assert "!!!" not in result
+
+    def test_staged_candidate_shows_stale_flag(self):
+        """to_prompt_string() shows [STALE: Xh old] when candidate is stale."""
+        ctx = ReasoningContext(
+            autonomy_level=2,
+            staged_candidates=[
+                {
+                    "symbol": "AAPL",
+                    "strike": 175.0,
+                    "expiration": "2026-03-07",
+                    "limit_price": 0.85,
+                    "contracts": 2,
+                    "state": "STAGED",
+                    "option_type": "PUT",
+                    "stock_price": 185.20,
+                    "stale": True,
+                    "hours_since_staged": 5.2,
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+        assert "[STALE: 5.2h old]" in result
+
+    def test_staged_candidate_no_stale_flag_when_fresh(self):
+        """to_prompt_string() does not show [STALE:] when stale is False."""
+        ctx = ReasoningContext(
+            autonomy_level=2,
+            staged_candidates=[
+                {
+                    "symbol": "AAPL",
+                    "strike": 175.0,
+                    "expiration": "2026-03-07",
+                    "limit_price": 0.85,
+                    "contracts": 2,
+                    "state": "STAGED",
+                    "option_type": "PUT",
+                    "stock_price": 185.20,
+                    "stale": False,
+                    "hours_since_staged": 0.5,
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+        assert "[STALE:" not in result
+
+
+# =========================================================================
+# ReasoningContext.to_prompt_string() — enriched decision display
+# =========================================================================
+
+
+class TestPromptStringEnrichedDecisions:
+    """Tests for execution result and fill counts in to_prompt_string()."""
+
+    def test_recent_decision_shows_execution_result(self):
+        """to_prompt_string() shows -> executed=True: 'message' for decisions."""
+        ctx = ReasoningContext(
+            autonomy_level=2,
+            recent_decisions=[
+                {
+                    "timestamp": "09:31:15",
+                    "action": "EXECUTE_TRADES",
+                    "confidence": 0.85,
+                    "executed": True,
+                    "result": "3 orders placed",
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+        assert "-> executed=True" in result
+        assert '3 orders placed' in result
+
+    def test_recent_decision_shows_fill_counts(self):
+        """to_prompt_string() shows [N filled, M failed] for EXECUTE_TRADES."""
+        ctx = ReasoningContext(
+            autonomy_level=2,
+            recent_decisions=[
+                {
+                    "timestamp": "09:31:15",
+                    "action": "EXECUTE_TRADES",
+                    "confidence": 0.85,
+                    "executed": True,
+                    "result": "Execution complete",
+                    "filled_count": 3,
+                    "failed_count": 0,
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+        assert "[3 filled, 0 failed]" in result
+
+    def test_recent_decision_no_fill_counts_for_other_actions(self):
+        """to_prompt_string() does not show fill counts for non-execute actions."""
+        ctx = ReasoningContext(
+            autonomy_level=2,
+            recent_decisions=[
+                {
+                    "timestamp": "09:30:00",
+                    "action": "STAGE_CANDIDATES",
+                    "confidence": 0.90,
+                    "executed": True,
+                    "result": "Staged 3 candidates",
+                },
+            ],
+        )
+        result = ctx.to_prompt_string()
+        assert "filled" not in result
+        assert "-> executed=True" in result

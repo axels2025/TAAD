@@ -60,12 +60,28 @@ class BudgetSettings(BaseModel):
     max_contracts_cheap: int = Field(default=5, ge=1)
 
 
+class EarningsFilterSettings(BaseModel):
+    """Earnings detection and optional filter adjustment.
+
+    Earnings are always detected for every symbol.  When ``enabled`` is
+    True the scanner adds ``additional_otm_pct`` to the base min OTM %
+    for symbols with earnings within the option's DTE.  When ``enabled``
+    is False, earnings are still detected but only a warning is logged
+    (no filter adjustment).
+    """
+
+    enabled: bool = False
+    additional_otm_pct: float = Field(default=0.15, ge=0.0, le=1.0)
+    lookahead_days: int = Field(default=0, ge=0, le=14)
+
+
 class ScannerSettings(BaseModel):
-    """Complete scanner settings: filters, ranking, and budget."""
+    """Complete scanner settings: filters, ranking, budget, and earnings."""
 
     filters: FilterSettings = FilterSettings()
     ranking: RankingWeights = RankingWeights()
     budget: BudgetSettings = BudgetSettings()
+    earnings: EarningsFilterSettings = Field(default_factory=EarningsFilterSettings)
 
 
 def load_scanner_settings(path: str | Path = DEFAULT_PATH) -> ScannerSettings:

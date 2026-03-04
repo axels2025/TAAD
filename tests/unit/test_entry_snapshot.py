@@ -793,3 +793,184 @@ class TestDataQualityScoring:
 
         # Assert - Should have lower score with missing critical fields
         assert score < 0.30  # Less than 30%
+
+
+class TestScannerFallback:
+    """Test scanner fallback fills missing snapshot fields from scanner/staged data."""
+
+    def _make_snapshot(self, **overrides):
+        """Create a minimal snapshot for fallback testing."""
+        defaults = dict(
+            trade_id=1,
+            symbol="AAPL",
+            strike=150.0,
+            expiration=date(2026, 3, 6),
+            option_type="PUT",
+            entry_premium=2.50,
+            stock_price=160.0,
+            dte=3,
+            contracts=5,
+            captured_at=datetime.now(),
+        )
+        defaults.update(overrides)
+        return TradeEntrySnapshot(**defaults)
+
+    def test_fallback_fills_missing_greeks(self, entry_service):
+        """Test that fallback fills None Greeks from scanner data."""
+        # Arrange — snapshot has no Greeks (after-hours capture)
+        snapshot = self._make_snapshot()
+        assert snapshot.delta is None
+        assert snapshot.iv is None
+        assert snapshot.gamma is None
+
+        fallback = {
+            "delta": -0.25,
+            "iv": 0.32,
+            "gamma": 0.012,
+            "theta": -0.07,
+            "vega": 0.11,
+            "_source": "staged_live",
+        }
+
+        # Act
+        entry_service._apply_scanner_fallback(snapshot, fallback)
+
+        # Assert — all Greeks filled
+        assert snapshot.delta == -0.25
+        assert snapshot.iv == 0.32
+        assert snapshot.gamma == 0.012
+        assert snapshot.theta == -0.07
+        assert snapshot.vega == 0.11
+        assert "delta" in snapshot.notes
+        assert "staged_live" in snapshot.notes
+
+    def test_fallback_does_not_overwrite_live_data(self, entry_service):
+        """Test that fallback never overwrites existing live data."""
+        # Arrange — snapshot already has delta and IV from live IBKR
+        snapshot = self._make_snapshot()
+        snapshot.delta = -0.30  # Live data
+        snapshot.iv = 0.35  # Live data
+        snapshot.gamma = None  # Missing
+
+        fallback = {
+            "delta": -0.25,  # Staler — should NOT overwrite
+            "iv": 0.28,  # Staler — should NOT overwrite
+            "gamma": 0.012,  # Missing — should fill
+            "_source": "scan_opportunity",
+        }
+
+        # Act
+        entry_service._apply_scanner_fallback(snapshot, fallback)
+
+        # Assert — live data preserved, only gamma filled
+        assert snapshot.delta == -0.30  # Preserved
+        assert snapshot.iv == 0.35  # Preserved
+        assert snapshot.gamma == 0.012  # Filled
+        assert "gamma" in snapshot.notes
+        assert "delta" not in snapshot.notes  # Not mentioned as filled
+
+    def test_fallback_fixes_dte_zero_from_scanner(self, entry_service):
+        """Test that DTE=0 gets fixed when scanner has a valid DTE."""
+        # Arrange — snapshot has DTE=0 (bug from getattr default)
+        snapshot = self._make_snapshot(dte=0)
+
+        fallback = {
+            "dte": 3,
+            "_source": "scan_opportunity",
+        }
+
+        # Act
+        entry_service._apply_scanner_fallback(snapshot, fallback)
+
+        # Assert
+        assert snapshot.dte == 3
+
+    def test_fallback_preserves_nonzero_dte(self, entry_service):
+        """Test that valid nonzero DTE is NOT overwritten by fallback."""
+        # Arrange — snapshot has correct DTE=5
+        snapshot = self._make_snapshot(dte=5)
+
+        fallback = {
+            "dte": 3,  # Different value — should NOT overwrite
+            "_source": "scan_opportunity",
+        }
+
+        # Act
+        entry_service._apply_scanner_fallback(snapshot, fallback)
+
+        # Assert
+        assert snapshot.dte == 5  # Preserved
+
+    def test_fallback_fills_bid_ask_and_recalculates_mid(self, entry_service):
+        """Test that bid/ask from fallback also recalculates mid."""
+        # Arrange
+        snapshot = self._make_snapshot()
+        assert snapshot.bid is None
+        assert snapshot.ask is None
+
+        fallback = {
+            "bid": 2.40,
+            "ask": 2.60,
+            "_source": "staged_live",
+        }
+
+        # Act
+        entry_service._apply_scanner_fallback(snapshot, fallback)
+
+        # Assert
+        assert snapshot.bid == 2.40
+        assert snapshot.ask == 2.60
+        assert snapshot.mid == pytest.approx(2.50, abs=0.01)
+
+    def test_fallback_no_fields_needed(self, entry_service):
+        """Test graceful handling when snapshot already has all data."""
+        # Arrange — snapshot already fully populated
+        snapshot = self._make_snapshot(dte=3)
+        snapshot.delta = -0.30
+        snapshot.iv = 0.35
+        snapshot.gamma = 0.015
+        snapshot.theta = -0.08
+        snapshot.vega = 0.12
+        snapshot.bid = 2.45
+        snapshot.ask = 2.55
+        snapshot.option_volume = 500
+        snapshot.open_interest = 1000
+
+        fallback = {
+            "delta": -0.25,
+            "iv": 0.28,
+            "bid": 2.30,
+            "ask": 2.50,
+            "_source": "scan_opportunity",
+        }
+
+        # Act
+        entry_service._apply_scanner_fallback(snapshot, fallback)
+
+        # Assert — nothing overwritten
+        assert snapshot.delta == -0.30
+        assert snapshot.iv == 0.35
+        assert snapshot.bid == 2.45
+        assert snapshot.ask == 2.55
+        assert snapshot.notes is None  # No fields filled
+
+    def test_capture_with_scanner_fallback_param(self, entry_service, sample_trade_params):
+        """Test that capture_entry_snapshot accepts and applies scanner_fallback."""
+        # Arrange
+        fallback = {
+            "delta": -0.22,
+            "iv": 0.30,
+            "gamma": 0.010,
+            "_source": "staged_live",
+        }
+
+        # Act
+        snapshot = entry_service.capture_entry_snapshot(
+            **sample_trade_params,
+            scanner_fallback=fallback,
+        )
+
+        # Assert — Greeks filled from fallback (market closed in mock)
+        assert snapshot.delta == -0.22
+        assert snapshot.iv == 0.30
+        assert snapshot.gamma == 0.010

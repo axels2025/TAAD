@@ -27,7 +27,7 @@ class PositionSettings(BaseSettings):
     # Exit Rules
     profit_target: float = Field(default=0.50, ge=0.0, le=1.0)
     stop_loss: float = Field(default=-2.00, le=0.0)
-    time_exit_dte: int = Field(default=2, ge=0, le=14)
+    time_exit_dte: int = Field(default=2, ge=-1, le=14)
 
     class Config:
         env_file = ".env"
@@ -51,7 +51,11 @@ class ExitRules(BaseModel):
         description="Stop loss at -200% of premium received",
     )
     time_exit_dte: int = Field(
-        default=2, ge=0, le=14, description="Exit N days before expiration"
+        default=2, ge=-1, le=14, description="Exit N days before expiration (-1 = let expire)"
+    )
+    let_expire_premium: float = Field(
+        default=0.05, ge=0.0, le=1.0,
+        description="If current premium ≤ this at time_exit, let expire instead of closing (0 = always close)",
     )
 
 

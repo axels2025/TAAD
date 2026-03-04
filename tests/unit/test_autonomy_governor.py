@@ -204,9 +204,9 @@ class TestL2Notify:
         decision = l2_governor.can_execute("CLOSE_POSITION", confidence=0.95)
         assert decision.approved is True
 
-    def test_l2_approves_at_exactly_0_7(self, l2_governor):
-        """L2 approves at exactly 0.7 threshold."""
-        decision = l2_governor.can_execute("EXECUTE_TRADES", confidence=0.7)
+    def test_l2_approves_stage_at_exactly_0_7(self, l2_governor):
+        """L2 approves STAGE_CANDIDATES at exactly 0.7 threshold."""
+        decision = l2_governor.can_execute("STAGE_CANDIDATES", confidence=0.7)
         assert decision.approved is True
 
     def test_l2_rejects_execute_trades_low_confidence(self, l2_governor):
@@ -426,7 +426,7 @@ class TestMandatoryTriggers:
     def test_loss_exceeds_threshold_trigger(self, l4_governor):
         """loss_exceeds_threshold fires when context flag is set."""
         decision = l4_governor.can_execute(
-            "CLOSE_POSITION",
+            "EXECUTE_TRADES",
             confidence=0.9,
             context={"loss_exceeds_threshold": True},
         )
@@ -500,6 +500,110 @@ class TestMandatoryTriggers:
         )
         assert decision.escalation_trigger != "vix_spike"
 
+    def test_vix_tier2_elevated_no_block(self, l4_governor):
+        """VIX=24, change=12% → elevated tier, no trigger fires."""
+        decision = l4_governor.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 24, "vix_change_pct": 0.12},
+        )
+        assert decision.approved is True
+        assert decision.escalation_trigger is None
+
+    def test_vix_tier2_change_only_no_block(self, l4_governor):
+        """VIX=18, change=15% → elevated tier from change, no block."""
+        decision = l4_governor.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 18, "vix_change_pct": 0.15},
+        )
+        assert decision.approved is True
+        assert decision.escalation_trigger is None
+
+    def test_vix_tier3_spike_from_absolute(self, l4_governor):
+        """VIX=31 → vix_spike trigger fires."""
+        decision = l4_governor.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 31},
+        )
+        assert decision.approved is False
+        assert decision.escalation_trigger == "vix_spike"
+
+    def test_vix_tier3_spike_from_change(self, l4_governor):
+        """VIX=22, change=25% → vix_spike trigger fires."""
+        decision = l4_governor.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 22, "vix_change_pct": 0.25},
+        )
+        assert decision.approved is False
+        assert decision.escalation_trigger == "vix_spike"
+
+    def test_vix_tier4_extreme(self, l4_governor):
+        """VIX=42 → vix_extreme trigger fires."""
+        decision = l4_governor.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 42},
+        )
+        assert decision.approved is False
+        assert decision.escalation_trigger == "vix_extreme"
+
+    def test_vix_extreme_supersedes_spike(self, l4_governor):
+        """VIX=42 returns vix_extreme, not vix_spike."""
+        decision = l4_governor.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 42, "vix_change_pct": 0.25},
+        )
+        assert decision.escalation_trigger == "vix_extreme"
+
+    def test_close_position_exempt_from_extreme(self, db_session):
+        """CLOSE_POSITION approved even at VIX=45 (extreme tier)."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_POSITION",
+            confidence=0.9,
+            context={"vix": 45.0},
+        )
+        assert decision.approved is True
+
+    def test_vix_spike_acknowledged_bypasses_trigger(self, l4_governor):
+        """vix_spike_acknowledged=True in context → no trigger fires."""
+        decision = l4_governor.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 35, "vix_change_pct": 0.25, "vix_spike_acknowledged": True},
+        )
+        assert decision.approved is True
+        assert decision.escalation_trigger is None
+
+    def test_disabled_vix_spike_skips_all_tiers(self, db_session):
+        """disabled_triggers=["vix_spike"] → no VIX triggers at VIX=45."""
+        config = AutonomyConfig(
+            initial_level=4, max_level=4, disabled_triggers=["vix_spike"]
+        )
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 45},
+        )
+        assert decision.approved is True
+        assert decision.escalation_trigger is None
+
+    def test_vix_negative_change_detected(self, l4_governor):
+        """Negative VIX change (drop) also uses abs() for spike detection."""
+        decision = l4_governor.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 22, "vix_change_pct": -0.25},
+        )
+        assert decision.approved is False
+        assert decision.escalation_trigger == "vix_spike"
+
     def test_consecutive_losses_trigger(self, l4_governor):
         """consecutive_losses fires when >= demotion_loss_streak (default 3)."""
         decision = l4_governor.can_execute(
@@ -567,14 +671,15 @@ class TestMandatoryTriggers:
         # low_confidence checked first in _check_mandatory_triggers
         assert decision.escalation_trigger == "low_confidence"
 
-    def test_all_nine_triggers_are_defined(self):
-        """All 9 mandatory triggers are present in MANDATORY_ESCALATION_TRIGGERS."""
+    def test_all_ten_triggers_are_defined(self):
+        """All 10 mandatory triggers are present in MANDATORY_ESCALATION_TRIGGERS."""
         expected = {
             "first_trade_of_day",
             "new_symbol",
             "loss_exceeds_threshold",
             "margin_utilization_high",
             "vix_spike",
+            "vix_extreme",
             "consecutive_losses",
             "parameter_change",
             "stale_data",
@@ -635,22 +740,238 @@ class TestAlwaysAllowedActions:
         decision = gov.can_execute("REQUEST_HUMAN_REVIEW", confidence=0.9)
         assert decision.approved is True
 
-    def test_monitor_only_blocked_by_mandatory_trigger(self, l4_governor):
-        """MONITOR_ONLY is still blocked if a mandatory trigger fires."""
-        # low confidence fires before the action-type check
-        decision = l4_governor.can_execute("MONITOR_ONLY", confidence=0.4)
-        assert decision.approved is False
-        assert decision.escalation_trigger == "low_confidence"
+    def test_monitor_only_passes_despite_mandatory_trigger(self, l4_governor):
+        """MONITOR_ONLY passes even when mandatory triggers would fire.
 
-    def test_request_human_review_blocked_by_stale_data(self, l4_governor):
-        """REQUEST_HUMAN_REVIEW blocked by stale_data mandatory trigger."""
+        No-op actions should never be escalated — escalating MONITOR_ONLY
+        would block the system from doing nothing, which is counterproductive.
+        """
+        decision = l4_governor.can_execute("MONITOR_ONLY", confidence=0.4)
+        assert decision.approved is True
+
+    def test_request_human_review_passes_despite_stale_data(self, l4_governor):
+        """REQUEST_HUMAN_REVIEW passes even with stale data.
+
+        Escalation actions should not be blocked by mandatory triggers —
+        blocking an escalation defeats the purpose of escalating.
+        """
         decision = l4_governor.can_execute(
             "REQUEST_HUMAN_REVIEW",
             confidence=0.9,
             context={"data_stale": True},
         )
+        assert decision.approved is True
+
+
+# ---------------------------------------------------------------------------
+# 8a-2. CLOSE_POSITION exempt from all mandatory triggers (risk-reducing)
+# ---------------------------------------------------------------------------
+
+
+class TestClosePositionTriggerExemption:
+    """CLOSE_POSITION bypasses all mandatory triggers and minimal footprint.
+
+    Closing a position is always risk-reducing — blocking it during
+    adverse conditions (stale data, high margin, VIX spike, etc.)
+    makes the situation worse, not better.
+    """
+
+    def test_close_position_passes_during_vix_spike(self, db_session):
+        """CLOSE_POSITION approved even when VIX > 30."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_POSITION",
+            confidence=0.9,
+            context={"vix": 35.0, "vix_change_pct": 0.25},
+        )
+        assert decision.approved is True
+
+    def test_close_position_passes_with_stale_data(self, db_session):
+        """CLOSE_POSITION approved even with stale market data."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_POSITION",
+            confidence=0.9,
+            context={"data_stale": True},
+        )
+        assert decision.approved is True
+
+    def test_close_position_passes_with_high_margin(self, db_session):
+        """CLOSE_POSITION approved even with high margin utilization."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_POSITION",
+            confidence=0.9,
+            context={"margin_utilization": 0.85},
+        )
+        assert decision.approved is True
+
+    def test_close_position_passes_with_consecutive_losses(self, db_session):
+        """CLOSE_POSITION approved even during a loss streak."""
+        config = AutonomyConfig(initial_level=3, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_POSITION",
+            confidence=0.9,
+            context={"consecutive_losses": 5},
+        )
+        assert decision.approved is True
+
+    def test_close_position_passes_with_loss_exceeds_threshold(self, db_session):
+        """CLOSE_POSITION approved even when loss exceeds threshold."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_POSITION",
+            confidence=0.9,
+            context={"loss_exceeds_threshold": True},
+        )
+        assert decision.approved is True
+
+    def test_execute_trades_still_blocked_by_triggers(self, db_session):
+        """EXECUTE_TRADES is still blocked by mandatory triggers."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"vix": 35.0, "vix_change_pct": 0.25},
+        )
         assert decision.approved is False
-        assert decision.escalation_trigger == "stale_data"
+        assert decision.escalation_trigger == "vix_spike"
+
+    def test_close_position_still_gated_by_level(self, db_session):
+        """CLOSE_POSITION is still subject to level-based gating at L1."""
+        config = AutonomyConfig(initial_level=1, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_POSITION",
+            confidence=0.99,
+            context={"data_stale": True, "vix": 40},
+        )
+        # L1 always requires human approval (level gating, not triggers)
+        assert decision.approved is False
+        assert decision.escalation_trigger == "l1_approval_required"
+
+
+# ---------------------------------------------------------------------------
+# 8a2. CLOSE_ALL_POSITIONS trigger exemption
+# ---------------------------------------------------------------------------
+
+
+class TestCloseAllPositionsTriggerExemption:
+    """CLOSE_ALL_POSITIONS bypasses mandatory triggers like CLOSE_POSITION."""
+
+    def test_close_all_bypasses_mandatory_triggers(self, db_session):
+        """CLOSE_ALL_POSITIONS approved even during VIX spike."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_ALL_POSITIONS",
+            confidence=0.9,
+            context={"vix": 35.0, "vix_change_pct": 0.25},
+        )
+        assert decision.approved is True
+
+    def test_close_all_bypasses_minimal_footprint(self, db_session):
+        """CLOSE_ALL_POSITIONS approved even with stale data + high margin."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_ALL_POSITIONS",
+            confidence=0.9,
+            context={"data_stale": True, "margin_utilization": 0.90},
+        )
+        assert decision.approved is True
+
+    def test_close_all_approved_at_l2_with_confidence(self, db_session):
+        """CLOSE_ALL_POSITIONS approved at L2 with confidence >= 0.7."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute(
+            "CLOSE_ALL_POSITIONS",
+            confidence=0.7,
+            context={},
+        )
+        assert decision.approved is True
+
+
+# ---------------------------------------------------------------------------
+# 8b. Disabled triggers bypass mandatory escalation
+# ---------------------------------------------------------------------------
+
+
+class TestDisabledTriggers:
+    """Triggers listed in config.disabled_triggers are skipped."""
+
+    def test_disabled_first_trade_of_day(self, db_session):
+        """first_trade_of_day does not fire when disabled."""
+        config = AutonomyConfig(
+            initial_level=4, max_level=4,
+            disabled_triggers=["first_trade_of_day"],
+        )
+        gov = AutonomyGovernor(db_session, config)
+        decision = gov.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"is_first_trade_of_day": True},
+        )
+        assert decision.approved is True
+        assert decision.escalation_trigger != "first_trade_of_day"
+
+    def test_disabled_low_confidence(self, db_session):
+        """low_confidence does not fire when disabled."""
+        config = AutonomyConfig(
+            initial_level=4, max_level=4,
+            disabled_triggers=["low_confidence"],
+        )
+        gov = AutonomyGovernor(db_session, config)
+        decision = gov.can_execute("EXECUTE_TRADES", confidence=0.3)
+        assert decision.approved is True
+
+    def test_disabled_new_symbol(self, db_session):
+        """new_symbol does not fire when disabled."""
+        config = AutonomyConfig(
+            initial_level=4, max_level=4,
+            disabled_triggers=["new_symbol"],
+        )
+        gov = AutonomyGovernor(db_session, config)
+        decision = gov.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.9,
+            context={"is_new_symbol": True},
+        )
+        assert decision.approved is True
+
+    def test_non_disabled_triggers_still_fire(self, db_session):
+        """Disabling one trigger does not affect other triggers."""
+        config = AutonomyConfig(
+            initial_level=4, max_level=4,
+            disabled_triggers=["first_trade_of_day"],
+        )
+        gov = AutonomyGovernor(db_session, config)
+        # low_confidence should still fire
+        decision = gov.can_execute("EXECUTE_TRADES", confidence=0.3)
+        assert decision.approved is False
+        assert decision.escalation_trigger == "low_confidence"
+
+    def test_multiple_disabled_triggers(self, db_session):
+        """Multiple triggers can be disabled at once."""
+        config = AutonomyConfig(
+            initial_level=4, max_level=4,
+            disabled_triggers=["first_trade_of_day", "new_symbol", "low_confidence"],
+        )
+        gov = AutonomyGovernor(db_session, config)
+        decision = gov.can_execute(
+            "EXECUTE_TRADES",
+            confidence=0.3,
+            context={"is_first_trade_of_day": True, "is_new_symbol": True},
+        )
+        # All three disabled — should pass at L4
+        assert decision.approved is True
 
 
 # ---------------------------------------------------------------------------
@@ -1133,3 +1454,85 @@ class TestEdgeCases:
         """Decision.level always matches the governor's current level."""
         decision = l3_governor.can_execute("EXECUTE_TRADES", confidence=0.7)
         assert decision.level == l3_governor.level
+
+
+# ---------------------------------------------------------------------------
+# EXECUTE_TRADES confidence threshold split
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteConfidenceThreshold:
+    """EXECUTE_TRADES uses a higher confidence threshold than other actions."""
+
+    def test_l2_execute_trades_below_0_80_rejected(self, db_session):
+        """L2 rejects EXECUTE_TRADES at confidence=0.75 (below 0.80 threshold)."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute("EXECUTE_TRADES", confidence=0.75)
+        assert decision.approved is False
+        assert decision.escalation_required is True
+        assert "0.8" in decision.reason
+
+    def test_l2_execute_trades_at_0_80_approved(self, db_session):
+        """L2 approves EXECUTE_TRADES at exactly confidence=0.80."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute("EXECUTE_TRADES", confidence=0.80)
+        assert decision.approved is True
+
+    def test_l2_stage_candidates_at_0_70_still_approved(self, db_session):
+        """L2 still approves STAGE_CANDIDATES at 0.70 (unchanged threshold)."""
+        config = AutonomyConfig(initial_level=2, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute("STAGE_CANDIDATES", confidence=0.70)
+        assert decision.approved is True
+
+    def test_l3_execute_trades_below_0_60_rejected(self, db_session):
+        """L3 rejects EXECUTE_TRADES at confidence=0.55 (below 0.60 L3 threshold)."""
+        # mandatory low_confidence fires at < 0.6, but let's also check
+        # with disabled triggers
+        config = AutonomyConfig(
+            initial_level=3, max_level=4,
+            disabled_triggers=["low_confidence"],
+        )
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute("EXECUTE_TRADES", confidence=0.55)
+        assert decision.approved is False
+        assert "0.6" in decision.reason
+
+    def test_l3_execute_trades_at_0_60_approved(self, db_session):
+        """L3 approves EXECUTE_TRADES at confidence=0.60 (default threshold)."""
+        config = AutonomyConfig(initial_level=3, max_level=4)
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute("EXECUTE_TRADES", confidence=0.60)
+        assert decision.approved is True
+
+    def test_l3_stage_at_0_50_still_uses_lower_threshold(self, db_session):
+        """L3 STAGE_CANDIDATES still uses 0.50 threshold (not the execute one)."""
+        config = AutonomyConfig(
+            initial_level=3, max_level=4,
+            disabled_triggers=["low_confidence"],
+        )
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+        decision = gov.can_execute("STAGE_CANDIDATES", confidence=0.50)
+        assert decision.approved is True
+
+    def test_custom_execute_threshold(self, db_session):
+        """Custom execute_confidence_threshold=0.90 is applied at L2."""
+        config = AutonomyConfig(
+            initial_level=2, max_level=4,
+            execute_confidence_threshold=0.90,
+        )
+        gov = AutonomyGovernor(db_session=db_session, config=config)
+
+        # 0.85 < 0.90 — rejected
+        decision = gov.can_execute("EXECUTE_TRADES", confidence=0.85)
+        assert decision.approved is False
+
+        # 0.90 >= 0.90 — approved
+        decision = gov.can_execute("EXECUTE_TRADES", confidence=0.90)
+        assert decision.approved is True
+
+        # STAGE_CANDIDATES still uses 0.70
+        decision = gov.can_execute("STAGE_CANDIDATES", confidence=0.70)
+        assert decision.approved is True

@@ -20,6 +20,8 @@ class AutonomyConfig(BaseModel):
     promotion_min_win_rate: float = Field(default=0.60, ge=0.0, le=1.0)
     demotion_loss_streak: int = Field(default=3, ge=1)
     max_level: int = Field(default=2, ge=1, le=4)  # Safety: cap at L2 for paper trading
+    disabled_triggers: list[str] = Field(default_factory=list)
+    execute_confidence_threshold: float = Field(default=0.80, ge=0.5, le=1.0)
 
 
 class ClaudeConfig(BaseModel):
@@ -32,6 +34,10 @@ class ClaudeConfig(BaseModel):
     temperature: float = Field(default=0.2, ge=0.0, le=1.0)
     daily_cost_cap_usd: float = Field(default=10.0, ge=0.0)
     max_retries: int = Field(default=3, ge=1)
+    reasoning_system_prompt: str = ""
+    position_exit_system_prompt: str = ""
+    reflection_system_prompt: str = ""
+    performance_analysis_system_prompt: str = ""
 
 
 class DaemonConfig(BaseModel):
@@ -43,6 +49,12 @@ class DaemonConfig(BaseModel):
     max_events_per_cycle: int = Field(default=10, ge=1)
     pid_file: str = "run/taad.pid"
     graceful_shutdown_timeout_seconds: int = Field(default=30, ge=5)
+    reconnect_interval_seconds: int = Field(default=30, ge=10, le=300)
+    reconnect_alert_audio_path: str = ""  # Startup/pre-market TWS reminder
+    reconnect_disconnect_audio_path: str = ""  # Played on connection loss
+    reconnect_success_audio_path: str = ""  # Played on successful reconnection
+    reconnect_alert_cooldown_seconds: int = Field(default=300, ge=60)
+    premarket_alert_minutes: int = Field(default=15, ge=5, le=60)
 
 
 class AlertConfig(BaseModel):
@@ -70,6 +82,32 @@ class LearningLoopConfig(BaseModel):
     max_concurrent_experiments: int = Field(default=3, ge=1)
 
 
+class AutoScanConfig(BaseModel):
+    """Market-open auto-scan configuration."""
+
+    enabled: bool = False  # Opt-in (default off)
+    delay_minutes: int = Field(default=5, ge=0, le=30)  # Wait for spreads to settle
+    scanner_preset: str = "naked-put"  # IBKR scanner preset
+    auto_stage: bool = True  # Stage selected trades automatically
+    require_ibkr: bool = True  # Hard requirement for IBKR connection
+
+
+class ExitRulesConfig(BaseModel):
+    """Dashboard-configurable exit rules for the daemon's ExitManager.
+
+    profit_target: fraction of max profit to exit at (0.50 = 50%)
+    stop_loss: negative multiple of premium received (-2.00 = 2x premium)
+    time_exit_dte: close N days before expiry (-1 = let expire)
+    let_expire_premium: if current premium ≤ this when time_exit triggers,
+        let the option expire worthless instead of paying to close (0.0 = always close)
+    """
+
+    profit_target: float = Field(default=0.50, ge=0.0, le=1.0)
+    stop_loss: float = Field(default=-2.00, le=0.0)
+    time_exit_dte: int = Field(default=2, ge=-1, le=14)
+    let_expire_premium: float = Field(default=0.05, ge=0.0, le=1.0)
+
+
 class Phase5Config(BaseModel):
     """Top-level Phase 5 configuration.
 
@@ -82,6 +120,8 @@ class Phase5Config(BaseModel):
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     learning: LearningLoopConfig = Field(default_factory=LearningLoopConfig)
+    auto_scan: AutoScanConfig = Field(default_factory=AutoScanConfig)
+    exit_rules: ExitRulesConfig = Field(default_factory=ExitRulesConfig)
     guardrails: "GuardrailConfig" = Field(default_factory=lambda: _default_guardrail_config())
 
 

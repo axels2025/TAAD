@@ -1,7 +1,13 @@
 """Autonomy governor for graduated autonomous trading.
 
-4 levels of autonomy (L1 Recommend -> L4 Autonomous) with 9 mandatory
+4 levels of autonomy (L1 Recommend -> L4 Autonomous) with 10 mandatory
 human review triggers that ALWAYS escalate regardless of level.
+
+VIX response is tiered to match market_context.py vol regimes:
+- Normal (VIX ≤ 20, change ≤ 10%): no action
+- Elevated (VIX 20-30 or change 10-20%): warn + continue
+- Spike (VIX > 30 or change > 20%): block new entries
+- Extreme (VIX > 40): emergency halt
 
 Promotion requires consecutive clean days + performance thresholds.
 Demotion is immediate on override, loss streak, or anomaly.
@@ -39,13 +45,14 @@ class AutonomyDecision:
     escalation_trigger: Optional[str] = None
 
 
-# 9 mandatory human review triggers that ALWAYS escalate
+# 10 mandatory human review triggers that ALWAYS escalate
 MANDATORY_ESCALATION_TRIGGERS = {
     "first_trade_of_day": "First trade of the trading day",
     "new_symbol": "Trading a symbol for the first time",
     "loss_exceeds_threshold": "Single-trade loss exceeds 2x premium",
     "margin_utilization_high": "Margin utilization above 60%",
-    "vix_spike": "VIX above 30 or 20%+ daily increase",
+    "vix_spike": "VIX above 30 or 20%+ session change — new entries blocked",
+    "vix_extreme": "VIX above 40 — emergency halt on new trades",
     "consecutive_losses": "3+ consecutive losing trades",
     "parameter_change": "AI wants to change strategy parameters",
     "stale_data": "Market data is stale (>5 minutes old)",
@@ -73,6 +80,9 @@ class AutonomyGovernor:
         self._consecutive_clean_days = 0
         self._trades_at_current_level = 0
         self._last_override_time: Optional[datetime] = None
+
+        # Load persisted counters from DB (survives restarts)
+        self._load_counters()
 
     @property
     def level(self) -> int:
@@ -105,7 +115,15 @@ class AutonomyGovernor:
         """
         context = context or {}
 
-        # Check mandatory escalation triggers first (always apply)
+        # Skip mandatory triggers for no-op actions (MONITOR_ONLY does nothing)
+        if action in ("MONITOR_ONLY", "REQUEST_HUMAN_REVIEW"):
+            return AutonomyDecision(
+                approved=True,
+                level=self._level,
+                reason="No-op or escalation action always allowed",
+            )
+
+        # Check mandatory escalation triggers (CLOSE_POSITION exempt — risk-reducing)
         trigger = self._check_mandatory_triggers(action, confidence, context)
         if trigger:
             return AutonomyDecision(
@@ -116,8 +134,11 @@ class AutonomyGovernor:
                 escalation_trigger=trigger,
             )
 
-        # Check minimal footprint conditions
-        footprint_issue = self._check_minimal_footprint(context)
+        # Check minimal footprint conditions (closing is risk-reducing, skip)
+        footprint_issue = (
+            None if action in ("CLOSE_POSITION", "CLOSE_ALL_POSITIONS")
+            else self._check_minimal_footprint(context)
+        )
         if footprint_issue:
             return AutonomyDecision(
                 approved=False,
@@ -128,14 +149,6 @@ class AutonomyGovernor:
             )
 
         # Level-based gating
-        if action in ("MONITOR_ONLY", "REQUEST_HUMAN_REVIEW"):
-            # These always pass
-            return AutonomyDecision(
-                approved=True,
-                level=self._level,
-                reason="No-op or escalation action always allowed",
-            )
-
         if self._level == AutonomyLevel.L1_RECOMMEND:
             # L1: Nothing executes without human approval
             return AutonomyDecision(
@@ -148,8 +161,15 @@ class AutonomyGovernor:
 
         if self._level == AutonomyLevel.L2_NOTIFY:
             # L2: Execute routine trades, escalate non-routine
-            if action in ("STAGE_CANDIDATES", "EXECUTE_TRADES", "CLOSE_POSITION"):
-                if confidence >= 0.7:
+            if action in ("STAGE_CANDIDATES", "EXECUTE_TRADES", "CLOSE_POSITION", "CLOSE_ALL_POSITIONS"):
+                # EXECUTE_TRADES uses a higher threshold (default 0.80)
+                # because it commits real capital, unlike staging
+                threshold = (
+                    self.config.execute_confidence_threshold
+                    if action == "EXECUTE_TRADES"
+                    else 0.7
+                )
+                if confidence >= threshold:
                     return AutonomyDecision(
                         approved=True,
                         level=self._level,
@@ -159,7 +179,7 @@ class AutonomyGovernor:
                     return AutonomyDecision(
                         approved=False,
                         level=self._level,
-                        reason=f"L2: Confidence {confidence:.2f} below 0.7 threshold",
+                        reason=f"L2: Confidence {confidence:.2f} below {threshold} threshold",
                         escalation_required=True,
                         escalation_trigger="low_confidence",
                     )
@@ -173,7 +193,12 @@ class AutonomyGovernor:
 
         if self._level == AutonomyLevel.L3_SUPERVISED:
             # L3: Execute most trades, escalate edge cases
-            if confidence >= 0.5:
+            # EXECUTE_TRADES threshold = max(0.6, execute_threshold - 0.2)
+            if action == "EXECUTE_TRADES":
+                threshold = round(max(0.6, self.config.execute_confidence_threshold - 0.2), 10)
+            else:
+                threshold = 0.5
+            if confidence >= threshold:
                 return AutonomyDecision(
                     approved=True,
                     level=self._level,
@@ -182,7 +207,7 @@ class AutonomyGovernor:
             return AutonomyDecision(
                 approved=False,
                 level=self._level,
-                reason=f"L3: Confidence {confidence:.2f} below 0.5 threshold",
+                reason=f"L3: Confidence {confidence:.2f} below {threshold} threshold",
                 escalation_required=True,
                 escalation_trigger="low_confidence",
             )
@@ -205,49 +230,77 @@ class AutonomyGovernor:
     def _check_mandatory_triggers(
         self, action: str, confidence: float, context: dict
     ) -> Optional[str]:
-        """Check all 9 mandatory escalation triggers.
+        """Check all 10 mandatory escalation triggers.
+
+        Triggers listed in config.disabled_triggers are skipped.
+        CLOSE_POSITION is exempt from all triggers — closing is always
+        risk-reducing and should never be blocked by conditions designed
+        to prevent new risk exposure.
+
+        VIX uses a 4-tier response: normal → elevated (warn only) →
+        spike (block) → extreme (emergency halt).
 
         Returns trigger name if any trigger fires, None otherwise.
         """
+        # Closing positions reduces risk — never block it
+        if action in ("CLOSE_POSITION", "CLOSE_ALL_POSITIONS"):
+            return None
+
+        disabled = set(self.config.disabled_triggers)
+
         # 1. Low confidence
-        if confidence < 0.6:
+        if "low_confidence" not in disabled and confidence < 0.6:
             return "low_confidence"
 
         # 2. First trade of day
-        if action in ("EXECUTE_TRADES", "STAGE_CANDIDATES"):
-            if context.get("is_first_trade_of_day", False):
-                return "first_trade_of_day"
+        if "first_trade_of_day" not in disabled:
+            if action in ("EXECUTE_TRADES", "STAGE_CANDIDATES"):
+                if context.get("is_first_trade_of_day", False):
+                    return "first_trade_of_day"
 
         # 3. New symbol
-        if context.get("is_new_symbol", False):
+        if "new_symbol" not in disabled and context.get("is_new_symbol", False):
             return "new_symbol"
 
         # 4. Loss exceeds threshold
-        if context.get("loss_exceeds_threshold", False):
+        if "loss_exceeds_threshold" not in disabled and context.get("loss_exceeds_threshold", False):
             return "loss_exceeds_threshold"
 
         # 5. Margin utilization high
-        margin_util = context.get("margin_utilization", 0.0)
-        if margin_util > 0.60:
-            return "margin_utilization_high"
+        if "margin_utilization_high" not in disabled:
+            margin_util = context.get("margin_utilization", 0.0)
+            if margin_util > 0.60:
+                return "margin_utilization_high"
 
-        # 6. VIX spike
-        vix = context.get("vix", 0.0)
-        vix_change = context.get("vix_change_pct", 0.0)
-        if vix > 30 or vix_change > 0.20:
-            return "vix_spike"
+        # 6. VIX tiered response (aligned with _classify_vol_regime in market_context.py)
+        if "vix_spike" not in disabled:
+            vix = context.get("vix", 0.0)
+            vix_change = abs(context.get("vix_change_pct", 0.0))  # fraction
+
+            if context.get("vix_spike_acknowledged", False):
+                pass  # User acknowledged via dashboard, skip trigger this session
+            elif vix > 40:
+                return "vix_extreme"
+            elif vix > 30 or vix_change > 0.20:
+                return "vix_spike"
+            elif vix > 20 or vix_change > 0.10:
+                logger.info(
+                    f"VIX elevated (warn only): vix={vix:.1f}, "
+                    f"session_change={vix_change:.1%}"
+                )
 
         # 7. Consecutive losses
-        consecutive_losses = context.get("consecutive_losses", 0)
-        if consecutive_losses >= self.config.demotion_loss_streak:
-            return "consecutive_losses"
+        if "consecutive_losses" not in disabled:
+            consecutive_losses = context.get("consecutive_losses", 0)
+            if consecutive_losses >= self.config.demotion_loss_streak:
+                return "consecutive_losses"
 
         # 8. Parameter change
-        if action == "ADJUST_PARAMETERS":
+        if "parameter_change" not in disabled and action == "ADJUST_PARAMETERS":
             return "parameter_change"
 
         # 9. Stale data
-        if context.get("data_stale", False):
+        if "stale_data" not in disabled and context.get("data_stale", False):
             return "stale_data"
 
         return None
@@ -272,6 +325,7 @@ class AutonomyGovernor:
             win: Whether the trade was profitable
         """
         self._trades_at_current_level += 1
+        self._save_counters()
 
         if not win:
             # Check for demotion on loss streak
@@ -305,6 +359,7 @@ class AutonomyGovernor:
     def record_clean_day(self) -> None:
         """Record a day with no errors or overrides."""
         self._consecutive_clean_days += 1
+        self._save_counters()
         logger.debug(f"Clean day #{self._consecutive_clean_days}")
 
     def record_override(self) -> None:
@@ -312,12 +367,61 @@ class AutonomyGovernor:
         self._last_override_time = datetime.utcnow()
         self._demote("Human override")
 
+    def _load_counters(self) -> None:
+        """Load persisted promotion counters from DB.
+
+        Uses WorkingMemoryRow.strategy_state to store governor counters.
+        Falls back to zero if no persisted state exists.
+        """
+        try:
+            from src.data.models import WorkingMemoryRow
+
+            row = self.db.query(WorkingMemoryRow).get(1)
+            if row and row.strategy_state:
+                state = row.strategy_state
+                self._consecutive_clean_days = state.get("governor_clean_days", 0)
+                self._trades_at_current_level = state.get("governor_trades_at_level", 0)
+                if self._consecutive_clean_days > 0 or self._trades_at_current_level > 0:
+                    logger.info(
+                        f"Governor counters loaded: "
+                        f"clean_days={self._consecutive_clean_days}, "
+                        f"trades_at_level={self._trades_at_current_level}"
+                    )
+        except Exception as e:
+            logger.debug(f"Could not load governor counters: {e}")
+
+    def _save_counters(self) -> None:
+        """Persist promotion counters to DB.
+
+        Merges governor counters into WorkingMemoryRow.strategy_state
+        without overwriting other strategy state data.
+
+        Uses dict copy assignment to ensure SQLAlchemy detects JSON mutation.
+        """
+        try:
+            from src.data.models import WorkingMemoryRow
+
+            row = self.db.query(WorkingMemoryRow).get(1)
+            if row is None:
+                row = WorkingMemoryRow(id=1, strategy_state={})
+                self.db.add(row)
+
+            # Copy dict to trigger SQLAlchemy dirty detection on JSON column
+            state = dict(row.strategy_state or {})
+            state["governor_clean_days"] = self._consecutive_clean_days
+            state["governor_trades_at_level"] = self._trades_at_current_level
+            row.strategy_state = state
+            self.db.commit()
+        except Exception as e:
+            logger.debug(f"Could not save governor counters: {e}")
+
     def _promote(self) -> None:
         """Promote to next autonomy level."""
         old = self._level
         self.level = self._level + 1
         self._trades_at_current_level = 0
         self._consecutive_clean_days = 0
+        self._save_counters()
         logger.info(f"Autonomy PROMOTED: L{old} -> L{self._level}")
 
     def _demote(self, reason: str) -> None:
@@ -330,6 +434,7 @@ class AutonomyGovernor:
         self.level = max(1, self._level - 1)
         self._trades_at_current_level = 0
         self._consecutive_clean_days = 0
+        self._save_counters()
         logger.warning(f"Autonomy DEMOTED: L{old} -> L{self._level} ({reason})")
 
     def _count_recent_consecutive_losses(self) -> int:

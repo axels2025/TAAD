@@ -366,18 +366,42 @@ class TestExecutionErrorHandling:
 
     def test_handler_exception_returns_failure(self, executor, governor):
         """If action handler raises, execute() returns failure with error."""
-        # Set L4 so gate passes, but handler will fail
-        governor.level = 4
+        # Mock gate to approve, then force handler to raise
+        governor.can_execute = MagicMock(
+            return_value=AutonomyDecision(
+                approved=True, level=4, reason="test"
+            )
+        )
+
+        # Patch the handler to raise an exception
+        async def _boom(decision):
+            raise RuntimeError("Simulated handler failure")
+
+        executor._get_handler = MagicMock(return_value=_boom)
 
         decision = _make_decision(action="EXECUTE_TRADES", confidence=0.9)
 
-        # The actual handler will fail because IBKR client and scheduler are not set up
         result = asyncio.get_event_loop().run_until_complete(
             executor.execute(decision)
         )
 
         assert result.success is False
         assert result.error is not None
+        assert "Simulated handler failure" in result.error
+
+    def test_execute_trades_no_staged_returns_success(self, executor, governor):
+        """EXECUTE_TRADES with no staged opportunities returns success with 0 count."""
+        governor.level = 4
+
+        decision = _make_decision(action="EXECUTE_TRADES", confidence=0.9)
+
+        result = asyncio.get_event_loop().run_until_complete(
+            executor.execute(decision)
+        )
+
+        assert result.success is True
+        assert "No staged trades" in result.message
+        assert result.data["executed_count"] == 0
 
     def test_adjust_parameters_always_escalates(self, executor, governor):
         """ADJUST_PARAMETERS action always escalates regardless of autonomy level."""

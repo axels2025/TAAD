@@ -2,17 +2,18 @@
 
 Coordinates the full daily trade flow: config loading, market open wait,
 chain retrieval, strike selection, order placement, and trade recording.
+Exchange-aware via NakedTraderConfig.profile.
 """
 
 import time
 from datetime import datetime, time as dt_time, timedelta
-from zoneinfo import ZoneInfo
 
 from loguru import logger
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from src.config.exchange_profile import get_multiplier
 from src.nakedtrader.chain import (
     get_chain_with_greeks,
     get_underlying_price,
@@ -30,8 +31,6 @@ from src.nakedtrader.trade_recorder import record_trade
 from src.services.market_calendar import MarketCalendar, MarketSession
 from src.tools.ibkr_client import IBKRClient
 
-ET = ZoneInfo("America/New_York")
-
 
 def wait_for_market_open(
     console: Console,
@@ -39,15 +38,17 @@ def wait_for_market_open(
 ) -> None:
     """Wait for market open + configured delay.
 
-    Uses MarketCalendar to determine when regular session starts,
-    then waits for open + open_delay_seconds.
+    Uses MarketCalendar with the config's exchange profile to determine
+    when regular session starts, then waits for open + open_delay_seconds.
 
     Args:
         console: Rich console for output.
         config: NakedTrader configuration.
     """
-    cal = MarketCalendar()
-    now = datetime.now(ET)
+    profile = config.profile
+    tz = profile.timezone
+    cal = MarketCalendar(profile)
+    now = datetime.now(tz)
     session = cal.get_current_session(now)
 
     if session == MarketSession.REGULAR:
@@ -58,8 +59,13 @@ def wait_for_market_open(
         console.print(f"[yellow]Market is {session.value} today[/yellow]")
         return
 
-    # Pre-market: wait for 9:30 + delay
-    open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    # Pre-market or closed: wait for open + delay
+    open_time = now.replace(
+        hour=profile.regular_open.hour,
+        minute=profile.regular_open.minute,
+        second=0,
+        microsecond=0,
+    )
     target = open_time + timedelta(seconds=config.execution.open_delay_seconds)
 
     if now >= target:
@@ -72,7 +78,7 @@ def wait_for_market_open(
         f"{config.execution.open_delay_seconds}s delay...[/yellow]"
     )
 
-    while datetime.now(ET) < target:
+    while datetime.now(tz) < target:
         time.sleep(5)
 
     console.print("[green]Market open + delay complete[/green]")
@@ -87,12 +93,13 @@ def check_entry_time(config: NakedTraderConfig) -> bool:
     Returns:
         True if within allowed entry window.
     """
-    now = datetime.now(ET)
+    tz = config.profile.timezone
+    now = datetime.now(tz)
     parts = config.execution.latest_entry_time.split(":")
     cutoff = dt_time(int(parts[0]), int(parts[1]))
     if now.time() > cutoff:
         logger.warning(
-            f"Past latest entry time ({config.execution.latest_entry_time} ET)"
+            f"Past latest entry time ({config.execution.latest_entry_time})"
         )
         return False
     return True
@@ -110,36 +117,41 @@ def display_trade_plan(
         selection: Strike selection result.
         config: NakedTrader configuration.
     """
+    profile = config.profile
     q = selection.quote
     contracts = config.instrument.contracts
+    multiplier = get_multiplier(selection.symbol, profile)
+    cur = profile.currency_symbol
 
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="yellow")
 
     table.add_row("Symbol", f"{selection.symbol} (via {selection.trading_class})")
+    table.add_row("Exchange", profile.code)
     table.add_row("Action", "SELL PUT")
-    table.add_row("Strike", f"${q.strike:.2f}")
+    table.add_row("Strike", f"{cur}{q.strike:.2f}")
     table.add_row("Expiration", f"{q.expiration[:4]}-{q.expiration[4:6]}-{q.expiration[6:]}")
     table.add_row("DTE", str(q.dte))
     table.add_row("Delta", f"{q.delta:.4f}")
     table.add_row("OTM %", f"{q.otm_pct:.2%}")
     table.add_row("Contracts", str(contracts))
-    table.add_row("Premium (bid)", f"${q.bid:.2f}")
-    table.add_row("Premium (ask)", f"${q.ask:.2f}")
-    table.add_row("Underlying", f"${selection.underlying_price:.2f}")
+    table.add_row("Multiplier", str(multiplier))
+    table.add_row("Premium (bid)", f"{cur}{q.bid:.2f}")
+    table.add_row("Premium (ask)", f"{cur}{q.ask:.2f}")
+    table.add_row("Underlying", f"{cur}{selection.underlying_price:.2f}")
     table.add_row("", "")
-    table.add_row("Profit Take", f"BUY @ ${selection.profit_take_price:.2f} (GTC)")
+    table.add_row("Profit Take", f"BUY @ {cur}{selection.profit_take_price:.2f} (GTC)")
     if selection.stop_loss_price:
-        table.add_row("Stop Loss", f"BUY @ ${selection.stop_loss_price:.2f} (GTC)")
+        table.add_row("Stop Loss", f"BUY @ {cur}{selection.stop_loss_price:.2f} (GTC)")
     else:
         table.add_row("Stop Loss", "[dim]disabled[/dim]")
 
-    total_credit = q.bid * contracts * 100
-    max_profit = (q.bid - selection.profit_take_price) * contracts * 100
+    total_credit = q.bid * contracts * multiplier
+    max_profit = (q.bid - selection.profit_take_price) * contracts * multiplier
     table.add_row("", "")
-    table.add_row("Total Credit", f"${total_credit:.0f}")
-    table.add_row("Max Profit (at PT)", f"${max_profit:.0f}")
+    table.add_row("Total Credit", f"{cur}{total_credit:.0f}")
+    table.add_row("Max Profit (at PT)", f"{cur}{max_profit:.0f}")
 
     console.print(Panel(table, title="NakedTrader - Trade Plan", border_style="green"))
 
@@ -179,6 +191,8 @@ def run_daily_trade(
         True if trade was placed/simulated successfully.
     """
     symbol = config.instrument.default_symbol
+    profile = config.profile
+    multiplier = get_multiplier(symbol, profile)
 
     # Step 1: Verify paper trading
     if not dry_run:
@@ -195,11 +209,11 @@ def run_daily_trade(
 
     # Step 4: Get underlying price
     console.print(f"\n[bold]Fetching {symbol} price...[/bold]")
-    underlying_price = get_underlying_price(client, symbol)
+    underlying_price = get_underlying_price(client, symbol, config)
     if not underlying_price:
         console.print(f"[red]Could not get {symbol} price. Is market data subscribed?[/red]")
         return False
-    console.print(f"  {symbol}: ${underlying_price:.2f}")
+    console.print(f"  {symbol}: {profile.currency_symbol}{underlying_price:.2f}")
 
     # Step 5: Get valid expirations
     console.print(f"[bold]Finding expirations (DTE {config.dte.min}-{config.dte.max})...[/bold]")
@@ -248,7 +262,7 @@ def run_daily_trade(
         return True
 
     console.print("\n[bold]Placing bracket orders...[/bold]")
-    contract = build_option_contract(client, selection)
+    contract = build_option_contract(client, selection, config)
     if not contract:
         console.print("[red]Could not qualify option contract[/red]")
         return False
@@ -270,7 +284,7 @@ def run_daily_trade(
     )
 
     if fill_price:
-        console.print(f"  [green]Filled @ ${fill_price:.2f}[/green]")
+        console.print(f"  [green]Filled @ {profile.currency_symbol}{fill_price:.2f}[/green]")
     else:
         console.print("  [yellow]Not yet filled (order remains active)[/yellow]")
 
@@ -284,6 +298,9 @@ def run_daily_trade(
             bracket=bracket,
             fill_price=fill_price,
             fill_time=fill_time,
+            account_id=client.get_account_id(),
+            currency=profile.currency,
+            multiplier=multiplier,
         )
         trade.contracts = config.instrument.contracts
         session.commit()

@@ -1,13 +1,20 @@
 """NakedTrader configuration loaded from YAML with CLI overrides.
 
-Provides a Pydantic model for the daily SPX options trading configuration,
-loaded from config/daily_spx_options.yaml with optional CLI overrides.
+Provides a Pydantic model for the daily options trading configuration,
+loaded from config/daily_spx_options.yaml (US) or config/daily_asx_options.yaml
+(ASX) with optional CLI overrides.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
+
+if TYPE_CHECKING:
+    from src.config.exchange_profile import ExchangeProfile
 
 
 class InstrumentConfig(BaseModel):
@@ -17,14 +24,8 @@ class InstrumentConfig(BaseModel):
     contracts: int = Field(default=1, ge=1)
     max_contracts: int = Field(default=10, ge=1)
 
-    @field_validator("default_symbol")
-    @classmethod
-    def validate_symbol(cls, v: str) -> str:
-        allowed = {"SPX", "XSP", "SPY"}
-        v = v.upper()
-        if v not in allowed:
-            raise ValueError(f"Symbol must be one of {allowed}, got '{v}'")
-        return v
+    # Note: symbol validation is done at NakedTraderConfig level
+    # (needs access to the exchange profile for dynamic allowed sets)
 
 
 class StrikeConfig(BaseModel):
@@ -88,8 +89,12 @@ class NakedTraderConfig(BaseModel):
     """Complete NakedTrader configuration.
 
     Loaded from YAML with optional CLI overrides for per-run adjustments.
+    The ``exchange`` field selects the ExchangeProfile which drives
+    timezone, currency, IBKR routing, and multiplier throughout the
+    entire pipeline.
     """
 
+    exchange: str = "US"
     instrument: InstrumentConfig = InstrumentConfig()
     strike: StrikeConfig = StrikeConfig()
     dte: DTEConfig = DTEConfig()
@@ -97,6 +102,41 @@ class NakedTraderConfig(BaseModel):
     exit: ExitConfig = ExitConfig()
     execution: ExecutionConfig = ExecutionConfig()
     watch: WatchConfig = WatchConfig()
+
+    @property
+    def profile(self) -> ExchangeProfile:
+        """Return the ExchangeProfile for this config's exchange."""
+        from src.config.exchange_profile import PROFILES
+
+        code = self.exchange.upper()
+        if code not in PROFILES:
+            raise ValueError(
+                f"Unknown exchange '{code}'. Available: {list(PROFILES.keys())}"
+            )
+        return PROFILES[code]
+
+    @field_validator("exchange")
+    @classmethod
+    def validate_exchange(cls, v: str) -> str:
+        from src.config.exchange_profile import PROFILES
+
+        v = v.upper()
+        if v not in PROFILES:
+            raise ValueError(
+                f"exchange must be one of {list(PROFILES.keys())}, got '{v}'"
+            )
+        return v
+
+    def model_post_init(self, __context) -> None:
+        """Validate symbol against the exchange profile's known symbols."""
+        profile = self.profile
+        symbol = self.instrument.default_symbol.upper()
+        all_symbols = set(profile.index_symbols.keys()) | set(profile.equity_symbols)
+        if symbol not in all_symbols:
+            raise ValueError(
+                f"Symbol '{symbol}' not valid for exchange {self.exchange}. "
+                f"Valid symbols: {sorted(all_symbols)}"
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "NakedTraderConfig":
@@ -128,6 +168,7 @@ class NakedTraderConfig(BaseModel):
         delta: float | None = None,
         dte: int | None = None,
         stop_loss: bool | None = None,
+        exchange: str | None = None,
     ) -> "NakedTraderConfig":
         """Return a new config with CLI overrides applied.
 
@@ -137,12 +178,15 @@ class NakedTraderConfig(BaseModel):
             delta: Override target delta.
             dte: Override max DTE.
             stop_loss: Override stop-loss enabled/disabled.
+            exchange: Override exchange (US or ASX).
 
         Returns:
             New NakedTraderConfig with overrides applied.
         """
         data = self.model_dump()
 
+        if exchange is not None:
+            data["exchange"] = exchange.upper()
         if symbol is not None:
             data["instrument"]["default_symbol"] = symbol.upper()
         if contracts is not None:

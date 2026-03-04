@@ -1,17 +1,19 @@
 """Safe P&L calculation and formatting helpers.
 
 Guards against None values in entry_premium, exit_premium, and contracts
-that can arise from imported trades or partial data.
+that can arise from imported trades or partial data. Supports variable
+contract multipliers (e.g. XJO options = 10, US equity options = 100).
 """
 
 
-def calc_pnl(entry_premium, exit_premium, contracts) -> float:
+def calc_pnl(entry_premium, exit_premium, contracts, multiplier=100) -> float:
     """Calculate P&L with None-safe arithmetic.
 
     Args:
         entry_premium: Premium received at entry (may be None)
         exit_premium: Premium paid at exit (may be None)
         contracts: Number of contracts (may be None)
+        multiplier: Contract multiplier (default 100; XJO = 10)
 
     Returns:
         Profit/loss in dollars
@@ -19,21 +21,24 @@ def calc_pnl(entry_premium, exit_premium, contracts) -> float:
     entry = entry_premium or 0.0
     exit_ = exit_premium or 0.0
     qty = contracts or 0
-    return (entry - exit_) * qty * 100
+    mult = multiplier or 100
+    return (entry - exit_) * qty * mult
 
 
-def calc_pnl_pct(profit_loss, entry_premium, contracts) -> float:
+def calc_pnl_pct(profit_loss, entry_premium, contracts, multiplier=100) -> float:
     """Calculate P&L percentage with zero-division guard.
 
     Args:
         profit_loss: Dollar P&L
         entry_premium: Premium received at entry (may be None)
         contracts: Number of contracts (may be None)
+        multiplier: Contract multiplier (default 100; XJO = 10)
 
     Returns:
         P&L as a fraction (e.g. 0.5 = 50%)
     """
-    denom = (entry_premium or 0.0) * (contracts or 0) * 100
+    mult = multiplier or 100
+    denom = (entry_premium or 0.0) * (contracts or 0) * mult
     return profit_loss / denom if denom > 0 else 0.0
 
 

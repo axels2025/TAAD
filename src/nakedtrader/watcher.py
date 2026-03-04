@@ -2,6 +2,7 @@
 
 Monitors open NakedTrader trades, checks bracket order status, detects
 profit-take and stop-loss fills, and updates the database accordingly.
+Uses per-trade multiplier and currency for accurate P&L calculations.
 """
 
 from datetime import datetime
@@ -11,12 +12,14 @@ from rich.console import Console
 from rich.table import Table
 from sqlalchemy.orm import Session
 
+from src.config.exchange_profile import get_currency_symbol
 from src.data.models import Trade
 from src.data.repositories import TradeRepository
-from src.nakedtrader.chain import get_underlying_price, INDEX_SYMBOLS
+from src.nakedtrader.chain import get_underlying_price
 from src.nakedtrader.config import NakedTraderConfig
 from src.tools.ibkr_client import IBKRClient
 from src.utils.market_data import safe_field
+from src.utils.timezone import market_now
 
 
 def get_open_nt_trades(session: Session) -> list[Trade]:
@@ -92,28 +95,40 @@ def check_bracket_status(
 def get_current_quote(
     client: IBKRClient,
     trade: Trade,
+    config: NakedTraderConfig | None = None,
 ) -> dict | None:
     """Get current market quote for an open NakedTrader position.
 
     Args:
         client: Connected IBKR client.
         trade: Open trade.
+        config: NakedTrader configuration (for exchange routing).
 
     Returns:
         Dict with bid, ask, mid, delta or None if unavailable.
     """
-    from src.nakedtrader.chain import TRADING_CLASS_PREFERENCES
+    if config is not None:
+        profile = config.profile
+        tc_prefs = profile.trading_class_preferences
+        exchange = profile.ibkr_exchange
+        currency = profile.currency
+    else:
+        from src.config.exchange_profile import US_PROFILE
+        tc_prefs = US_PROFILE.trading_class_preferences
+        exchange = "SMART"
+        currency = "USD"
 
     exp_str = trade.expiration.strftime("%Y%m%d") if trade.expiration else ""
-    tc = TRADING_CLASS_PREFERENCES.get(trade.symbol, [trade.symbol])[0]
+    tc = tc_prefs.get(trade.symbol, [trade.symbol])[0]
 
     contract = client.get_option_contract(
         symbol=trade.symbol,
         expiration=exp_str,
         strike=trade.strike,
         right="P",
-        exchange="SMART",
+        exchange=exchange,
         trading_class=tc,
+        currency=currency,
     )
     qualified = client.qualify_contract(contract)
     if not qualified:
@@ -182,15 +197,17 @@ def display_positions(
     for trade in trades:
         quote = quotes.get(trade.trade_id)
         dte = (trade.expiration - datetime.now().date()).days if trade.expiration else "?"
+        mult = trade.multiplier or 100
+        cur = get_currency_symbol(trade.currency or "USD")
 
         current_mid = quote.get("mid") if quote else None
         delta = quote.get("delta") if quote else None
 
         # P&L: sold at entry_premium, would buy back at current mid
         if current_mid is not None and trade.entry_premium:
-            pnl = (trade.entry_premium - current_mid) * (trade.contracts or 1) * 100
+            pnl = (trade.entry_premium - current_mid) * (trade.contracts or 1) * mult
             pnl_pct = (trade.entry_premium - current_mid) / trade.entry_premium
-            pnl_str = f"${pnl:+.0f}"
+            pnl_str = f"{cur}{pnl:+.0f}"
             pnl_pct_str = f"{pnl_pct:+.0%}"
             pnl_style = "green" if pnl >= 0 else "red"
         else:
@@ -200,11 +217,11 @@ def display_positions(
 
         table.add_row(
             trade.symbol,
-            f"${trade.strike:.0f}",
+            f"{cur}{trade.strike:.0f}",
             trade.expiration.strftime("%m/%d") if trade.expiration else "?",
             str(dte),
-            f"${trade.entry_premium:.2f}" if trade.entry_premium else "?",
-            f"${current_mid:.2f}" if current_mid else "?",
+            f"{cur}{trade.entry_premium:.2f}" if trade.entry_premium else "?",
+            f"{cur}{current_mid:.2f}" if current_mid else "?",
             f"[{pnl_style}]{pnl_str}[/{pnl_style}]",
             f"[{pnl_style}]{pnl_pct_str}[/{pnl_style}]",
             f"{delta:.4f}" if delta else "?",
@@ -256,9 +273,11 @@ def run_watch_cycle(
     underlying_prices: dict[str, float | None] = {}
 
     for trade in trades:
-        quotes[trade.trade_id] = get_current_quote(client, trade)
+        quotes[trade.trade_id] = get_current_quote(client, trade, config)
         if trade.symbol not in underlying_prices:
-            underlying_prices[trade.symbol] = get_underlying_price(client, trade.symbol)
+            underlying_prices[trade.symbol] = get_underlying_price(
+                client, trade.symbol, config,
+            )
 
     display_positions(console, trades, quotes, underlying_prices)
 
@@ -279,7 +298,8 @@ def _close_trade(
         reason: Exit reason (profit_take, stop_loss, expired).
         session: Database session.
     """
-    now = datetime.now()
+    now = market_now()
+    mult = trade.multiplier or 100
     trade.exit_date = now
     trade.exit_premium = exit_premium
     trade.exit_reason = reason
@@ -287,12 +307,16 @@ def _close_trade(
 
     if trade.entry_premium:
         pnl_per_share = trade.entry_premium - exit_premium
-        trade.profit_loss = pnl_per_share * (trade.contracts or 1) * 100
+        trade.profit_loss = pnl_per_share * (trade.contracts or 1) * mult
         trade.profit_pct = pnl_per_share / trade.entry_premium if trade.entry_premium else None
         trade.roi = trade.profit_pct
 
     if trade.entry_date:
-        trade.days_held = (now - trade.entry_date).days
+        entry = trade.entry_date
+        if entry.tzinfo is None:
+            # Legacy naive timestamp — assume market timezone for days_held calculation
+            entry = entry.replace(tzinfo=now.tzinfo)
+        trade.days_held = (now - entry).days
 
     logger.info(
         f"Closed {trade.trade_id}: {reason}, "

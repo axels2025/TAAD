@@ -67,6 +67,82 @@ def test_missing_data_stale_flag_passes(validator, config):
     assert freshness[0].passed
 
 
+def test_stale_enriched_at_blocks(validator, config):
+    """Data with enriched_at older than max_age_seconds should block."""
+    from datetime import datetime, timedelta, timezone
+
+    old_ts = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    context = FakeContext(
+        market_context={"data_stale": False, "vix": 15.0, "enriched_at": old_ts}
+    )
+
+    results = validator.validate(context, config)
+    freshness = [r for r in results if r.guard_name == "data_freshness"]
+
+    assert len(freshness) == 1
+    assert not freshness[0].passed
+    assert freshness[0].severity == "block"
+    assert "600" in freshness[0].reason or "old" in freshness[0].reason.lower()
+
+
+def test_fresh_enriched_at_passes(validator, config):
+    """Data with enriched_at within max_age_seconds should pass."""
+    from datetime import datetime, timezone
+
+    recent_ts = datetime.now(timezone.utc).isoformat()
+    context = FakeContext(
+        market_context={"data_stale": False, "vix": 15.0, "enriched_at": recent_ts}
+    )
+
+    results = validator.validate(context, config)
+    freshness = [r for r in results if r.guard_name == "data_freshness"]
+
+    assert len(freshness) == 1
+    assert freshness[0].passed
+
+
+def test_custom_max_age_threshold(validator):
+    """Custom max_age_seconds should be respected."""
+    from datetime import datetime, timedelta, timezone
+
+    # 60s old, with a 30s threshold → should block
+    config = GuardrailConfig(data_freshness_max_age_seconds=30)
+    ts = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+    context = FakeContext(
+        market_context={"data_stale": False, "enriched_at": ts}
+    )
+
+    results = validator.validate(context, config)
+    freshness = [r for r in results if r.guard_name == "data_freshness"]
+
+    assert not freshness[0].passed
+    assert "30s" in freshness[0].reason
+
+
+def test_unparseable_enriched_at_passes(validator, config):
+    """Unparseable enriched_at timestamp should not block."""
+    context = FakeContext(
+        market_context={"data_stale": False, "enriched_at": "not-a-timestamp"}
+    )
+
+    results = validator.validate(context, config)
+    freshness = [r for r in results if r.guard_name == "data_freshness"]
+
+    assert freshness[0].passed
+
+
+def test_no_enriched_at_legacy_passes(validator, config):
+    """Legacy data with data_stale=False but no enriched_at should pass."""
+    context = FakeContext(
+        market_context={"data_stale": False, "vix": 15.0}
+    )
+
+    results = validator.validate(context, config)
+    freshness = [r for r in results if r.guard_name == "data_freshness"]
+
+    assert freshness[0].passed
+
+
 # ---------- Consistency Checks ----------
 
 

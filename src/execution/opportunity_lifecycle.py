@@ -121,6 +121,13 @@ class OpportunityLifecycleManager:
         opportunity.state_history = json.dumps(state_history)
         opportunity.updated_at = datetime.now()
 
+        # Sync the indexed `executed` flag and `trade_id` on terminal execution
+        if new_state == OpportunityState.EXECUTED:
+            opportunity.executed = True
+            trade_id = (metadata or {}).get("trade_id")
+            if trade_id:
+                opportunity.trade_id = trade_id
+
         # Commit changes
         try:
             self.session.commit()

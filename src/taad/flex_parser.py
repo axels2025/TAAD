@@ -51,6 +51,7 @@ class ParsedExecution:
     proceeds: float | None
     net_cash: float | None
     commission: float | None
+    currency: str  # ISO currency code (e.g., USD, AUD)
 
     # Dates
     trade_date: date
@@ -258,6 +259,7 @@ def parse_flex_xml(xml_text: str) -> list[ParsedExecution]:
             proceeds=_parse_float(attrs.get("proceeds", "")),
             net_cash=_parse_float(attrs.get("netCash", "")),
             commission=_parse_float(attrs.get("ibCommission", attrs.get("commission", ""))),
+            currency=attrs.get("currency", "USD"),
             trade_date=_parse_date(trade_date_str) or us_trading_date(),
             settle_date=_parse_date(settle_date_str),
             order_time=_parse_datetime(

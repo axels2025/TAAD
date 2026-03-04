@@ -169,6 +169,19 @@ SCANNER_PRESETS: dict[str, dict] = {
         "avg_volume_above": 500000,
         "avg_opt_volume_above": 1000,
     },
+    "asx-naked-put": {
+        "label": "ASX Naked Put Candidates",
+        "description": "High IV ASX stocks suitable for naked put selling (A$5-200)",
+        "scan_code": "HIGH_OPT_IMP_VOLAT",
+        "instrument": "STK",
+        "location": "STK.ASX",
+        "min_price": 5.0,
+        "max_price": 200.0,
+        "num_rows": 50,
+        "market_cap_above": 0,
+        "avg_volume_above": 200000,
+        "avg_opt_volume_above": 100,
+    },
 }
 
 # Common scan codes for the UI dropdown
@@ -333,6 +346,8 @@ class IBKRScannerService:
         self,
         symbol: str,
         max_dte: int = 7,
+        exchange: str = "SMART",
+        currency: str = "USD",
     ) -> dict:
         """Fetch PUT option chain with Greeks for a stock symbol.
 
@@ -340,8 +355,10 @@ class IBKRScannerService:
         fetches Greeks for OTM put strikes, and returns structured chain data.
 
         Args:
-            symbol: Stock ticker symbol (e.g., "AKAM")
+            symbol: Stock ticker symbol (e.g., "AKAM", "BHP")
             max_dte: Maximum days to expiration to include (default 7)
+            exchange: IBKR exchange routing (SMART for US, ASX for ASX)
+            currency: Currency code (USD, AUD)
 
         Returns:
             Dict with keys: symbol, stock_price, expirations (list of
@@ -352,7 +369,7 @@ class IBKRScannerService:
         """
         self.connect()
         try:
-            return self._fetch_chain(symbol, max_dte)
+            return self._fetch_chain(symbol, max_dte, exchange=exchange, currency=currency)
         finally:
             self.disconnect()
 
@@ -388,7 +405,8 @@ class IBKRScannerService:
             self.disconnect()
 
     def get_option_chains_batch(
-        self, symbols: list[str], max_dte: int = 7
+        self, symbols: list[str], max_dte: int = 7,
+        exchange: str = "SMART", currency: str = "USD",
     ) -> dict[str, dict]:
         """Fetch PUT option chains for multiple symbols in a single connection.
 
@@ -399,6 +417,8 @@ class IBKRScannerService:
         Args:
             symbols: List of stock ticker symbols.
             max_dte: Maximum days to expiration to include.
+            exchange: IBKR exchange routing (SMART for US, ASX for ASX).
+            currency: Currency code (USD, AUD).
 
         Returns:
             Dict mapping symbol to chain data (same format as get_option_chain).
@@ -415,7 +435,9 @@ class IBKRScannerService:
                     f"Batch chains: loading {symbol} ({i + 1}/{len(symbols)})"
                 )
                 try:
-                    results[symbol] = self._fetch_chain(symbol, max_dte)
+                    results[symbol] = self._fetch_chain(
+                        symbol, max_dte, exchange=exchange, currency=currency,
+                    )
                 except Exception as e:
                     logger.warning(f"Batch chains: {symbol} failed — {e}")
                     results[symbol] = {
@@ -423,6 +445,12 @@ class IBKRScannerService:
                         "stock_price": None,
                         "expirations": [],
                     }
+                # Pace between symbols to let TWS recover resources.
+                # Each symbol opens 12+ market data lines; this delay ensures
+                # the previous symbol's subscriptions are fully cancelled before
+                # the next batch starts.
+                if i < len(symbols) - 1:
+                    self._ib.sleep(0.5)
         finally:
             self.disconnect()
 
@@ -435,13 +463,23 @@ class IBKRScannerService:
         )
         return results
 
-    def _fetch_chain(self, symbol: str, max_dte: int) -> dict:
-        """Internal chain fetch (must be connected)."""
+    def _fetch_chain(
+        self, symbol: str, max_dte: int,
+        exchange: str = "SMART", currency: str = "USD",
+    ) -> dict:
+        """Internal chain fetch (must be connected).
+
+        Args:
+            symbol: Stock ticker symbol.
+            max_dte: Maximum days to expiration.
+            exchange: IBKR exchange routing (SMART for US, ASX for ASX).
+            currency: Currency code (USD, AUD).
+        """
         if not self._ib or not self._ib.isConnected():
             raise ConnectionError("Not connected to IBKR")
 
         # Step 1: Qualify stock and get price
-        stock = Stock(symbol, "SMART", "USD")
+        stock = Stock(symbol, exchange, currency)
         qualified_list = self._ib.qualifyContracts(stock)
         if not qualified_list or not qualified_list[0].conId:
             logger.warning(f"Chain: Could not qualify {symbol}")
@@ -497,16 +535,19 @@ class IBKRScannerService:
             dte = (exp_date - today).days
             strikes = sorted(all_expirations[exp_str])
 
-            # Filter to OTM puts in range, keep up to 25 strikes
+            # Filter to OTM puts in range, keep up to 12 strikes closest to ATM.
+            # Capped at 12 to stay well under TWS's ~100 concurrent market data
+            # line limit (12 strikes × a few expirations × a few symbols in flight).
             candidates = [s for s in strikes if lower_bound <= s <= upper_bound]
-            candidates = candidates[-25:]  # Keep closest to ATM if more than 25
+            candidates = candidates[-12:]  # Keep closest to ATM
 
             if not candidates:
                 continue
 
             # Step 4: Fetch Greeks for these candidates
             puts = self._fetch_greeks_for_strikes(
-                symbol, exp_str, dte, candidates, stock_price, qualified
+                symbol, exp_str, dte, candidates, stock_price, qualified,
+                exchange=exchange, currency=currency,
             )
 
             exp_formatted = f"{exp_str[:4]}-{exp_str[4:6]}-{exp_str[6:8]}"
@@ -530,6 +571,8 @@ class IBKRScannerService:
         strikes: list[float],
         stock_price: float,
         qualified_stock,
+        exchange: str = "SMART",
+        currency: str = "USD",
     ) -> list[dict]:
         """Fetch Greeks for a list of option strikes.
 
@@ -543,6 +586,8 @@ class IBKRScannerService:
             strikes: List of strike prices to fetch
             stock_price: Current stock price
             qualified_stock: Qualified stock contract (for trading class lookup)
+            exchange: IBKR exchange routing.
+            currency: Currency code.
 
         Returns:
             List of dicts (serializable OptionChainRow data)
@@ -550,7 +595,7 @@ class IBKRScannerService:
         # Build option contracts
         contracts: list[tuple[float, object]] = []
         for strike in strikes:
-            opt = Option(symbol, expiration, strike, "P", "SMART")
+            opt = Option(symbol, expiration, strike, "P", exchange, currency=currency)
             contracts.append((strike, opt))
 
         # Qualify all at once
@@ -570,12 +615,14 @@ class IBKRScannerService:
         if not qualified_map:
             return []
 
-        # Request market data with Greeks for all candidates
+        # Request market data with Greeks for all candidates.
+        # Pace requests with a short sleep to avoid overwhelming TWS.
         tickers: dict[float, tuple] = {}
         for strike, contract in qualified_map.items():
             try:
                 tk = self._ib.reqMktData(contract, "", False, False)
                 tickers[strike] = (tk, contract)
+                self._ib.sleep(0.05)  # 50ms pace between subscriptions
             except Exception as e:
                 logger.debug(f"Chain {symbol} ${strike}: reqMktData failed: {e}")
 
@@ -636,10 +683,12 @@ class IBKRScannerService:
 
                 otm_pct = round((stock_price - strike) / stock_price, 4) if stock_price > 0 else 0.0
 
-                # Criteria: delta 0.15-0.30, bid >= $0.30, OTM >= 5%
+                # Informational flag for the chain viewer UI "REC" badges.
+                # Uses conservative range: delta 0.05-0.15, bid >= $0.30, OTM >= 5%
+                # (aligned with scanner_settings.yaml defaults).
                 meets = (
                     delta_val is not None
-                    and 0.15 <= delta_val <= 0.30
+                    and 0.05 <= delta_val <= 0.15
                     and bid >= 0.30
                     and otm_pct >= 0.05
                 )
@@ -792,7 +841,9 @@ class IBKRScannerService:
                 key = f"{symbol}|{strike}|{exp_formatted}"
 
                 try:
-                    opt = Option(symbol, exp_raw, strike, "P", "SMART")
+                    opt_exchange = cand.get("exchange", "SMART")
+                    opt_currency = cand.get("currency", "USD")
+                    opt = Option(symbol, exp_raw, strike, "P", opt_exchange, currency=opt_currency)
                     qualified = self._ib.qualifyContracts(opt)
                     if not qualified or not qualified[0].conId:
                         logger.debug(f"Margin: could not qualify {key}")

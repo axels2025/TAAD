@@ -8,6 +8,7 @@ This module handles automated exits based on:
 - Exit reason logging
 """
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -322,12 +323,18 @@ class ExitManager:
                 f"{position_status.option_type}"
             )
 
-            import asyncio
-            trade = asyncio.run(self.ibkr_client.place_order(
-                qualified,
-                order,
-                reason=f"{decision.exit_type.upper()} exit for {position_status.symbol}"
-            ))
+            # Use the sync IB API directly. The async wrapper
+            # ibkr_client.place_order() cannot be called via asyncio.run()
+            # when the daemon's event loop is already running (deadlocks
+            # because ib_insync is bound to the main event loop).
+            self.ibkr_client.ensure_connected()
+            self.ibkr_client._validate_order(order)
+            trade = self.ibkr_client.ib.placeOrder(qualified, order)
+            logger.info(
+                f"Order placed: {qualified.symbol} {order.action} "
+                f"x{order.totalQuantity} @ ${getattr(order, 'lmtPrice', 'MKT')}"
+                f" ({decision.exit_type.upper()} exit)"
+            )
 
             # Record that we placed an exit order for this position
             self._exit_orders_placed[position_id] = (trade.order.orderId, decision.reason)
@@ -357,8 +364,7 @@ class ExitManager:
             logger.info(f"Waiting up to {max_wait_seconds}s for order to fill...")
 
             for i in range(max_wait_seconds):
-                import asyncio
-                asyncio.run(self.ibkr_client.sleep(check_interval))
+                time.sleep(check_interval)
 
                 # Log current status for debugging
                 if i == 0 or i % 5 == 0:  # Log every 5 seconds
@@ -458,22 +464,85 @@ class ExitManager:
             )
 
             # For PendingSubmit status after timeout, the order is likely rejected
-            # (e.g., due to invalid tick size - Error 110)
+            # (e.g., due to invalid tick size - Error 110). Cancel and retry
+            # with a MARKET order for exit actions (risk-reducing).
             if final_status == "PendingSubmit":
-                logger.error(
-                    f"Order stuck in PendingSubmit after {max_wait_seconds}s - likely rejected. "
-                    f"Cancelling order {trade.order.orderId}"
+                logger.warning(
+                    f"Order stuck in PendingSubmit after {max_wait_seconds}s - "
+                    f"cancelling order {trade.order.orderId}"
                 )
                 try:
-                    self.ibkr_client.cancel_order(trade)
+                    self.ibkr_client.ib.cancelOrder(trade.order)
+                    logger.info(f"Cancelled order {trade.order.orderId}")
                 except Exception as e:
                     logger.warning(f"Failed to cancel order: {e}")
+
+                # Clear the exit order tracking so retry is not blocked
+                self._exit_orders_placed.pop(position_id, None)
+
+                # Retry with MARKET order if the original was LIMIT
+                if decision.exit_type == "limit":
+                    logger.info(
+                        f"Retrying exit for {position_id} with MARKET order "
+                        f"(LIMIT @ ${getattr(order, 'lmtPrice', '?')} was rejected)"
+                    )
+                    market_order = MarketOrder(
+                        action="BUY", totalQuantity=order.totalQuantity,
+                    )
+                    market_order.tif = "DAY"
+                    retry_trade = self.ibkr_client.ib.placeOrder(qualified, market_order)
+
+                    self._exit_orders_placed[position_id] = (
+                        retry_trade.order.orderId, decision.reason,
+                    )
+
+                    # Wait up to 30s for market order to fill
+                    for _ in range(30):
+                        self.ibkr_client.ib.sleep(1)
+                        retry_status = retry_trade.orderStatus.status
+                        if retry_status == "Filled":
+                            exit_price = retry_trade.orderStatus.avgFillPrice
+                            logger.info(
+                                f"MARKET retry filled: {position_status.symbol} "
+                                f"@ ${exit_price:.2f}"
+                            )
+                            self._record_fill_in_db(
+                                position_id, exit_price, decision.reason,
+                            )
+                            return ExitResult(
+                                success=True,
+                                position_id=position_id,
+                                order_id=retry_trade.order.orderId,
+                                exit_price=exit_price,
+                                exit_reason=decision.reason,
+                            )
+                        if retry_status in ["Cancelled", "Inactive", "ApiCancelled"]:
+                            break
+
+                    retry_final = retry_trade.orderStatus.status
+                    if retry_final in ["PreSubmitted", "Submitted"]:
+                        logger.info(
+                            f"MARKET retry still working after 30s — "
+                            f"treating as success (Order ID: {retry_trade.order.orderId})"
+                        )
+                        return ExitResult(
+                            success=True,
+                            position_id=position_id,
+                            order_id=retry_trade.order.orderId,
+                            exit_price=None,
+                            exit_reason=decision.reason,
+                        )
+
+                    logger.error(
+                        f"MARKET retry also failed: {retry_final} "
+                        f"(Order ID: {retry_trade.order.orderId})"
+                    )
 
                 return ExitResult(
                     success=False,
                     position_id=position_id,
                     exit_reason=decision.reason,
-                    error_message=f"Order stuck in PendingSubmit - likely rejected (check Error 110 logs)",
+                    error_message=f"Order stuck in PendingSubmit - LIMIT and MARKET retry both failed",
                 )
 
             # For PreSubmitted/Submitted, order is working and may fill
@@ -648,10 +717,6 @@ class ExitManager:
         return results
 
     def _record_fill_in_db(self, position_id: str, exit_price: float, exit_reason: str) -> None:
-        if self.dry_run:
-            logger.info(f"[DRY RUN] Would record fill for {position_id} @ ${exit_price:.2f}")
-            return
-
         """Record a filled exit order in the database.
 
         Updates the trade with exit_date, exit_premium, P&L, and clears
@@ -662,6 +727,9 @@ class ExitManager:
             exit_price: Fill price
             exit_reason: Reason for exit
         """
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would record fill for {position_id} @ ${exit_price:.2f}")
+            return
         try:
             from src.data.database import get_db_session
 
@@ -826,27 +894,40 @@ class ExitManager:
     def _evaluate_position(self, position: PositionStatus) -> ExitDecision:
         """Evaluate a single position for exit.
 
+        Priority (with live data): profit_target > stop_loss > time_exit.
+        When market data is stale, price-dependent exits (profit/stop) are
+        skipped, but time_exit still fires — it's purely date-driven.
+
         Args:
             position: Position status
 
         Returns:
             ExitDecision: Exit decision
         """
-        # Guard: skip exit evaluation when market data is stale
-        # Without live prices, P&L is $0 and stop loss would never trigger.
-        # Explicitly flag this rather than silently holding.
+        # Guard: skip price-dependent exits when market data is stale.
+        # Without live prices, P&L is $0 — profit target and stop loss
+        # checks would be meaningless.  Time exit is allowed through
+        # since it depends only on DTE (calendar), not on quotes.
         if position.market_data_stale:
+            if self._should_exit_time(position):
+                return ExitDecision(
+                    should_exit=True,
+                    reason="time_exit",
+                    exit_type="market",
+                    urgency="high",
+                    message=f"{position.symbol}: Time exit ({position.dte} DTE)",
+                )
             logger.warning(
                 f"STALE DATA: {position.symbol} ${position.strike:.0f} — "
-                f"no live market data, skipping exit evaluation "
-                f"(stop loss NOT active for this position)"
+                f"no live market data, skipping price-based exit evaluation "
+                f"(profit target / stop loss NOT active for this position)"
             )
             return ExitDecision(
                 should_exit=False,
                 reason="stale_data",
                 message=(
-                    f"{position.symbol}: NO LIVE DATA — exit evaluation skipped "
-                    f"(stop loss inactive)"
+                    f"{position.symbol}: NO LIVE DATA — price-based exit evaluation "
+                    f"skipped (profit target / stop loss inactive)"
                 ),
             )
 
@@ -879,6 +960,23 @@ class ExitManager:
 
         # Check time exit (third priority)
         if self._should_exit_time(position):
+            # If premium is near-zero, let the option expire worthless
+            # instead of paying to close it.
+            let_expire = self.config.exit_rules.let_expire_premium
+            if let_expire > 0 and position.current_premium <= let_expire:
+                logger.info(
+                    f"LET EXPIRE: {position.symbol} ${position.strike:.0f} "
+                    f"({position.dte} DTE, premium=${position.current_premium:.2f} "
+                    f"≤ ${let_expire:.2f} threshold) — skipping close"
+                )
+                return ExitDecision(
+                    should_exit=False,
+                    reason="let_expire",
+                    message=(
+                        f"{position.symbol}: Letting expire worthless "
+                        f"(${position.current_premium:.2f} ≤ ${let_expire:.2f})"
+                    ),
+                )
             return ExitDecision(
                 should_exit=True,
                 reason="time_exit",

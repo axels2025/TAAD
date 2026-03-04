@@ -8,7 +8,7 @@ Supports pgvector semantic search for past decision retrieval.
 import json
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Optional
 
 from loguru import logger
@@ -22,7 +22,6 @@ from src.data.models import (
     Trade,
     WorkingMemoryRow,
 )
-
 
 # Maximum recent decisions to keep in memory
 MAX_RECENT_DECISIONS = 50
@@ -79,8 +78,17 @@ class ReasoningContext:
         """
         sections = []
 
-        # Data timestamp for grounding
-        sections.append(f"## Data as of: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        # Data timestamp and trading day context for grounding
+        from src.config.exchange_profile import get_active_profile
+
+        profile = get_active_profile()
+        now_market = datetime.now(profile.timezone)
+        day_name = now_market.strftime("%A")
+        market_label = profile.code  # "US" or "ASX"
+        sections.append(
+            f"## Data as of: {now_market.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+            f"({day_name} in {market_label} markets)"
+        )
 
         # Symbols in scope (explicit list for grounding)
         symbols_in_scope = set()
@@ -108,21 +116,27 @@ class ReasoningContext:
         sections.append(f"\n## Autonomy Level: L{self.autonomy_level}")
 
         if self.open_positions:
-            sections.append(f"\n## Open Positions ({len(self.open_positions)})")
+            sections.append(f"\n## Open Positions ({len(self.open_positions)}) [source: trades DB + IBKR]")
             for pos in self.open_positions:
+                opt_type = pos.get("option_type", "PUT")[0]  # "P" or "C"
+                pnl_str = pos.get("pnl_pct", "?")
+                source = pos.get("pnl_source", "")
+                if source:
+                    pnl_str = f"{pnl_str} ({source})"
                 sections.append(
-                    f"  - {pos.get('symbol', '?')} {pos.get('strike', '?')}P "
-                    f"exp={pos.get('expiration', '?')} "
-                    f"P&L={pos.get('pnl_pct', '?')}"
+                    f"  - [{pos.get('trade_id', '?')}] {pos.get('symbol', '?')} "
+                    f"{pos.get('strike', '?')}{opt_type} "
+                    f"exp={pos.get('expiration', '?')} DTE={pos.get('dte', '?')} "
+                    f"P&L={pnl_str}"
                 )
 
         if self.market_context:
-            sections.append("\n## Market Context")
+            sections.append("\n## Market Context [source: IBKR live data]")
             for key, val in self.market_context.items():
                 sections.append(f"  - {key}: {val}")
 
         if self.active_patterns:
-            sections.append(f"\n## Active Patterns ({len(self.active_patterns)})")
+            sections.append(f"\n## Active Patterns ({len(self.active_patterns)}) [source: pattern detector]")
             for p in self.active_patterns[:5]:
                 sections.append(
                     f"  - {p.get('name', '?')}: win_rate={p.get('win_rate', '?')}, "
@@ -130,15 +144,30 @@ class ReasoningContext:
                 )
 
         if self.recent_decisions:
-            sections.append(f"\n## Recent Decisions ({len(self.recent_decisions)})")
+            sections.append(f"\n## Recent Decisions ({len(self.recent_decisions)}) [source: decision audit]")
             for d in self.recent_decisions[-5:]:
-                sections.append(
+                line = (
                     f"  - [{d.get('timestamp', '?')}] {d.get('action', '?')} "
                     f"(confidence={d.get('confidence', '?')})"
                 )
+                # Execution result
+                if "executed" in d:
+                    result_msg = d.get("result", "")
+                    if result_msg:
+                        result_msg = result_msg[:80]
+                    line += f" -> executed={d['executed']}"
+                    if result_msg:
+                        line += f': "{result_msg}"'
+                # Fill counts (EXECUTE_TRADES only)
+                if d.get("filled_count") is not None:
+                    line += (
+                        f" [{d['filled_count']} filled, "
+                        f"{d.get('failed_count', 0)} failed]"
+                    )
+                sections.append(line)
 
         if self.anomalies:
-            sections.append(f"\n## Anomalies ({len(self.anomalies)})")
+            sections.append(f"\n## Anomalies ({len(self.anomalies)}) [source: guardrails]")
             for a in self.anomalies:
                 sections.append(f"  - {a.get('description', '?')}")
 
@@ -147,15 +176,29 @@ class ReasoningContext:
             sections.append(f"  {self.latest_reflection.get('summary', 'None')}")
 
         if self.staged_candidates:
-            sections.append(f"\n## Staged Candidates ({len(self.staged_candidates)})")
+            sections.append(f"\n## Staged Candidates ({len(self.staged_candidates)}) [source: scan pipeline]")
             for sc in self.staged_candidates:
-                sections.append(
-                    f"  - {sc.get('symbol', '?')} {sc.get('strike', '?')}P "
+                opt_type = sc.get("option_type", "PUT")[0]  # "P" or "C"
+                line = (
+                    f"  - {sc.get('symbol', '?')} {sc.get('strike', '?')}{opt_type} "
                     f"exp={sc.get('expiration', '?')} "
                     f"limit=${sc.get('limit_price', '?')} "
                     f"x{sc.get('contracts', '?')} "
                     f"[{sc.get('state', '?')}]"
                 )
+                # Price deviation annotation
+                staged_price = sc.get("stock_price")
+                current_price = sc.get("current_stock_price")
+                change_pct = sc.get("price_change_pct")
+                if staged_price is not None and current_price is not None and change_pct is not None:
+                    line += f" stock@staged=${staged_price} -> now=${current_price} ({change_pct:+.1f}%)"
+                    if sc.get("price_deviation_passed") is False:
+                        line += "!!!"
+                # Staleness annotation
+                if sc.get("stale"):
+                    hours = sc.get("hours_since_staged", "?")
+                    line += f" [STALE: {hours}h old]"
+                sections.append(line)
 
         if self.similar_decisions:
             sections.append(f"\n## Similar Past Decisions ({len(self.similar_decisions)})")
@@ -196,6 +239,7 @@ class WorkingMemory:
             self.anomalies = row.anomalies or []
             self.autonomy_level = row.autonomy_level
             self.reflection_reports = row.reflection_reports or []
+            self.last_scheduled_fingerprint: str = row.last_scheduled_fingerprint or ""
             logger.info(
                 f"Working memory loaded: autonomy=L{self.autonomy_level}, "
                 f"decisions={len(self.recent_decisions)}"
@@ -207,6 +251,7 @@ class WorkingMemory:
             self.anomalies: list = []
             self.autonomy_level: int = 1
             self.reflection_reports: list = []
+            self.last_scheduled_fingerprint: str = ""
             logger.info("Working memory initialized (empty)")
 
     def save(self) -> None:
@@ -222,7 +267,8 @@ class WorkingMemory:
         row.anomalies = self.anomalies
         row.autonomy_level = self.autonomy_level
         row.reflection_reports = self.reflection_reports
-        row.updated_at = datetime.utcnow()
+        row.last_scheduled_fingerprint = self.last_scheduled_fingerprint
+        row.updated_at = datetime.now(UTC)
 
         self.db.commit()
 
@@ -268,7 +314,9 @@ class WorkingMemory:
         Args:
             anomaly: Anomaly description
         """
-        anomaly["timestamp"] = datetime.utcnow().isoformat()
+        from src.utils.timezone import market_now
+
+        anomaly["timestamp"] = market_now().strftime("%Y-%m-%d %H:%M:%S %Z")
         self.anomalies.append(anomaly)
         # Keep only last 20 anomalies
         self.anomalies = self.anomalies[-20:]
@@ -280,7 +328,9 @@ class WorkingMemory:
         Args:
             reflection: Reflection report data
         """
-        reflection["timestamp"] = datetime.utcnow().isoformat()
+        from src.utils.timezone import market_now
+
+        reflection["timestamp"] = market_now().strftime("%Y-%m-%d %H:%M:%S %Z")
         self.reflection_reports.append(reflection)
         # Keep only last 30 reflections
         self.reflection_reports = self.reflection_reports[-30:]
@@ -308,6 +358,9 @@ class WorkingMemory:
 
         # Query open positions
         try:
+            from src.utils.timezone import trading_date
+
+            today = trading_date()
             open_trades = (
                 self.db.query(Trade)
                 .filter(Trade.exit_date.is_(None))
@@ -315,13 +368,15 @@ class WorkingMemory:
             )
             ctx.open_positions = [
                 {
+                    "trade_id": t.trade_id,
                     "symbol": t.symbol,
                     "strike": t.strike,
+                    "option_type": t.option_type or "PUT",
                     "expiration": str(t.expiration),
                     "entry_premium": t.entry_premium,
                     "contracts": t.contracts,
                     "entry_date": str(t.entry_date),
-                    "dte": t.dte,
+                    "dte": (t.expiration - today).days if t.expiration else 0,
                 }
                 for t in open_trades
             ]

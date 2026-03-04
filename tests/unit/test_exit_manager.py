@@ -549,9 +549,10 @@ class TestExitPriority:
 class TestExecuteExit:
     """Test exit execution."""
 
+    @patch("src.execution.exit_manager.time.sleep")
     @patch("src.data.database.get_db_session")
     def test_execute_exit_success(
-        self, mock_get_db_session, exit_manager, mock_position_monitor, mock_ibkr_client
+        self, mock_get_db_session, mock_sleep, exit_manager, mock_position_monitor, mock_ibkr_client
     ):
         """Test successful exit execution."""
         # Mock database session to avoid real DB queries
@@ -578,14 +579,15 @@ class TestExecuteExit:
 
         mock_position_monitor.update_position.return_value = position
 
-        # Mock successful order placement via ibkr_client.place_order (async)
+        # Mock successful order placement via ib.placeOrder (sync)
         mock_trade = Mock()
         mock_trade.order.orderId = 123
         mock_trade.orderStatus.status = "Filled"
         mock_trade.orderStatus.avgFillPrice = 0.26
 
-        mock_ibkr_client.place_order = AsyncMock(return_value=mock_trade)
-        mock_ibkr_client.sleep = AsyncMock(return_value=None)
+        mock_ibkr_client.ib.placeOrder = Mock(return_value=mock_trade)
+        mock_ibkr_client.ensure_connected = Mock()
+        mock_ibkr_client._validate_order = Mock()
 
         # Create exit decision
         decision = ExitDecision(
@@ -621,9 +623,10 @@ class TestExecuteExit:
         assert not result.success
         assert result.error_message == "Position not found"
 
+    @patch("src.execution.exit_manager.time.sleep")
     @patch("src.data.database.get_db_session")
     def test_execute_exit_order_rejected(
-        self, mock_get_db_session, exit_manager, mock_position_monitor, mock_ibkr_client
+        self, mock_get_db_session, mock_sleep, exit_manager, mock_position_monitor, mock_ibkr_client
     ):
         """Test exit when order is rejected."""
         # Mock database session to avoid real DB queries
@@ -649,13 +652,14 @@ class TestExecuteExit:
 
         mock_position_monitor.update_position.return_value = position
 
-        # Mock rejected order via ibkr_client.place_order (async)
+        # Mock rejected order via ib.placeOrder (sync)
         mock_trade = Mock()
         mock_trade.orderStatus.status = "Cancelled"
         mock_trade.orderStatus.whyHeld = "Rejected"
 
-        mock_ibkr_client.place_order = AsyncMock(return_value=mock_trade)
-        mock_ibkr_client.sleep = AsyncMock(return_value=None)
+        mock_ibkr_client.ib.placeOrder = Mock(return_value=mock_trade)
+        mock_ibkr_client.ensure_connected = Mock()
+        mock_ibkr_client._validate_order = Mock()
 
         decision = ExitDecision(
             should_exit=True,
@@ -696,7 +700,9 @@ class TestExecuteExit:
         )
 
         mock_position_monitor.update_position.return_value = position
-        mock_ibkr_client.place_order = AsyncMock(side_effect=Exception("Connection error"))
+        mock_ibkr_client.ib.placeOrder = Mock(side_effect=Exception("Connection error"))
+        mock_ibkr_client.ensure_connected = Mock()
+        mock_ibkr_client._validate_order = Mock()
 
         decision = ExitDecision(
             should_exit=True,
@@ -841,8 +847,8 @@ class TestEmergencyExitAll:
 class TestStaleDataGuard:
     """Test stale market data guard in exit evaluation."""
 
-    def test_stale_data_skips_exit_evaluation(self, exit_manager):
-        """Test that stale data returns reason='stale_data' and should_exit=False."""
+    def test_stale_data_skips_price_based_evaluation(self, exit_manager):
+        """Test that stale data skips price-based exits (profit/stop) but not time exit."""
         position = PositionStatus(
             position_id="POS_STALE",
             symbol="AAPL",
@@ -864,7 +870,32 @@ class TestStaleDataGuard:
         assert not decision.should_exit
         assert decision.reason == "stale_data"
         assert "NO LIVE DATA" in decision.message
-        assert "stop loss inactive" in decision.message.lower()
+        assert "profit target" in decision.message.lower()
+
+    def test_stale_data_time_exit_still_triggers(self, exit_manager):
+        """Time exit should fire even when market data is stale — it's date-driven."""
+        position = PositionStatus(
+            position_id="POS_STALE_EXPIRING",
+            symbol="AAPL",
+            strike=200.0,
+            option_type="P",
+            expiration_date="20260228",
+            contracts=5,
+            entry_premium=0.50,
+            current_premium=0.50,
+            current_pnl=0.0,
+            current_pnl_pct=0.0,
+            days_held=5,
+            dte=0,  # Expiring today — below time_exit_dte=3
+            market_data_stale=True,
+        )
+
+        decision = exit_manager._evaluate_position(position)
+
+        assert decision.should_exit
+        assert decision.reason == "time_exit"
+        assert decision.exit_type == "market"  # Market order since data is stale
+        assert decision.urgency == "high"
 
     def test_stale_data_blocks_stop_loss(self, exit_manager):
         """Test that stop loss does NOT trigger when data is stale, even with loss P&L."""
@@ -956,6 +987,125 @@ class TestStaleDataGuard:
         )
 
         assert position.market_data_stale is False
+
+
+class TestLetExpire:
+    """Test let-expire logic: skip closing near-zero premium options."""
+
+    def test_let_expire_below_threshold(self, exit_manager):
+        """Position at time_exit with premium below threshold should not close."""
+        position = PositionStatus(
+            position_id="POS_EXPIRE",
+            symbol="AAPL",
+            strike=200.0,
+            option_type="P",
+            expiration_date="20260228",
+            contracts=5,
+            entry_premium=0.50,
+            current_premium=0.03,  # Below 0.05 threshold
+            current_pnl=23.5,
+            current_pnl_pct=0.094,  # Below profit_target so time_exit path is reached
+            days_held=5,
+            dte=0,
+        )
+
+        decision = exit_manager._evaluate_position(position)
+
+        assert not decision.should_exit
+        assert decision.reason == "let_expire"
+        assert "$0.03" in decision.message
+        assert "$0.05" in decision.message
+
+    def test_let_expire_above_threshold_still_closes(self, exit_manager):
+        """Position at time_exit with premium above threshold should still close."""
+        position = PositionStatus(
+            position_id="POS_CLOSE",
+            symbol="AAPL",
+            strike=200.0,
+            option_type="P",
+            expiration_date="20260228",
+            contracts=5,
+            entry_premium=0.50,
+            current_premium=0.08,  # Above 0.05 threshold
+            current_pnl=21.0,
+            current_pnl_pct=0.084,  # Below profit_target
+            days_held=5,
+            dte=0,
+        )
+
+        decision = exit_manager._evaluate_position(position)
+
+        assert decision.should_exit
+        assert decision.reason == "time_exit"
+
+    def test_let_expire_at_threshold_does_not_close(self, exit_manager):
+        """Position at exactly the threshold should let expire (<=)."""
+        position = PositionStatus(
+            position_id="POS_EDGE",
+            symbol="AAPL",
+            strike=200.0,
+            option_type="P",
+            expiration_date="20260228",
+            contracts=5,
+            entry_premium=0.50,
+            current_premium=0.05,  # Exactly at threshold
+            current_pnl=22.5,
+            current_pnl_pct=0.09,  # Below profit_target
+            days_held=5,
+            dte=1,
+        )
+
+        decision = exit_manager._evaluate_position(position)
+
+        assert not decision.should_exit
+        assert decision.reason == "let_expire"
+
+    def test_let_expire_disabled_when_zero(self, exit_manager):
+        """Setting let_expire_premium=0 disables the feature."""
+        exit_manager.config.exit_rules.let_expire_premium = 0.0
+        position = PositionStatus(
+            position_id="POS_FORCE",
+            symbol="AAPL",
+            strike=200.0,
+            option_type="P",
+            expiration_date="20260228",
+            contracts=5,
+            entry_premium=0.50,
+            current_premium=0.02,
+            current_pnl=24.0,
+            current_pnl_pct=0.096,  # Below profit_target
+            days_held=5,
+            dte=0,
+        )
+
+        decision = exit_manager._evaluate_position(position)
+
+        assert decision.should_exit
+        assert decision.reason == "time_exit"
+
+    def test_stale_data_time_exit_ignores_let_expire(self, exit_manager):
+        """Stale data time_exit should always close — can't trust premium."""
+        position = PositionStatus(
+            position_id="POS_STALE_EXPIRE",
+            symbol="AAPL",
+            strike=200.0,
+            option_type="P",
+            expiration_date="20260228",
+            contracts=5,
+            entry_premium=0.50,
+            current_premium=0.50,  # Stale: same as entry (fallback)
+            current_pnl=0.0,
+            current_pnl_pct=0.0,
+            days_held=5,
+            dte=0,
+            market_data_stale=True,
+        )
+
+        decision = exit_manager._evaluate_position(position)
+
+        assert decision.should_exit
+        assert decision.reason == "time_exit"
+        assert decision.exit_type == "market"
 
 
 class TestExitDecisionDataclass:

@@ -14,6 +14,7 @@ from src.data.models import Trade
 from src.data.repositories import TradeRepository
 from src.nakedtrader.order_manager import BracketOrderResult
 from src.nakedtrader.strike_selector import StrikeSelection
+from src.utils.timezone import market_now
 
 
 def record_trade(
@@ -24,6 +25,8 @@ def record_trade(
     fill_time: datetime | None = None,
     vix: float | None = None,
     account_id: str | None = None,
+    currency: str = "USD",
+    multiplier: int = 100,
 ) -> Trade:
     """Record a NakedTrader trade in the database.
 
@@ -38,15 +41,23 @@ def record_trade(
         fill_time: Actual fill time (if filled), else uses now.
         vix: VIX level at entry.
         account_id: IBKR account ID.
+        currency: Trade denomination currency (USD, AUD, etc.).
+        multiplier: Option contract multiplier (100 for US, 10 for XJO).
 
     Returns:
         Created Trade record.
     """
     repo = TradeRepository(session)
-    now = fill_time or datetime.now()
+    now = fill_time or market_now()
     entry_premium = fill_price or selection.quote.bid
 
     trade_id = f"NT-{uuid.uuid4().hex[:12]}"
+
+    # Determine trade source from account ID
+    if account_id and not account_id.startswith("DU"):
+        source = "real"
+    else:
+        source = "paper"  # Default to paper if unknown or DU* account
 
     trade = Trade(
         trade_id=trade_id,
@@ -62,18 +73,21 @@ def record_trade(
         vix_at_entry=vix,
         spy_price_at_entry=selection.underlying_price,
         trade_strategy="nakedtrader",
-        trade_source="paper",
+        trade_source=source,
         bracket_status="active",
         order_id=bracket.parent_order_id,
         exit_order_id=bracket.profit_take_order_id,
         stop_order_id=bracket.stop_loss_order_id,
         account_id=account_id,
+        currency=currency,
+        multiplier=multiplier,
     )
 
     repo.create(trade)
     logger.info(
         f"Recorded trade {trade_id}: {selection.symbol} "
-        f"${selection.quote.strike}P @ ${entry_premium:.2f}"
+        f"${selection.quote.strike}P @ ${entry_premium:.2f} "
+        f"(currency={currency}, multiplier={multiplier})"
     )
 
     return trade

@@ -1,4 +1,5 @@
-"""Pre-execution guardrails: live state diff, order bounds, rate limiting.
+"""Pre-execution guardrails: live state diff, order bounds, rate limiting,
+absolute VIX circuit breaker, and earnings proximity block.
 
 Runs before trade-affecting actions (EXECUTE_TRADES, CLOSE_POSITION) to
 verify that market conditions haven't changed significantly since context
@@ -10,6 +11,8 @@ Cost: 1 IBKR data request for live state diff.
 
 import time
 from collections import deque
+from datetime import date as date_type
+from typing import Optional
 
 from loguru import logger
 
@@ -18,16 +21,18 @@ from src.agentic.guardrails.registry import GuardrailResult
 
 
 # Actions that affect order state (vs just monitoring)
-TRADE_ACTIONS = {"EXECUTE_TRADES", "CLOSE_POSITION"}
+TRADE_ACTIONS = {"EXECUTE_TRADES", "CLOSE_POSITION", "CLOSE_ALL_POSITIONS"}
 
 
 class ExecutionGate:
     """Pre-execution live state verification.
 
-    Three checks:
+    Five checks:
     1. Live state diff: VIX/SPY haven't moved too much since context was built
-    2. Order parameter bounds: premium, DTE, contracts, strike within config
-    3. Rate limiting: max orders per minute
+    2. Absolute VIX circuit breaker: blocks when VIX exceeds absolute threshold
+    3. Order parameter bounds: premium, DTE, contracts, strike within config
+    4. Rate limiting: max orders per minute
+    5. Earnings proximity: blocks execution when earnings are imminent
     """
 
     def __init__(self):
@@ -42,6 +47,8 @@ class ExecutionGate:
         **kwargs,
     ) -> list[GuardrailResult]:
         """Run all execution gate checks.
+
+        Fetches live data once and passes it to all checks that need it.
 
         Args:
             decision: DecisionOutput about to be executed
@@ -65,18 +72,32 @@ class ExecutionGate:
                 reason=f"Action {decision.action} does not require execution gate",
             )]
 
+        # Fetch live data once for all checks that need it
+        live_data = None
+        if ibkr_client is not None:
+            try:
+                live_data = self._fetch_live_data(ibkr_client)
+            except Exception as e:
+                logger.warning(f"Live state fetch failed: {e}")
+
         results = []
 
-        # 1. Live state diff (requires IBKR client)
+        # 1. Live state diff (relative VIX/SPY movement)
         results.extend(
-            self.check_live_state(decision, context, config, ibkr_client)
+            self.check_live_state(decision, context, config, ibkr_client, live_data=live_data)
         )
 
-        # 2. Order parameter bounds
+        # 2. Absolute VIX circuit breaker
+        results.extend(self.check_absolute_vix(config, live_data))
+
+        # 3. Order parameter bounds
         results.extend(self.check_order_bounds(decision, context, config))
 
-        # 3. Rate limiting
+        # 4. Rate limiting
         results.append(self.check_rate_limit(config))
+
+        # 5. Earnings proximity
+        results.extend(self.check_earnings_proximity(decision, context, config))
 
         return results
 
@@ -86,6 +107,7 @@ class ExecutionGate:
         context,
         config: GuardrailConfig,
         ibkr_client=None,
+        live_data: Optional[tuple[float, float]] = None,
     ) -> list[GuardrailResult]:
         """Check if VIX/SPY have moved significantly since context was built.
 
@@ -96,12 +118,13 @@ class ExecutionGate:
             decision: DecisionOutput
             context: ReasoningContext with market_context
             config: Guardrail configuration
-            ibkr_client: IBKR client for live data
+            ibkr_client: IBKR client for live data (used only if live_data is None)
+            live_data: Pre-fetched (live_vix, live_spy) tuple to avoid duplicate fetches
 
         Returns:
             List of GuardrailResult
         """
-        if ibkr_client is None:
+        if ibkr_client is None and live_data is None:
             return [GuardrailResult(
                 passed=True,
                 guard_name="live_state_diff",
@@ -135,18 +158,20 @@ class ExecutionGate:
                 reason="Context VIX/SPY not numeric",
             )]
 
-        # Fetch live data
-        try:
-            live_vix, live_spy = self._fetch_live_data(ibkr_client)
-        except Exception as e:
-            logger.warning(f"Live state fetch failed: {e}")
-            return [GuardrailResult(
-                passed=True,
-                guard_name="live_state_diff",
-                severity="warning",
-                reason=f"Could not fetch live data: {e}",
-            )]
+        # Use pre-fetched live data or fetch fresh
+        if live_data is None:
+            try:
+                live_data = self._fetch_live_data(ibkr_client)
+            except Exception as e:
+                logger.warning(f"Live state fetch failed: {e}")
+                return [GuardrailResult(
+                    passed=True,
+                    guard_name="live_state_diff",
+                    severity="warning",
+                    reason=f"Could not fetch live data: {e}",
+                )]
 
+        live_vix, live_spy = live_data
         results = []
 
         # Check VIX movement
@@ -199,6 +224,140 @@ class ExecutionGate:
 
         return results
 
+    def check_absolute_vix(
+        self,
+        config: GuardrailConfig,
+        live_data: Optional[tuple[float, float]] = None,
+    ) -> list[GuardrailResult]:
+        """Check if VIX exceeds absolute circuit-breaker threshold.
+
+        Complements the relative movement check — catches high VIX even when
+        context was built at a similarly high level.
+
+        Args:
+            config: Guardrail configuration
+            live_data: Pre-fetched (live_vix, live_spy) tuple
+
+        Returns:
+            List of GuardrailResult
+        """
+        if live_data is None:
+            return []
+
+        live_vix, _ = live_data
+
+        if live_vix > config.vix_absolute_block_threshold:
+            return [GuardrailResult(
+                passed=False,
+                guard_name="absolute_vix",
+                severity="block",
+                reason=(
+                    f"VIX at {live_vix:.1f} exceeds absolute threshold "
+                    f"of {config.vix_absolute_block_threshold:.1f}"
+                ),
+                details={
+                    "live_vix": live_vix,
+                    "threshold": config.vix_absolute_block_threshold,
+                },
+            )]
+
+        return [GuardrailResult(
+            passed=True,
+            guard_name="absolute_vix",
+            severity="info",
+            reason=f"VIX {live_vix:.1f} within absolute threshold",
+        )]
+
+    def check_earnings_proximity(
+        self,
+        decision,
+        context,
+        config: GuardrailConfig,
+    ) -> list[GuardrailResult]:
+        """Check if any staged candidate has earnings within block window.
+
+        Reuses the existing get_cached_earnings() utility from the earnings
+        service. Blocks execution when earnings fall within earnings_block_days
+        of the current date.
+
+        Args:
+            decision: DecisionOutput
+            context: ReasoningContext with staged_candidates
+            config: Guardrail configuration
+
+        Returns:
+            List of GuardrailResult
+        """
+        if not config.earnings_block_enabled:
+            return []
+
+        candidates = getattr(context, "staged_candidates", [])
+        if not candidates:
+            return [GuardrailResult(
+                passed=True,
+                guard_name="earnings_proximity",
+                severity="info",
+                reason="No staged candidates to check for earnings",
+            )]
+
+        results = []
+
+        for cand in candidates:
+            symbol = cand.get("symbol")
+            if not symbol:
+                continue
+
+            try:
+                from src.services.earnings_service import get_cached_earnings
+
+                exp_str = cand.get("expiration")
+                exp_date = None
+                if exp_str:
+                    try:
+                        from datetime import date, datetime
+                        if isinstance(exp_str, date_type):
+                            exp_date = exp_str
+                        else:
+                            exp_date = datetime.strptime(str(exp_str), "%Y-%m-%d").date()
+                    except (ValueError, TypeError):
+                        pass
+
+                earnings_info = get_cached_earnings(symbol, exp_date)
+
+                if (
+                    earnings_info.earnings_in_dte
+                    and earnings_info.days_to_earnings is not None
+                    and earnings_info.days_to_earnings <= config.earnings_block_days
+                ):
+                    results.append(GuardrailResult(
+                        passed=False,
+                        guard_name="earnings_proximity",
+                        severity="block",
+                        reason=(
+                            f"{symbol} has earnings in {earnings_info.days_to_earnings} day(s) "
+                            f"(block threshold: {config.earnings_block_days} days)"
+                        ),
+                        details={
+                            "symbol": symbol,
+                            "days_to_earnings": earnings_info.days_to_earnings,
+                            "earnings_date": str(earnings_info.earnings_date),
+                            "block_days": config.earnings_block_days,
+                        },
+                    ))
+            except Exception as e:
+                logger.debug(f"Earnings check failed for {symbol}: {e}")
+                continue
+
+        if not results:
+            results.append(GuardrailResult(
+                passed=True,
+                guard_name="earnings_proximity",
+                severity="info",
+                reason="No earnings conflicts detected",
+            ))
+
+        return results
+
     def check_order_bounds(
         self,
         decision,
@@ -228,14 +387,6 @@ class ExecutionGate:
             )]
 
         results = []
-        market = getattr(context, "market_context", {})
-        spy_price = None
-        try:
-            spy_val = market.get("spy_price")
-            if spy_val and spy_val != "UNKNOWN":
-                spy_price = float(spy_val)
-        except (TypeError, ValueError):
-            pass
 
         for cand in candidates:
             contracts = cand.get("contracts")
@@ -248,23 +399,26 @@ class ExecutionGate:
                     details={"candidate": cand},
                 ))
 
-            # Strike reasonableness: within 30% of SPY/underlying
+            # Strike reasonableness: within 30% of the candidate's own underlying price
             strike = cand.get("strike")
-            if strike is not None and spy_price is not None:
+            underlying_price = cand.get("stock_price")
+            if strike is not None and underlying_price is not None:
                 try:
                     strike_val = float(strike)
-                    deviation = abs(strike_val - spy_price) / spy_price
-                    if deviation > 0.30:
-                        results.append(GuardrailResult(
-                            passed=False,
-                            guard_name="order_bounds",
-                            severity="block",
-                            reason=(
-                                f"Candidate {cand.get('symbol', '?')} strike ${strike_val:.0f} "
-                                f"is {deviation:.0%} from SPY ${spy_price:.0f} (>30% limit)"
-                            ),
-                            details={"strike": strike_val, "spy_price": spy_price, "deviation": deviation},
-                        ))
+                    underlying_val = float(underlying_price)
+                    if underlying_val > 0:
+                        deviation = abs(strike_val - underlying_val) / underlying_val
+                        if deviation > 0.30:
+                            results.append(GuardrailResult(
+                                passed=False,
+                                guard_name="order_bounds",
+                                severity="block",
+                                reason=(
+                                    f"Candidate {cand.get('symbol', '?')} strike ${strike_val:.0f} "
+                                    f"is {deviation:.0%} from underlying ${underlying_val:.0f} (>30% limit)"
+                                ),
+                                details={"strike": strike_val, "underlying_price": underlying_val, "deviation": deviation},
+                            ))
                 except (TypeError, ValueError):
                     pass
 
@@ -315,29 +469,51 @@ class ExecutionGate:
         )
 
     def _fetch_live_data(self, ibkr_client) -> tuple[float, float]:
-        """Fetch live VIX and SPY from IBKR.
+        """Fetch live VIX and SPY from IBKR using sync ib_insync calls.
+
+        Uses the synchronous ib_insync API directly (qualifyContracts + reqMktData
+        + sleep) rather than going through async MarketConditionMonitor. This avoids
+        the event loop deadlock that occurs when trying to run async code from a
+        sync method while the daemon's asyncio loop is already running.
 
         Args:
-            ibkr_client: Connected IBKR client
+            ibkr_client: Connected IBKR client (must have .ib attribute)
 
         Returns:
             Tuple of (live_vix, live_spy)
         """
-        import asyncio
+        from ib_insync import Index, Stock
 
-        from src.services.market_conditions import MarketConditionMonitor
+        ib = ibkr_client.ib
+        live_vix = 20.0  # conservative default
+        live_spy = 0.0
 
-        monitor = MarketConditionMonitor(ibkr_client)
+        # Fetch VIX
+        try:
+            vix_contract = Index("VIX", "CBOE")
+            qualified = ib.qualifyContracts(vix_contract)
+            if qualified and qualified[0].conId:
+                ticker = ib.reqMktData(qualified[0], "", False, False)
+                ib.sleep(2)
+                if ticker.last is not None and ticker.last > 0:
+                    live_vix = ticker.last
+                ib.cancelMktData(qualified[0])
+        except Exception as e:
+            logger.warning(f"Execution gate VIX fetch failed: {e}")
 
-        # Run async check in sync context if needed
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                conditions = pool.submit(
-                    asyncio.run, monitor.check_conditions()
-                ).result(timeout=5)
-        else:
-            conditions = asyncio.run(monitor.check_conditions())
+        # Fetch SPY
+        try:
+            from src.config.exchange_profile import get_active_profile
+            if get_active_profile().code == "US":
+                spy_contract = Stock("SPY", "SMART", "USD")
+                qualified = ib.qualifyContracts(spy_contract)
+                if qualified and qualified[0].conId:
+                    ticker = ib.reqMktData(qualified[0], "", False, False)
+                    ib.sleep(2)
+                    if ticker.last is not None and ticker.last > 0:
+                        live_spy = ticker.last
+                    ib.cancelMktData(qualified[0])
+        except Exception as e:
+            logger.warning(f"Execution gate SPY fetch failed: {e}")
 
-        return conditions.vix, conditions.spy_price
+        return live_vix, live_spy

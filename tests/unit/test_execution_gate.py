@@ -144,11 +144,11 @@ def test_zero_contracts_blocks(gate, config):
 
 
 def test_strike_too_far_from_underlying_blocks(gate, config):
-    """Strike >30% from SPY should be blocked."""
+    """Strike >30% from underlying stock price should be blocked."""
     decision = FakeDecision(action="EXECUTE_TRADES")
     context = FakeContext(
         market_context={"spy_price": 500.0},
-        staged_candidates=[{"symbol": "AAPL", "strike": 200, "contracts": 1}],
+        staged_candidates=[{"symbol": "AAPL", "strike": 200, "contracts": 1, "stock_price": 500.0}],
     )
 
     results = gate.check_order_bounds(decision, context, config)
@@ -218,3 +218,129 @@ def test_disabled_gate_returns_empty(gate):
 
     results = gate.validate(decision, context, config)
     assert results == []
+
+
+# ---------- Absolute VIX Circuit Breaker ----------
+
+
+def test_absolute_vix_above_35_blocks(gate, config):
+    """VIX above absolute threshold should block."""
+    results = gate.check_absolute_vix(config, live_data=(36.0, 500.0))
+    blocked = [r for r in results if not r.passed and r.severity == "block"]
+    assert len(blocked) == 1
+    assert "36.0" in blocked[0].reason
+    assert "35.0" in blocked[0].reason
+
+
+def test_absolute_vix_below_35_passes(gate, config):
+    """VIX below absolute threshold should pass."""
+    results = gate.check_absolute_vix(config, live_data=(28.0, 500.0))
+    assert all(r.passed for r in results)
+    assert any("28.0" in r.reason for r in results)
+
+
+def test_absolute_vix_at_exactly_35_passes(gate, config):
+    """VIX at exactly the threshold should pass (only > blocks)."""
+    results = gate.check_absolute_vix(config, live_data=(35.0, 500.0))
+    assert all(r.passed for r in results)
+
+
+def test_absolute_vix_no_live_data(gate, config):
+    """No live data should return empty results (can't check)."""
+    results = gate.check_absolute_vix(config, live_data=None)
+    assert results == []
+
+
+# ---------- Earnings Proximity ----------
+
+
+def test_earnings_same_day_blocks(gate, config):
+    """Candidate with same-day earnings should be blocked."""
+    from unittest.mock import patch
+    from src.services.earnings_service import EarningsInfo
+    from datetime import date
+
+    mock_info = EarningsInfo(
+        earnings_date=date.today(),
+        days_to_earnings=0,
+        earnings_in_dte=True,
+    )
+
+    decision = FakeDecision(action="EXECUTE_TRADES")
+    context = FakeContext(
+        staged_candidates=[{"symbol": "AAPL", "expiration": "2026-03-20"}],
+    )
+
+    with patch("src.services.earnings_service.get_cached_earnings", return_value=mock_info):
+        results = gate.check_earnings_proximity(decision, context, config)
+
+    blocked = [r for r in results if not r.passed and r.severity == "block"]
+    assert len(blocked) == 1
+    assert "AAPL" in blocked[0].reason
+    assert "0 day" in blocked[0].reason
+
+
+def test_earnings_1_day_out_passes(gate, config):
+    """Candidate with earnings 1 day out passes when block_days=0."""
+    from unittest.mock import patch
+    from src.services.earnings_service import EarningsInfo
+    from datetime import date, timedelta
+
+    mock_info = EarningsInfo(
+        earnings_date=date.today() + timedelta(days=1),
+        days_to_earnings=1,
+        earnings_in_dte=True,
+    )
+
+    decision = FakeDecision(action="EXECUTE_TRADES")
+    context = FakeContext(
+        staged_candidates=[{"symbol": "AAPL", "expiration": "2026-03-20"}],
+    )
+
+    with patch("src.services.earnings_service.get_cached_earnings", return_value=mock_info):
+        results = gate.check_earnings_proximity(decision, context, config)
+
+    # Should pass since days_to_earnings=1 > block_days=0
+    assert all(r.passed for r in results)
+
+
+def test_earnings_check_disabled(gate):
+    """Disabled earnings check should return empty results."""
+    config = GuardrailConfig(earnings_block_enabled=False)
+    decision = FakeDecision(action="EXECUTE_TRADES")
+    context = FakeContext(
+        staged_candidates=[{"symbol": "AAPL", "expiration": "2026-03-20"}],
+    )
+
+    results = gate.check_earnings_proximity(decision, context, config)
+    assert results == []
+
+
+def test_earnings_no_candidates_passes(gate, config):
+    """No staged candidates should produce info-level pass."""
+    decision = FakeDecision(action="EXECUTE_TRADES")
+    context = FakeContext(staged_candidates=[])
+
+    results = gate.check_earnings_proximity(decision, context, config)
+    assert all(r.passed for r in results)
+    assert any("No staged" in r.reason for r in results)
+
+
+# ---------- Validate fetches live data once ----------
+
+
+def test_validate_fetches_live_data_once(gate, config):
+    """validate() should call _fetch_live_data at most once."""
+    decision = FakeDecision(action="EXECUTE_TRADES")
+    context = FakeContext(
+        market_context={"vix": 20.0, "spy_price": 500.0},
+        staged_candidates=[{"symbol": "XSP", "strike": 480, "contracts": 1}],
+    )
+
+    mock_client = MagicMock()
+    gate._fetch_live_data = MagicMock(return_value=(21.0, 502.0))
+
+    gate.validate(decision, context, config, ibkr_client=mock_client)
+
+    # _fetch_live_data should be called exactly once
+    gate._fetch_live_data.assert_called_once_with(mock_client)

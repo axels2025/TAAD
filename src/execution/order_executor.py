@@ -549,6 +549,9 @@ class OrderExecutor:
             from src.data.repositories import TradeRepository
             from src.services.entry_snapshot import EntrySnapshotService
 
+            acct = self.ibkr_client.get_account_id() if self.ibkr_client else None
+            source = "paper" if (not acct or acct.startswith("DU")) else "real"
+
             trade_record = Trade(
                 trade_id=generate_trade_id(
                     opportunity.symbol,
@@ -568,6 +571,8 @@ class OrderExecutor:
                 dte=opportunity.dte,
                 ai_reasoning=opportunity.reasoning,
                 ai_confidence=opportunity.confidence,
+                account_id=acct,
+                trade_source=source,
             )
 
             # Create new session for this save operation

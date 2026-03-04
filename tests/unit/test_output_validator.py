@@ -175,6 +175,34 @@ def test_common_abbreviations_not_flagged(validator, config):
     assert all(r.passed for r in symbol_results)
 
 
+def test_option_notation_and_autonomy_level_not_flagged(validator, config):
+    """Single letters from option notation (P=PUT, C=CALL) and autonomy levels (L1) should not be flagged.
+
+    Regression test: the daemon formats positions as '150P' and autonomy as 'L2',
+    and Claude echoes these in reasoning. The regex extracts 'P' and 'L' as
+    standalone tokens — they must be filtered out.
+    """
+    decision = FakeDecision(
+        action="MONITOR_ONLY",
+        reasoning=(
+            "Current position XSP 580P is NOT at risk. "
+            "At autonomy L2 we should hold. The IV is elevated but manageable."
+        ),
+        key_factors=["position safe", "L2 autonomy", "IV elevated"],
+    )
+    context = FakeContext(
+        open_positions=[{"symbol": "XSP", "strike": 580}],
+    )
+
+    results = validator.validate(decision, context, config)
+    symbol_results = [r for r in results if r.guard_name == "symbol_crossref"]
+
+    # P, L, NOT should all be filtered — no false positives
+    assert all(r.passed for r in symbol_results), (
+        f"False positives: {[r.reason for r in symbol_results if not r.passed]}"
+    )
+
+
 def test_symbols_from_recent_trades_known(validator, config):
     """Symbols from recent_trades should be recognized."""
     decision = FakeDecision(
@@ -228,10 +256,10 @@ def test_execute_language_with_monitor_action_warned(validator, config):
 
 
 def test_high_confidence_low_factors_warned(validator, config):
-    """High confidence (>0.85) with <3 key_factors should warn."""
+    """High confidence (>0.90) with <3 key_factors should warn."""
     decision = FakeDecision(
         action="MONITOR_ONLY",
-        confidence=0.90,
+        confidence=0.91,
         reasoning="Everything looks good and stable. VIX is low. Market is calm. No concerns at all.",
         key_factors=["VIX low"],
     )
@@ -248,7 +276,7 @@ def test_high_confidence_short_reasoning_warned(validator, config):
     """High confidence with very short reasoning should warn."""
     decision = FakeDecision(
         action="MONITOR_ONLY",
-        confidence=0.90,
+        confidence=0.91,
         reasoning="Looks good.",
         key_factors=["good"],
     )
@@ -329,3 +357,153 @@ def test_results_to_dict_serialization():
     assert serialized[0]["severity"] == "block"
     assert serialized[0]["reason"] == "Test reason"
     assert serialized[0]["details"]["key"] == "value"
+
+
+# ---------- CLOSE_ALL_POSITIONS Validation ----------
+
+
+def test_close_all_blocked_when_no_reason(validator, config):
+    """CLOSE_ALL_POSITIONS blocked when metadata.reason is missing."""
+    decision = FakeDecision(
+        action="CLOSE_ALL_POSITIONS",
+        confidence=0.95,
+        reasoning="Market crash",
+        metadata={},
+    )
+    context = FakeContext(open_positions=[{"trade_id": "T-1", "symbol": "AAPL"}])
+
+    result = validator.check_action_plausibility(decision, context)
+    assert not result.passed
+    assert result.severity == "block"
+    assert "no reason" in result.reason.lower()
+
+
+def test_close_all_passes_with_reason(validator, config):
+    """CLOSE_ALL_POSITIONS passes when metadata.reason is provided."""
+    decision = FakeDecision(
+        action="CLOSE_ALL_POSITIONS",
+        confidence=0.95,
+        reasoning="Market crash",
+        metadata={"reason": "VIX above 50"},
+    )
+    context = FakeContext(open_positions=[{"trade_id": "T-1", "symbol": "AAPL"}])
+
+    result = validator.check_action_plausibility(decision, context)
+    assert result.passed
+
+
+def test_close_all_warns_no_open_positions(validator, config):
+    """CLOSE_ALL_POSITIONS warns when no open positions in context."""
+    decision = FakeDecision(
+        action="CLOSE_ALL_POSITIONS",
+        confidence=0.95,
+        reasoning="Market crash",
+        metadata={"reason": "VIX above 50"},
+    )
+    context = FakeContext(open_positions=[])
+
+    result = validator.check_action_plausibility(decision, context)
+    assert result.passed  # warning, not block
+    assert result.severity == "warning"
+    assert "no open positions" in result.reason.lower()
+
+
+# ---------- MONITOR_ONLY Entry-Day Warning ----------
+
+
+def test_monitor_only_monday_low_vix_warns(validator, config):
+    """MONITOR_ONLY on Monday with VIX=18 should warn."""
+    import datetime as dt_module
+    from unittest.mock import patch, MagicMock
+
+    decision = FakeDecision(action="MONITOR_ONLY", confidence=0.8)
+    context = FakeContext(market_context={"vix": 18.0})
+
+    fake_profile = MagicMock()
+    fake_profile.timezone = dt_module.timezone.utc
+
+    # Monday 2026-03-02 at noon UTC
+    monday = dt_module.datetime(2026, 3, 2, 12, 0, 0, tzinfo=dt_module.timezone.utc)
+
+    with patch("src.config.exchange_profile.get_active_profile", return_value=fake_profile):
+        with patch("src.agentic.guardrails.output_validator.datetime") as mock_dt:
+            mock_dt.now.return_value = monday
+            result = validator.check_action_plausibility(decision, context)
+
+    assert result.passed  # warning, not block
+    assert result.severity == "warning"
+    assert "entry day" in result.reason.lower()
+
+
+def test_monitor_only_wednesday_no_warning(validator, config):
+    """MONITOR_ONLY on Wednesday should not warn."""
+    import datetime as dt_module
+    from unittest.mock import patch, MagicMock
+
+    decision = FakeDecision(action="MONITOR_ONLY", confidence=0.8)
+    context = FakeContext(market_context={"vix": 18.0})
+
+    fake_profile = MagicMock()
+    fake_profile.timezone = dt_module.timezone.utc
+
+    # Wednesday 2026-03-04 at noon UTC
+    wednesday = dt_module.datetime(2026, 3, 4, 12, 0, 0, tzinfo=dt_module.timezone.utc)
+
+    with patch("src.config.exchange_profile.get_active_profile", return_value=fake_profile):
+        with patch("src.agentic.guardrails.output_validator.datetime") as mock_dt:
+            mock_dt.now.return_value = wednesday
+            result = validator.check_action_plausibility(decision, context)
+
+    assert result.passed
+    assert result.severity == "info"  # Not a warning
+
+
+def test_monitor_only_monday_extreme_vix_no_warning(validator, config):
+    """MONITOR_ONLY on Monday with VIX=45 (>40) should not warn."""
+    import datetime as dt_module
+    from unittest.mock import patch, MagicMock
+
+    decision = FakeDecision(action="MONITOR_ONLY", confidence=0.8)
+    context = FakeContext(market_context={"vix": 45.0})
+
+    fake_profile = MagicMock()
+    fake_profile.timezone = dt_module.timezone.utc
+
+    # Monday 2026-03-02 at noon UTC
+    monday = dt_module.datetime(2026, 3, 2, 12, 0, 0, tzinfo=dt_module.timezone.utc)
+
+    with patch("src.config.exchange_profile.get_active_profile", return_value=fake_profile):
+        with patch("src.agentic.guardrails.output_validator.datetime") as mock_dt:
+            mock_dt.now.return_value = monday
+            result = validator.check_action_plausibility(decision, context)
+
+    assert result.passed
+    assert result.severity == "info"  # VIX >= 40 — no warning
+
+
+# ---------- Updated Confidence Threshold Tests ----------
+
+
+def test_confidence_0_91_with_few_factors_warns(validator, config):
+    """Confidence 0.91 with 2 key_factors triggers warning (updated threshold)."""
+    decision = FakeDecision(
+        action="MONITOR_ONLY",
+        confidence=0.91,
+        reasoning="Everything is stable. VIX is low. Market is calm. All positions normal.",
+        key_factors=["VIX low", "market stable"],
+    )
+    results = validator.check_reasoning_coherence(decision)
+    warned = [r for r in results if not r.passed]
+    assert any("key factors" in r.reason for r in warned)
+
+
+def test_confidence_0_87_with_few_factors_no_warning(validator, config):
+    """Confidence 0.87 with 2 key_factors should NOT warn (below new 0.90 threshold)."""
+    decision = FakeDecision(
+        action="MONITOR_ONLY",
+        confidence=0.87,
+        reasoning="Everything is stable. VIX is low. Market is calm. All positions normal.",
+        key_factors=["VIX low", "market stable"],
+    )
+    results = validator.check_reasoning_coherence(decision)
+    assert all(r.passed for r in results)

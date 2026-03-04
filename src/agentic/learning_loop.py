@@ -208,7 +208,7 @@ class LearningLoop:
             decision = (
                 self.db.query(DecisionAudit)
                 .filter(
-                    DecisionAudit.action.in_(["EXECUTE_TRADES", "CLOSE_POSITION"]),
+                    DecisionAudit.action.in_(["EXECUTE_TRADES", "CLOSE_POSITION", "CLOSE_ALL_POSITIONS"]),
                     DecisionAudit.executed == True,  # noqa: E712
                     DecisionAudit.timestamp <= trade.entry_date,
                 )

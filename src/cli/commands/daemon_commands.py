@@ -1,14 +1,17 @@
 """CLI commands for the TAAD daemon.
 
 Provides Typer subgroup `daemon` with commands:
-start, status, context, pause, resume, override, set-autonomy, audit, costs, emergency-stop
+start, status, context, pause, resume, override, set-autonomy, audit, costs,
+emergency-stop, watchdog, install-service, uninstall-service
 """
 
 import json
 import os
 import signal
+import subprocess
+import sys
 from datetime import date, datetime
-from typing import Optional
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -16,7 +19,6 @@ from rich.table import Table
 
 from src.config.logging import setup_logging
 from src.data.database import get_db_session, init_database
-
 
 daemon_app = typer.Typer(
     name="daemon",
@@ -29,11 +31,20 @@ console = Console()
 
 @daemon_app.command(name="start")
 def daemon_start(
-    config: Optional[str] = typer.Option(None, help="Path to phase5.yaml"),
+    config: str | None = typer.Option(None, help="Path to phase5.yaml"),
     foreground: bool = typer.Option(False, "--fg", help="Run in foreground (no daemonize)"),
 ) -> None:
     """Start the TAAD daemon."""
     from src.agentic.health_monitor import HealthMonitor
+
+    # Warn if launchd is managing the daemon
+    plist = Path.home() / "Library/LaunchAgents/com.taad.daemon.plist"
+    if plist.exists():
+        console.print(
+            "[yellow]Warning: launchd service com.taad.daemon is installed.[/yellow]\n"
+            "[yellow]Use 'nakedtrader daemon uninstall-service' to remove it first, "
+            "or let launchd manage the daemon lifecycle.[/yellow]"
+        )
 
     # Check if already running
     pid = HealthMonitor.is_daemon_running()
@@ -44,7 +55,16 @@ def daemon_start(
     setup_logging()
     console.print("[bold blue]Starting TAAD daemon...[/bold blue]")
 
+    from src.agentic.config import load_phase5_config
     from src.agentic.daemon import start_daemon
+
+    cfg = load_phase5_config(config)
+    host = cfg.dashboard.host
+    port = cfg.dashboard.port
+    console.print(
+        f"[dim]Dashboard: run [bold]nakedtrader dashboard[/bold] "
+        f"in another terminal, then open http://{host}:{port}[/dim]"
+    )
 
     try:
         start_daemon(config_path=config)
@@ -188,9 +208,12 @@ def daemon_set_autonomy(
             health.autonomy_level = level
             health.message = f"Autonomy set to L{level} by CLI"
 
-        # Update working memory
+        # Update working memory (create row if needed)
         row = db.query(WorkingMemoryRow).get(1)
-        if row:
+        if row is None:
+            row = WorkingMemoryRow(id=1, autonomy_level=level)
+            db.add(row)
+        else:
             row.autonomy_level = level
 
         db.commit()
@@ -333,6 +356,18 @@ def daemon_emergency_stop() -> None:
         except ProcessLookupError:
             console.print("[dim]Daemon process not found[/dim]")
 
+    # Unload launchd plist so it doesn't auto-restart the daemon
+    plist = Path.home() / "Library/LaunchAgents/com.taad.daemon.plist"
+    if plist.exists():
+        try:
+            subprocess.run(
+                ["launchctl", "unload", str(plist)],
+                capture_output=True,
+            )
+            console.print("[yellow]Unloaded launchd daemon plist (prevents auto-restart)[/yellow]")
+        except Exception:
+            console.print("[dim]Could not unload launchd plist[/dim]")
+
     console.print("[green]Emergency stop complete[/green]")
 
 
@@ -347,7 +382,7 @@ def daemon_pending() -> None:
         pending = (
             db.query(DecisionAudit)
             .filter(
-                DecisionAudit.executed == False,
+                DecisionAudit.executed.is_(False),
                 DecisionAudit.action != "MONITOR_ONLY",
                 DecisionAudit.human_decision.is_(None),
             )
@@ -364,7 +399,6 @@ def daemon_pending() -> None:
 
         for d in pending:
             from rich.panel import Panel
-            from rich.text import Text
 
             # Header line
             header = f"[bold yellow]#{d.id}[/bold yellow]  [bold]{d.action}[/bold]  confidence={d.confidence:.2f}  L{d.autonomy_level}"
@@ -377,7 +411,7 @@ def daemon_pending() -> None:
                 lines.append(f"[bold]Reasoning:[/bold]\n{d.reasoning}\n")
 
             if d.key_factors:
-                factors = d.key_factors if isinstance(d.key_factors, list) else []
+                factors: list = d.key_factors if isinstance(d.key_factors, list) else []
                 if factors:
                     lines.append("[bold]Key Factors:[/bold]")
                     for f in factors:
@@ -385,7 +419,7 @@ def daemon_pending() -> None:
                     lines.append("")
 
             if d.risks_considered:
-                risks = d.risks_considered if isinstance(d.risks_considered, list) else []
+                risks: list = d.risks_considered if isinstance(d.risks_considered, list) else []
                 if risks:
                     lines.append("[bold]Risks Considered:[/bold]")
                     for r in risks:
@@ -496,14 +530,14 @@ def daemon_reject(
 def daemon_dashboard(
     host: str = typer.Option("127.0.0.1", help="Host to bind to"),
     port: int = typer.Option(8080, help="Port to listen on"),
-    config: Optional[str] = typer.Option(None, help="Path to phase5.yaml"),
+    config: str | None = typer.Option(None, help="Path to phase5.yaml"),
 ) -> None:
     """Start the web dashboard."""
     try:
         import uvicorn
-    except ImportError:
+    except ImportError as e:
         console.print("[red]uvicorn not installed. Run: pip install uvicorn[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     from src.agentic.config import load_phase5_config
     from src.agentic.dashboard_api import create_dashboard_app
@@ -521,7 +555,7 @@ def daemon_dashboard(
     if not auth_token:
         console.print("[yellow]No auth token configured — dashboard is unauthenticated[/yellow]")
 
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 @daemon_app.command(name="override")
@@ -537,3 +571,205 @@ def daemon_override(
     else:
         console.print("[red]Action must be 'approve' or 'reject'[/red]")
         raise typer.Exit(1)
+
+
+# ── Watchdog & launchd service commands ─────────────────────
+
+
+@daemon_app.command(name="watchdog")
+def daemon_watchdog(
+    foreground: bool = typer.Option(False, "--fg", help="Run in foreground"),
+    interval: int = typer.Option(60, help="Check interval in seconds"),
+    stale_warn: int = typer.Option(180, "--stale-warn", help="Heartbeat WARNING threshold (seconds)"),
+    stale_crit: int = typer.Option(300, "--stale-crit", help="Heartbeat CRITICAL threshold (seconds)"),
+) -> None:
+    """Start the daemon watchdog (monitors heartbeat, sends alerts)."""
+    from src.services.watchdog import DaemonWatchdog
+
+    # Check if already running
+    pid_path = Path("run/watchdog.pid")
+    if pid_path.exists():
+        try:
+            existing_pid = int(pid_path.read_text().strip())
+            os.kill(existing_pid, 0)
+            console.print(f"[yellow]Watchdog already running (pid={existing_pid})[/yellow]")
+            raise typer.Exit(1)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass  # Stale PID file — OK to proceed
+
+    setup_logging()
+    init_database()
+
+    console.print(
+        f"[bold blue]Starting watchdog[/bold blue] "
+        f"(interval={interval}s, warn={stale_warn}s, crit={stale_crit}s)"
+    )
+
+    wd = DaemonWatchdog(
+        interval=interval,
+        stale_warn=stale_warn,
+        stale_crit=stale_crit,
+    )
+
+    try:
+        wd.run()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Watchdog stopped by user[/yellow]")
+
+
+@daemon_app.command(name="install-service")
+def daemon_install_service(
+    watchdog_only: bool = typer.Option(False, "--watchdog-only", help="Only install watchdog plist"),
+    daemon_only: bool = typer.Option(False, "--daemon-only", help="Only install daemon plist"),
+) -> None:
+    """Install launchd services for daemon and/or watchdog.
+
+    Creates plist files in ~/Library/LaunchAgents/ and loads them
+    with launchctl. The daemon plist restarts on crash only;
+    the watchdog plist stays running always.
+    """
+    launch_dir = Path.home() / "Library/LaunchAgents"
+    launch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Derive paths dynamically
+    project_root = Path(__file__).resolve().parents[3]
+    venv_python = Path(sys.executable)
+
+    installed = []
+
+    if not watchdog_only:
+        plist_path = launch_dir / "com.taad.daemon.plist"
+        xml = _generate_plist(
+            label="com.taad.daemon",
+            program_args=[
+                str(venv_python), "-m", "src.cli.main",
+                "daemon", "start", "--fg",
+            ],
+            working_directory=str(project_root),
+            log_prefix="daemon",
+            keep_alive_on_crash=True,
+        )
+        plist_path.write_text(xml)
+        subprocess.run(["launchctl", "load", str(plist_path)], check=True)
+        installed.append(("com.taad.daemon", plist_path))
+
+    if not daemon_only:
+        plist_path = launch_dir / "com.taad.watchdog.plist"
+        xml = _generate_plist(
+            label="com.taad.watchdog",
+            program_args=[
+                str(venv_python), "-m", "src.cli.main",
+                "daemon", "watchdog", "--fg",
+            ],
+            working_directory=str(project_root),
+            log_prefix="watchdog",
+            keep_alive_always=True,
+        )
+        plist_path.write_text(xml)
+        subprocess.run(["launchctl", "load", str(plist_path)], check=True)
+        installed.append(("com.taad.watchdog", plist_path))
+
+    for label, path in installed:
+        console.print(f"[green]Installed {label}[/green] -> {path}")
+
+    console.print(
+        "\n[dim]Verify with: launchctl list | grep taad[/dim]"
+        "\n[dim]Remove with: nakedtrader daemon uninstall-service[/dim]"
+    )
+
+
+@daemon_app.command(name="uninstall-service")
+def daemon_uninstall_service() -> None:
+    """Uninstall launchd services for daemon and watchdog."""
+    launch_dir = Path.home() / "Library/LaunchAgents"
+
+    for label in ("com.taad.daemon", "com.taad.watchdog"):
+        plist_path = launch_dir / f"{label}.plist"
+        if not plist_path.exists():
+            console.print(f"[dim]{label} not installed[/dim]")
+            continue
+
+        try:
+            subprocess.run(
+                ["launchctl", "unload", str(plist_path)],
+                capture_output=True,
+            )
+        except Exception:
+            pass
+
+        plist_path.unlink(missing_ok=True)
+        console.print(f"[green]Removed {label}[/green]")
+
+    console.print("[dim]Services uninstalled[/dim]")
+
+
+def _generate_plist(
+    label: str,
+    program_args: list[str],
+    working_directory: str,
+    log_prefix: str,
+    keep_alive_on_crash: bool = False,
+    keep_alive_always: bool = False,
+    throttle_interval: int = 30,
+) -> str:
+    """Generate a macOS launchd plist XML string.
+
+    Args:
+        label: Service label (e.g. com.taad.daemon)
+        program_args: Command and arguments to run
+        working_directory: Working directory for the process
+        log_prefix: Prefix for log files in logs/ directory
+        keep_alive_on_crash: Restart only on non-zero exit
+        keep_alive_always: Always keep running
+        throttle_interval: Min seconds between restarts
+
+    Returns:
+        plist XML string
+    """
+    log_dir = Path(working_directory) / "logs"
+
+    # Build KeepAlive section
+    if keep_alive_always:
+        keep_alive = "    <key>KeepAlive</key>\n    <true/>"
+    elif keep_alive_on_crash:
+        keep_alive = (
+            "    <key>KeepAlive</key>\n"
+            "    <dict>\n"
+            "      <key>SuccessfulExit</key>\n"
+            "      <false/>\n"
+            "    </dict>"
+        )
+    else:
+        keep_alive = "    <key>KeepAlive</key>\n    <false/>"
+
+    # Build ProgramArguments array
+    args_xml = "\n".join(f"      <string>{a}</string>" for a in program_args)
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{working_directory}</string>
+{keep_alive}
+    <key>ThrottleInterval</key>
+    <integer>{throttle_interval}</integer>
+    <key>StandardOutPath</key>
+    <string>{log_dir}/{log_prefix}-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>{log_dir}/{log_prefix}-launchd.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
+"""

@@ -10,11 +10,13 @@ Zero additional Claude API calls. All pure Python logic.
 """
 
 import re
+from datetime import datetime
 
 from loguru import logger
 
 from src.agentic.guardrails.config import GuardrailConfig
 from src.agentic.guardrails.registry import GuardrailResult
+from src.config.exchange_profile import get_active_profile
 
 # Common financial abbreviations that should NOT be flagged as unknown symbols
 COMMON_ABBREVIATIONS = {
@@ -23,13 +25,14 @@ COMMON_ABBREVIATIONS = {
     "FOMC", "CPI", "PPI", "GDP", "PCE", "NFP", "OPEX",
     "ROI", "NAV", "AUM", "EOD", "YTD", "MTD", "QTD",
     "BTO", "STC", "STO", "BTC",  # Options order types
-    "USD", "EUR", "GBP", "JPY",  # Currencies
-    "NYSE", "NASDAQ", "CBOE", "CME",  # Exchanges
+    "USD", "EUR", "GBP", "JPY", "AUD",  # Currencies
+    "NYSE", "NASDAQ", "CBOE", "CME", "ASX",  # Exchanges
     "IBKR", "TWS", "API",  # Platforms
-    "SEC", "FINRA", "IRS",  # Regulators
+    "SEC", "FINRA", "IRS", "ASIC",  # Regulators
     "JSON", "HTML", "CSV",  # Formats
-    "PM", "AM", "ET", "EST", "EDT", "UTC",  # Time
-    "QQQ", "IWM", "XSP", "XLE", "XLF", "XLK", "XLV",  # Common ETFs
+    "PM", "AM", "ET", "EST", "EDT", "UTC", "AEDT", "AEST",  # Time / timezones
+    "QQQ", "IWM", "XSP", "XLE", "XLF", "XLK", "XLV",  # Common ETFs (US)
+    "XJO", "NDQ",  # Common ASX ETFs / indices
     "TAAD",  # Our system
     "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN",  # Days
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
@@ -116,15 +119,18 @@ class OutputValidator:
                     details={"action": action, "staged_count": 0},
                 )
 
-        # CLOSE_POSITION requires a valid position_id
+        # CLOSE_POSITION requires a valid position identifier
         if action == "CLOSE_POSITION":
-            position_id = metadata.get("position_id")
+            position_id = (
+                metadata.get("position_id")
+                or metadata.get("trade_id")
+            )
             if not position_id:
                 return GuardrailResult(
                     passed=False,
                     guard_name="action_plausibility",
                     severity="block",
-                    reason="CLOSE_POSITION requested but no position_id in metadata",
+                    reason="CLOSE_POSITION requested but no position_id or trade_id in metadata",
                     details={"action": action, "metadata": metadata},
                 )
             # Check that position_id matches an open position in context
@@ -136,16 +142,66 @@ class OutputValidator:
             if (
                 str(position_id) not in open_trade_ids
                 and str(position_id) not in open_symbols
-                and not context.open_positions  # If no positions at all, definitely wrong
             ):
                 if not context.open_positions:
                     return GuardrailResult(
                         passed=False,
                         guard_name="action_plausibility",
                         severity="block",
-                        reason=f"CLOSE_POSITION requested but no open positions in context",
+                        reason="CLOSE_POSITION requested but no open positions in context",
                         details={"action": action, "position_id": position_id},
                     )
+                return GuardrailResult(
+                    passed=False,
+                    guard_name="action_plausibility",
+                    severity="warning",
+                    reason=f"CLOSE_POSITION: '{position_id}' not found in open positions (may use a different ID format)",
+                    details={
+                        "action": action,
+                        "position_id": position_id,
+                        "open_trade_ids": sorted(open_trade_ids),
+                    },
+                )
+
+        # CLOSE_ALL_POSITIONS requires a reason in metadata
+        if action == "CLOSE_ALL_POSITIONS":
+            if not metadata.get("reason"):
+                return GuardrailResult(
+                    passed=False,
+                    guard_name="action_plausibility",
+                    severity="block",
+                    reason="CLOSE_ALL_POSITIONS requested but no reason in metadata",
+                    details={"action": action, "metadata": metadata},
+                )
+            if not context.open_positions:
+                return GuardrailResult(
+                    passed=True,
+                    guard_name="action_plausibility",
+                    severity="warning",
+                    reason="CLOSE_ALL_POSITIONS requested but no open positions in context",
+                    details={"action": action, "open_positions": 0},
+                )
+
+        # MONITOR_ONLY on entry day with VIX<40 — may miss opportunity
+        if action == "MONITOR_ONLY":
+            try:
+                profile = get_active_profile()
+                now_market = datetime.now(profile.timezone)
+                day_of_week = now_market.weekday()  # 0=Monday, 1=Tuesday
+                vix = (context.market_context or {}).get("vix")
+                if day_of_week in (0, 1) and vix is not None and vix < 40:
+                    return GuardrailResult(
+                        passed=True,
+                        guard_name="action_plausibility",
+                        severity="warning",
+                        reason=(
+                            f"MONITOR_ONLY on entry day with VIX {vix} (<40) "
+                            f"— may miss opportunity"
+                        ),
+                        details={"action": action, "day_of_week": day_of_week, "vix": vix},
+                    )
+            except Exception:
+                pass  # Non-critical warning — don't block on import/timezone errors
 
         # RUN_EXPERIMENT requires experiment parameters
         if action == "RUN_EXPERIMENT":
@@ -198,10 +254,46 @@ class OutputValidator:
         text = (decision.reasoning or "") + " " + " ".join(decision.key_factors or [])
         found_symbols = set(_TICKER_RE.findall(text))
 
-        # Filter out common abbreviations and very short tokens (1-2 chars that are common words)
-        short_words = {"A", "I", "AN", "AM", "AS", "AT", "BE", "BY", "DO", "GO",
-                       "IF", "IN", "IS", "IT", "MY", "NO", "OF", "OK", "ON", "OR",
-                       "SO", "TO", "UP", "US", "WE"}
+        # Filter out common abbreviations, short words, and domain-specific tokens.
+        # Single letters appear in option notation (150P = PUT, 200C = CALL) and
+        # autonomy levels (L1, L2). Common English words appear when Claude
+        # uses natural language in uppercase context (e.g. "STEP 1 - POSITION CHECK").
+        short_words = {
+            # Single letters (option notation: P=PUT, C=CALL; autonomy: L=Level)
+            "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+            "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+            # 2-letter common words
+            "AN", "AM", "AS", "AT", "BE", "BY", "DO", "GO",
+            "IF", "IN", "IS", "IT", "MY", "NO", "OF", "OK", "ON", "OR",
+            "SO", "TO", "UP", "US", "WE", "HE",
+            # 3-letter English words that appear in reasoning
+            "NOT", "AND", "BUT", "FOR", "THE", "HAS", "HAD", "ARE", "WAS",
+            "ALL", "ANY", "CAN", "MAY", "NEW", "NOW", "OLD", "OUR", "OUT",
+            "OWN", "SAY", "TOO", "TWO", "WAY", "WHO", "DAY", "GET", "HIS",
+            "HOW", "ITS", "LET", "PUT", "SET", "TRY", "USE", "YET",
+            "LOW", "HIGH", "MAX", "MIN", "NET", "PER", "PRE", "RUN",
+            # 4-letter English words (appear in Claude's structured reasoning headers)
+            "ALSO", "BACK", "BEEN", "BEST", "BOTH", "CALL", "CASE", "COME",
+            "COST", "DATA", "DATE", "DAYS", "DOES", "DONE", "DOWN", "EACH",
+            "EVEN", "EXIT", "FIND", "FIVE", "FROM", "FULL", "GIVE", "GOOD",
+            "HALF", "HAVE", "HELD", "HERE", "HOLD", "INTO", "JUST", "KEEP",
+            "LAST", "LESS", "LIKE", "LONG", "LOSS", "MADE", "MAKE", "MORE",
+            "MOST", "MUCH", "MUST", "NEAR", "NEED", "NEXT", "NINE", "NONE",
+            "ONCE", "ONLY", "OPEN", "OVER", "PAST", "PICK", "PLAN", "POST",
+            "RISK", "SEEN", "SHOW", "SIDE", "SIGN", "SOME", "STEP", "STOP",
+            "SURE", "TAKE", "THAN", "THAT", "THEM", "THEN", "THEY", "THIS",
+            "TIME", "TOOK", "VERY", "WAIT", "WELL", "WENT", "WERE", "WHAT",
+            "WHEN", "WILL", "WITH", "WORK", "YEAR", "ZERO",
+            # 5-letter English words (common in trading reasoning)
+            "ABOVE", "AFTER", "BEING", "BELOW", "CHECK", "CLEAR", "CLOSE",
+            "COULD", "ENTRY", "EVERY", "FIRST", "GIVEN", "GOING", "GREAT",
+            "LARGE", "LEVEL", "LIMIT", "LOSES", "LOWER", "MIGHT", "MONEY",
+            "NEVER", "OTHER", "POINT", "PRICE", "PRIME", "PRIOR", "QUICK",
+            "RANGE", "SINCE", "SMALL", "STILL", "STOCK", "THERE", "THESE",
+            "THOSE", "THREE", "TODAY", "TOTAL", "TRADE", "TREND", "UNDER",
+            "UNTIL", "UPPER", "VALUE", "WATCH", "WHERE", "WHICH", "WHILE",
+            "WHOLE", "WHOSE", "WOULD", "WORST",
+        }
         unknown_symbols = found_symbols - known_symbols - COMMON_ABBREVIATIONS - short_words
 
         if not unknown_symbols:
@@ -214,11 +306,13 @@ class OutputValidator:
 
         results = []
         # Check if unknown symbols appear in action-critical context
+        # CLOSE_POSITION gets "warning" not "block" because action_plausibility
+        # already validates the trade_id matches an actual open position.
         action = decision.action
-        action_critical = action in ("EXECUTE_TRADES", "CLOSE_POSITION", "STAGE_CANDIDATES")
+        action_block = action in ("EXECUTE_TRADES", "STAGE_CANDIDATES")
 
         for sym in unknown_symbols:
-            severity = "block" if action_critical else "warning"
+            severity = "block" if action_block else "warning"
             results.append(GuardrailResult(
                 passed=False,
                 guard_name="symbol_crossref",
@@ -276,7 +370,7 @@ class OutputValidator:
             ))
 
         # High confidence with insufficient support
-        if confidence > 0.85:
+        if confidence > 0.90:
             if len(key_factors) < 3:
                 results.append(GuardrailResult(
                     passed=False,

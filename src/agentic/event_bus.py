@@ -7,11 +7,12 @@ use MarketCalendar. IBKR callbacks register for fill/disconnect/reconnect.
 
 import asyncio
 from collections.abc import AsyncGenerator
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Optional
 
 from loguru import logger
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from src.data.models import DaemonEvent
@@ -33,6 +34,7 @@ class EventType(str, Enum):
     TWS_RECONNECTED = "TWS_RECONNECTED"
     MARKET_OPEN = "MARKET_OPEN"
     MARKET_CLOSE = "MARKET_CLOSE"
+    POSITION_EXIT_CHECK = "POSITION_EXIT_CHECK"
 
     # Priority 4 - Normal
     HUMAN_OVERRIDE = "HUMAN_OVERRIDE"
@@ -54,6 +56,7 @@ EVENT_PRIORITIES: dict[EventType, int] = {
     EventType.TWS_RECONNECTED: 3,
     EventType.MARKET_OPEN: 3,
     EventType.MARKET_CLOSE: 3,
+    EventType.POSITION_EXIT_CHECK: 3,
     EventType.HUMAN_OVERRIDE: 4,
     EventType.SCHEDULED_CHECK: 4,
     EventType.EOD_REFLECTION: 5,
@@ -104,7 +107,7 @@ class EventBus:
             priority=priority,
             status="pending",
             payload=payload or {},
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(UTC),
         )
         self.db.add(event)
         self.db.commit()
@@ -113,7 +116,11 @@ class EventBus:
         return event
 
     def get_pending_events(self, limit: int = 10) -> list[DaemonEvent]:
-        """Get pending events ordered by priority then creation time.
+        """Get claimable (status='pending') events ordered by priority then creation time.
+
+        Used during steady-state polling. Only returns events that have not yet
+        been claimed — avoids re-yielding events already in-flight (status='processing'),
+        which would spam "already claimed" warnings every poll cycle.
 
         Args:
             limit: Maximum events to return
@@ -123,21 +130,62 @@ class EventBus:
         """
         return (
             self.db.query(DaemonEvent)
-            .filter(DaemonEvent.status.in_(["pending", "processing"]))
+            .filter(DaemonEvent.status == "pending")
             .order_by(DaemonEvent.priority, DaemonEvent.created_at)
             .limit(limit)
             .all()
         )
 
-    def mark_processing(self, event: DaemonEvent) -> None:
-        """Mark event as being processed.
+    def reset_stale_processing_events(self) -> int:
+        """Reset 'processing' events back to 'pending' on startup.
+
+        Called once at daemon startup to recover from a previous crash.
+        Events stuck in 'processing' were claimed by a process that no longer
+        exists — resetting them to 'pending' lets the new process claim them
+        normally via mark_processing() (which guards on status='pending').
+
+        Returns:
+            Number of events reset
+        """
+        result = self.db.execute(
+            sa_update(DaemonEvent)
+            .where(DaemonEvent.status == "processing")
+            .values(status="pending")
+        )
+        self.db.commit()
+        if result.rowcount:
+            logger.info(
+                f"Reset {result.rowcount} stale 'processing' events to 'pending' (crash recovery)"
+            )
+        return result.rowcount
+
+    def mark_processing(self, event: DaemonEvent) -> bool:
+        """Atomically claim an event for processing.
+
+        Uses a SQL-level UPDATE WHERE status='pending' so that two daemon
+        processes running simultaneously cannot both claim the same event.
 
         Args:
-            event: The event to mark
+            event: The event to claim
+
+        Returns:
+            True if this caller successfully claimed the event, False if it
+            was already claimed by another process.
         """
-        event.status = "processing"
-        event.processed_at = datetime.utcnow()
+        result = self.db.execute(
+            sa_update(DaemonEvent)
+            .where(DaemonEvent.id == event.id)
+            .where(DaemonEvent.status == "pending")
+            .values(status="processing", processed_at=datetime.now(UTC))
+        )
         self.db.commit()
+        if result.rowcount == 0:
+            # Event was completed/failed between the poll and the claim attempt.
+            # This is normal under concurrent load — log at debug, not warning.
+            logger.debug(f"Event {event.id} no longer claimable (completed or failed)")
+            return False
+        self.db.refresh(event)
+        return True
 
     def mark_completed(self, event: DaemonEvent) -> None:
         """Mark event as completed.
@@ -146,7 +194,7 @@ class EventBus:
             event: The event to mark
         """
         event.status = "completed"
-        event.completed_at = datetime.utcnow()
+        event.completed_at = datetime.now(UTC)
         self.db.commit()
 
     def mark_failed(self, event: DaemonEvent, error: str) -> None:
@@ -158,7 +206,7 @@ class EventBus:
         """
         event.status = "failed"
         event.error_message = error
-        event.completed_at = datetime.utcnow()
+        event.completed_at = datetime.now(UTC)
         self.db.commit()
 
     async def stream(
@@ -176,17 +224,27 @@ class EventBus:
         Yields:
             DaemonEvent records in priority order
         """
-        # Replay pending events on startup
+        # Startup crash recovery: reset any events stuck in 'processing' from a
+        # previous run back to 'pending' so mark_processing() can claim them cleanly.
+        self.reset_stale_processing_events()
+
+        # Replay events that were pending at startup
         pending = self.get_pending_events(limit=max_events)
         if pending:
             logger.info(f"Replaying {len(pending)} pending events from DB")
             for event in pending:
+                if self._stop_event.is_set():
+                    return
                 yield event
 
-        # Poll for new events
+        # Steady-state polling: only 'pending' events are fetched.
+        # Completed/failed events are excluded; in-flight events are excluded
+        # (they were claimed by mark_processing and are now 'processing').
         while not self._stop_event.is_set():
             events = self.get_pending_events(limit=max_events)
             for event in events:
+                if self._stop_event.is_set():
+                    return
                 yield event
 
             try:

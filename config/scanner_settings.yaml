@@ -1,9 +1,9 @@
 filters:
   delta_min: 0.05
-  delta_max: 0.3
+  delta_max: 0.15
   delta_target: 0.065
   min_premium: 0.3
-  min_otm_pct: 0.1
+  min_otm_pct: 0.05
   max_dte: 7
   dte_prefer_shortest: true
 ranking:
@@ -18,3 +18,7 @@ budget:
   price_threshold: 90.0
   max_contracts_expensive: 3
   max_contracts_cheap: 5
+earnings:
+  enabled: true
+  additional_otm_pct: 0.15
+  lookahead_days: 0

@@ -49,15 +49,19 @@ def create_guardrails_router(verify_token) -> "APIRouter":
 
         Returns decisions, blocks, warnings, guard breakdown, and findings
         computed live from DecisionAudit rows (not from persisted metrics).
+        Uses a 24-hour window to avoid UTC vs local date boundary mismatches.
         """
-        from sqlalchemy import func as sa_func
+        from datetime import datetime as dt, timezone
 
         with get_db_session() as db:
-            today = date.today()
+            # 24-hour window avoids UTC vs local date mismatch
+            cutoff = dt.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
 
             decisions_today = (
                 db.query(DecisionAudit)
-                .filter(sa_func.date(DecisionAudit.timestamp) == today)
+                .filter(DecisionAudit.timestamp >= cutoff)
+                .order_by(DecisionAudit.timestamp.desc())
+                .limit(100)
                 .all()
             )
 
@@ -97,7 +101,7 @@ def create_guardrails_router(verify_token) -> "APIRouter":
                         })
 
             return {
-                "date": str(today),
+                "date": str(dt.now(timezone.utc).date()),
                 "total_decisions": total_decisions,
                 "guardrail_blocks": blocks,
                 "guardrail_warnings": warnings,

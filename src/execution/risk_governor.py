@@ -989,17 +989,18 @@ class RiskGovernor:
 
             if earnings_info.earnings_in_dte:
                 reason = (
-                    f"Earnings on {earnings_info.earnings_date} falls within DTE "
-                    f"(exp {exp_date}, {earnings_info.days_to_earnings}d away)"
+                    f"WARNING: Earnings on {earnings_info.earnings_date} falls within DTE "
+                    f"(exp {exp_date}, {earnings_info.days_to_earnings}d away). "
+                    f"Scanner applied conservative filters."
                 )
-                logger.warning(f"BLOCKED: {opportunity.symbol} — {reason}")
+                logger.warning(f"{opportunity.symbol} — {reason}")
                 return RiskLimitCheck(
-                    approved=False,
+                    approved=True,
                     reason=reason,
                     limit_name="earnings_check",
                     current_value=earnings_info.days_to_earnings or 0,
                     limit_value=opportunity.dte,
-                    utilization_pct=100.0,
+                    utilization_pct=75.0,
                 )
 
             if earnings_info.earnings_date:

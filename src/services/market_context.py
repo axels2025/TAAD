@@ -35,7 +35,7 @@ class MarketContext:
     sector_change_5d: Optional[float] = None
 
     # Regime classification
-    vol_regime: Optional[str] = None  # low, normal, elevated, extreme
+    vol_regime: Optional[str] = None  # low, normal, elevated, high, extreme
     market_regime: Optional[str] = None  # bullish, bearish, neutral, volatile
 
     # Calendar
@@ -245,26 +245,29 @@ class MarketContextService:
             logger.debug(f"Failed to capture sector performance: {e}")
 
     def _classify_vol_regime(self, vix: float) -> str:
-        """Classify volatility regime based on VIX.
+        """Classify volatility regime based on VIX (5-tier).
 
-        Thresholds based on historical VIX levels:
-        - <15: Low volatility (typical bull market)
-        - 15-20: Normal volatility
-        - 20-25: Elevated volatility
-        - >25: Extreme volatility (fear/panic)
+        Aligned with the reasoning engine's VIX Regime Table:
+        - <15: Low — premiums thin, prioritise high-IV candidates
+        - 15-20: Normal — optimal environment
+        - 20-30: Elevated — richer premiums, verify OTM buffers
+        - 30-40: High — stage with caution, reduce position count
+        - >40: Extreme — do not stage, consider CLOSE_ALL_POSITIONS
 
         Args:
             vix: Current VIX value
 
         Returns:
-            Volatility regime: "low", "normal", "elevated", or "extreme"
+            Volatility regime: "low", "normal", "elevated", "high", or "extreme"
         """
         if vix < 15:
             return "low"
         elif vix < 20:
             return "normal"
-        elif vix < 25:
+        elif vix < 30:
             return "elevated"
+        elif vix < 40:
+            return "high"
         else:
             return "extreme"
 
@@ -280,8 +283,8 @@ class MarketContextService:
         Returns:
             Market regime: "bullish", "bearish", "neutral", or "volatile"
         """
-        # High volatility overrides other signals
-        if vix > 25:
+        # High volatility overrides other signals (aligned with "high" VIX tier)
+        if vix > 30:
             return "volatile"
 
         # No SPY data available

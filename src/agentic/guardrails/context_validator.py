@@ -38,7 +38,7 @@ class ContextValidator:
         results = []
 
         if config.data_freshness_enabled:
-            results.append(self.check_data_freshness(context))
+            results.append(self.check_data_freshness(context, config))
 
         if config.consistency_check_enabled:
             results.extend(self.check_consistency(context))
@@ -48,28 +48,62 @@ class ContextValidator:
 
         return results
 
-    def check_data_freshness(self, context) -> GuardrailResult:
+    def check_data_freshness(
+        self, context, config: GuardrailConfig,
+    ) -> GuardrailResult:
         """Check if market data is stale.
 
-        If data_stale is True, block to prevent Claude from reasoning
-        on outdated information.
+        Two checks:
+        1. Boolean data_stale flag — blocks when enrichment explicitly failed
+        2. Timestamp age — blocks when enriched_at is older than max_age_seconds
+           (catches data loaded from DB without fresh enrichment)
 
         Args:
             context: ReasoningContext
+            config: GuardrailConfig with data_freshness_max_age_seconds
 
         Returns:
             GuardrailResult
         """
+        from datetime import datetime, timezone
+
         market = context.market_context or {}
 
+        # Check 1: Explicit stale flag (set by enrichment failure)
         if market.get("data_stale", False):
             return GuardrailResult(
                 passed=False,
                 guard_name="data_freshness",
                 severity="block",
-                reason="Market data is stale, skipping Claude call",
+                reason="Market data is stale (enrichment failed), skipping Claude call",
                 details={"data_stale": True},
             )
+
+        # Check 2: Timestamp age (catches data loaded from DB without fresh enrichment)
+        enriched_at = market.get("enriched_at")
+        if enriched_at:
+            try:
+                ts = datetime.fromisoformat(enriched_at)
+                if ts.tzinfo is None:
+                    # Legacy naive timestamp from an older daemon version — assume UTC
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age_seconds = (datetime.now(timezone.utc) - ts).total_seconds()
+                if age_seconds > config.data_freshness_max_age_seconds:
+                    return GuardrailResult(
+                        passed=False,
+                        guard_name="data_freshness",
+                        severity="block",
+                        reason=(
+                            f"Market data is {int(age_seconds)}s old "
+                            f"(max {config.data_freshness_max_age_seconds}s)"
+                        ),
+                        details={
+                            "enriched_at": enriched_at,
+                            "age_seconds": int(age_seconds),
+                        },
+                    )
+            except (ValueError, TypeError):
+                pass  # Unparseable timestamp — fall through to pass
 
         return GuardrailResult(
             passed=True,

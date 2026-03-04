@@ -24,6 +24,13 @@ except ImportError:
 
 from src.data.database import get_db_session
 from src.data.models import ClaudeApiCost, ScanOpportunity, ScanResult
+from src.services.auto_select_pipeline import (
+    AutoSelectResult,
+    build_symbol_data as _build_symbol_data,
+    get_ai_recommendations as _get_ai_recommendations,
+    run_auto_select_pipeline,
+    stage_selected_candidates,
+)
 from src.services.ibkr_scanner import (
     SCAN_CODES,
     SCANNER_PRESETS,
@@ -108,204 +115,6 @@ class QuantityRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
-
-
-def _build_symbol_data(opps: list) -> list[dict]:
-    """Build symbol data list from ScanOpportunity objects.
-
-    Extracts symbol info and scanner metadata (rank, exchange, industry, etc.)
-    from each opportunity's entry_notes JSON.
-
-    Args:
-        opps: List of ScanOpportunity objects.
-
-    Returns:
-        List of dicts with symbol data for Claude prompt.
-    """
-    symbol_data = []
-    for opp in opps:
-        notes = {}
-        if opp.entry_notes:
-            try:
-                notes = json.loads(opp.entry_notes) if isinstance(opp.entry_notes, str) else opp.entry_notes
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        symbol_data.append({
-            "symbol": opp.symbol,
-            "rank": notes.get("rank", "?"),
-            "exchange": notes.get("exchange", ""),
-            "industry": notes.get("industry", ""),
-            "category": notes.get("category", ""),
-            "distance": notes.get("distance", ""),
-            "benchmark": notes.get("benchmark", ""),
-            "projection": notes.get("projection", ""),
-        })
-    return symbol_data
-
-
-def _get_ai_recommendations(
-    symbol_data: list[dict],
-    best_strike_data: list[dict] | None,
-    scan_type: str,
-    db_session,
-) -> dict:
-    """Call Claude for AI recommendations on scanned symbols.
-
-    Constructs the prompt (with or without enriched strike data), calls
-    Claude, tracks cost, and parses the JSON response.
-
-    Args:
-        symbol_data: List of dicts with symbol/rank/exchange/industry.
-        best_strike_data: Optional list of best-strike dicts per symbol
-                          (from select-best endpoint).
-        scan_type: Scanner scan code for context (e.g. "HIGH_OPT_IMP_VOLAT").
-        db_session: SQLAlchemy session for cost tracking.
-
-    Returns:
-        Dict with keys: recommendations (list), cost_usd (float),
-        input_tokens, output_tokens. On error: {"error": "message"}.
-    """
-    from src.agents.base_agent import BaseAgent
-    from src.agentic.reasoning_engine import CostTracker
-
-    cost_tracker = CostTracker(db_session, daily_cap_usd=10.0)
-
-    agent = BaseAgent(model="claude-sonnet-4-5-20250929", timeout=120.0)
-
-    has_strike_data = best_strike_data and len(best_strike_data) > 0
-
-    system_prompt = (
-        "You are an expert options analyst specializing in naked put selling. "
-        "You will receive a list of stock symbols from an IBKR market scanner"
-    )
-
-    if has_strike_data:
-        system_prompt += (
-            ", along with quantitative data for each symbol's best strike "
-            "(delta, OTM%, IV, margin, premium/margin ratio, annualized return, "
-            "open interest, volume, bid/ask spread). "
-            "Use this data to make informed assessments. "
-            "Pay special attention to:\n"
-            "- Premium/margin efficiency (annualized return > 20% is good)\n"
-            "- Liquidity quality (OI > 500, tight spreads)\n"
-            "- Risk/reward tradeoff (delta vs premium collected)\n"
-            "- Sector diversification across the portfolio\n"
-            "- Whether the IV justifies the risk\n\n"
-        )
-    else:
-        system_prompt += ". "
-
-    system_prompt += (
-        "Rate each symbol from 1-10 for naked put suitability based on:\n"
-        "- Implied volatility (higher = more premium, but higher risk)\n"
-        "- Stock trend and stability\n"
-        "- Liquidity (exchange, market cap implied by category)\n"
-        "- Industry/sector diversification value\n"
-        "- Earnings risk (if identifiable from the symbol)\n"
-        "- General risk factors\n\n"
-        "Respond with ONLY a JSON array (no markdown, no explanation outside the JSON). "
-        "Each element must have exactly these fields:\n"
-        '  {"symbol": "AAPL", "score": 8, "recommendation": "strong_buy", '
-        '"reasoning": "High liquidity, stable trend, rich premiums from elevated IV", '
-        '"risk_flags": ["earnings_soon"]}\n\n'
-        "recommendation must be one of: strong_buy, buy, neutral, avoid\n"
-        "risk_flags is an array of 0+ strings from: "
-        "earnings_soon, high_volatility, low_liquidity, downtrend, "
-        "small_cap, sector_concentration, binary_event, overvalued"
-    )
-
-    # Build user message — enriched version includes per-symbol quantitative data
-    if has_strike_data:
-        strike_map = {
-            d["symbol"]: d for d in best_strike_data
-            if isinstance(d, dict)
-        }
-        enriched_symbols = []
-        for sd in symbol_data:
-            sym = sd["symbol"]
-            entry = dict(sd)
-            if sym in strike_map:
-                bs = strike_map[sym]
-                entry.update({
-                    "stock_price": bs.get("stock_price"),
-                    "best_strike": bs.get("strike"),
-                    "delta": bs.get("delta"),
-                    "otm_pct": round(bs.get("otm_pct", 0) * 100, 1),
-                    "iv": round(bs.get("iv", 0) * 100, 1) if bs.get("iv") else None,
-                    "dte": bs.get("dte"),
-                    "premium_bid": bs.get("bid"),
-                    "bid_ask_spread_pct": (
-                        round((bs["ask"] - bs["bid"]) / ((bs["bid"] + bs["ask"]) / 2) * 100, 1)
-                        if bs.get("bid") and bs.get("ask") and bs["bid"] > 0
-                        else None
-                    ),
-                    "open_interest": bs.get("open_interest"),
-                    "volume": bs.get("volume"),
-                    "margin_per_contract": bs.get("margin"),
-                    "margin_source": bs.get("margin_source"),
-                    "premium_margin_ratio": round(bs.get("premium_margin_ratio", 0) * 100, 2),
-                    "annualized_return_pct": bs.get("annualized_return_pct"),
-                    "composite_score": bs.get("composite_score"),
-                    "sector": bs.get("sector"),
-                })
-            enriched_symbols.append(entry)
-
-        symbols_text = json.dumps(enriched_symbols, indent=2)
-        user_message = (
-            f"Analyze these {len(enriched_symbols)} symbols from an IBKR scanner "
-            f"(scan type: {scan_type}) for naked put suitability. "
-            f"Each symbol includes its best strike with real IBKR data "
-            f"(margins, Greeks, liquidity):\n\n{symbols_text}"
-        )
-    else:
-        symbols_text = json.dumps(symbol_data, indent=2)
-        user_message = (
-            f"Analyze these {len(symbol_data)} symbols from an IBKR scanner "
-            f"(scan type: {scan_type}) "
-            f"for naked put suitability:\n\n{symbols_text}"
-        )
-
-    try:
-        response = agent.send_message(
-            system_prompt=system_prompt,
-            user_message=user_message,
-            max_tokens=8192,
-            temperature=0.3,
-        )
-    except Exception as e:
-        logger.error(f"Claude recommendation error: {e}")
-        return {"error": f"AI recommendation failed: {e}"}
-
-    # Record cost
-    cost = agent.estimate_cost(response["input_tokens"], response["output_tokens"])
-    cost_tracker.record(
-        model="claude-sonnet-4-5-20250929",
-        purpose="scanner_recommendation",
-        input_tokens=response["input_tokens"],
-        output_tokens=response["output_tokens"],
-        cost_usd=cost,
-    )
-
-    # Parse Claude's response
-    content = response["content"].strip()
-    if content.startswith("```"):
-        lines = content.split("\n")
-        content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-        content = content.strip()
-
-    try:
-        recommendations = json.loads(content)
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse AI recommendations: {content[:500]}")
-        return {"error": "AI returned invalid JSON. Try again."}
-
-    return {
-        "recommendations": recommendations,
-        "cost_usd": cost,
-        "input_tokens": response["input_tokens"],
-        "output_tokens": response["output_tokens"],
-    }
 
 
 def create_scanner_router(verify_token) -> "APIRouter":
@@ -742,345 +551,26 @@ def create_scanner_router(verify_token) -> "APIRouter":
     # ------------------------------------------------------------------
     @router.post("/auto-select")
     def auto_select(request: AutoSelectRequest, token: None = Depends(verify_token)):
-        from dataclasses import asdict
-
-        from src.agentic.reasoning_engine import CostTracker
-        from src.agentic.scanner_settings import load_scanner_settings
-        from src.data.sector_map import get_sector
-        from src.services.auto_selector import (
-            AutoSelector,
-            PortfolioCandidate,
-            build_auto_select_portfolio,
-            compute_composite_score_4w,
-        )
-        from src.services.position_sizer import PositionSizer
-
-        settings = load_scanner_settings()
-        t0 = time.time()
-
         with get_db_session() as db:
-            # Check cost cap
-            cost_tracker = CostTracker(db, daily_cap_usd=10.0)
-            if not cost_tracker.can_call():
-                return {"error": "Daily Claude API cost cap exceeded. Try again tomorrow."}
+            result = run_auto_select_pipeline(
+                scan_id=request.scan_id,
+                db=db,
+                override_market_hours=request.override_market_hours,
+            )
 
-            # Step 1: Verify IBKR → get NLV, current margin
-            nlv = None
-            current_margin = 0.0
-            vix = None
-            ibkr_connected = False
-
-            try:
-                service = IBKRScannerService()
-                summary = service.get_account_summary()
-                nlv = summary.get("NetLiquidation")
-                current_margin = summary.get("FullMaintMarginReq") or 0.0
-                ibkr_connected = nlv is not None
-            except Exception as e:
-                logger.warning(f"Auto-select: IBKR account summary failed — {e}")
-
-            if not ibkr_connected and not request.override_market_hours:
-                return {"error": "IBKR offline. Cannot auto-select without live account data."}
-
-            # Step 2: Get VIX for position sizing
-            try:
-                service = IBKRScannerService()
-                vix = service.get_vix()
-            except Exception as e:
-                logger.warning(f"Auto-select: VIX fetch failed — {e}")
-
-            # Step 3: Calculate available budget
-            margin_budget_pct = settings.budget.margin_budget_pct
-
-            # Get staged margin
-            staged_margin = 0.0
-            try:
-                staged_opps = (
-                    db.query(ScanOpportunity)
-                    .filter(ScanOpportunity.state == "STAGED")
-                    .all()
-                )
-                staged_margin = sum(
-                    opp.staged_margin for opp in staged_opps if opp.staged_margin
-                )
-            except Exception as e:
-                logger.warning(f"Auto-select: staged margin query failed — {e}")
-
-            ceiling = round(nlv * margin_budget_pct, 2) if nlv else 0
-            available_budget = max(0, ceiling - current_margin - staged_margin)
-
-            if available_budget <= 0 and not request.override_market_hours:
-                return {
-                    "error": "No available margin budget. Reduce staged positions or increase budget %.",
-                    "budget": {
-                        "nlv": nlv,
-                        "ceiling": ceiling,
-                        "current_margin": current_margin,
-                        "staged_margin": round(staged_margin, 2),
+            if not result.success:
+                resp = {"error": result.error}
+                if result.nlv is not None:
+                    resp["budget"] = {
+                        "nlv": result.nlv,
+                        "ceiling": 0,
+                        "current_margin": 0,
+                        "staged_margin": 0,
                         "available": 0,
-                    },
-                }
+                    }
+                return resp
 
-            # Step 4: Fetch PENDING opportunities for this scan
-            opps = (
-                db.query(ScanOpportunity)
-                .filter(
-                    ScanOpportunity.scan_id == request.scan_id,
-                    ScanOpportunity.state == "PENDING",
-                )
-                .order_by(ScanOpportunity.id.asc())
-                .all()
-            )
-
-            if not opps:
-                return {"error": "No PENDING opportunities for this scan."}
-
-            symbols = [opp.symbol for opp in opps]
-            opp_id_map = {opp.symbol: opp.id for opp in opps}
-
-            logger.info(
-                f"Auto-select: {len(symbols)} symbols, "
-                f"budget=${available_budget:,.0f} "
-                f"(NLV=${nlv:,.0f}, ceiling=${ceiling:,.0f})"
-            )
-
-            # Step 5: Load chains batch
-            max_dte = settings.filters.max_dte
-            try:
-                service = IBKRScannerService()
-                all_chains = service.get_option_chains_batch(symbols, max_dte=max_dte)
-            except Exception as e:
-                logger.error(f"Auto-select: batch chain load failed — {e}")
-                return {"error": f"Chain loading failed: {e}"}
-
-            chains_loaded = sum(
-                1 for v in all_chains.values()
-                if v.get("stock_price") and v.get("expirations")
-            )
-
-            # Step 6: Filter candidates + batch margin queries
-            selector = AutoSelector(settings)
-            all_candidates: dict[str, list] = {}
-            margin_queries: list[dict] = []
-
-            for symbol, chain_data in all_chains.items():
-                candidates = selector.filter_candidates(chain_data)
-                all_candidates[symbol] = candidates
-                for c in candidates:
-                    exp_yyyymmdd = c.expiration.replace("-", "")
-                    margin_queries.append({
-                        "symbol": c.symbol,
-                        "strike": c.strike,
-                        "expiration_yyyymmdd": exp_yyyymmdd,
-                        "stock_price": c.stock_price,
-                        "bid": c.bid,
-                    })
-
-            total_candidates = sum(len(v) for v in all_candidates.values())
-
-            # Batch margin query
-            margins: dict[str, float | None] = {}
-            if margin_queries:
-                try:
-                    service = IBKRScannerService()
-                    margins = service.get_option_margins_batch(margin_queries)
-                except Exception as e:
-                    logger.warning(f"Auto-select: margin query failed — {e}")
-
-            # Step 7: Select best strike per symbol (3-weight)
-            best_results = selector.select_best_per_symbol(all_candidates, margins)
-
-            # Enrich with sector and contracts
-            for result in best_results:
-                if result.status == "skipped":
-                    continue
-                result.sector = get_sector(result.symbol)
-                if nlv and nlv > 0:
-                    budget = settings.budget
-                    price_based_max = (
-                        budget.max_contracts_expensive
-                        if result.stock_price > budget.price_threshold
-                        else budget.max_contracts_cheap
-                    )
-                    sizer = PositionSizer(account_equity=nlv)
-                    result.contracts = max(
-                        1, sizer.calculate_contracts(
-                            strike=result.strike,
-                            price_based_max=price_based_max,
-                            vix=vix,
-                        )
-                    )
-
-            # Step 8: Call Claude for AI recommendations
-            symbol_data = _build_symbol_data(opps)
-            active_best = [r for r in best_results if r.status != "skipped"]
-            best_strike_dicts = []
-            for r in active_best:
-                best_strike_dicts.append({
-                    "symbol": r.symbol,
-                    "stock_price": r.stock_price,
-                    "strike": r.strike,
-                    "delta": r.delta,
-                    "otm_pct": r.otm_pct,
-                    "iv": r.iv,
-                    "dte": r.dte,
-                    "bid": r.bid,
-                    "ask": r.ask,
-                    "open_interest": r.open_interest,
-                    "volume": r.volume,
-                    "margin": r.margin,
-                    "margin_source": r.margin_source,
-                    "premium_margin_ratio": r.premium_margin_ratio,
-                    "annualized_return_pct": r.annualized_return_pct,
-                    "composite_score": r.composite_score,
-                    "sector": r.sector,
-                })
-
-            scan_type = (
-                opps[0].scan.config_used.get("scan_code", "?")
-                if opps[0].scan and opps[0].scan.config_used
-                else "?"
-            )
-
-            ai_map: dict[str, dict] = {}
-            ai_cost = 0.0
-            ai_result = _get_ai_recommendations(
-                symbol_data=symbol_data,
-                best_strike_data=best_strike_dicts if best_strike_dicts else None,
-                scan_type=scan_type,
-                db_session=db,
-            )
-
-            if "error" not in ai_result:
-                ai_cost = ai_result.get("cost_usd", 0)
-                for rec in ai_result.get("recommendations", []):
-                    if isinstance(rec, dict) and "symbol" in rec:
-                        ai_map[rec["symbol"]] = rec
-                # Save to DB
-                for opp in opps:
-                    if opp.symbol in ai_map:
-                        opp.ai_recommendation = ai_map[opp.symbol]
-                db.commit()
-            else:
-                logger.warning(f"Auto-select: AI recommendations failed — {ai_result.get('error')}")
-
-            # Step 9: Build PortfolioCandidates with 4-weight composite scores
-            r = settings.ranking
-            portfolio_candidates: list[PortfolioCandidate] = []
-
-            for bs in best_results:
-                if bs.status == "skipped":
-                    continue
-
-                ai_data = ai_map.get(bs.symbol)
-                pc = PortfolioCandidate.from_best_strike(bs, ai_data=ai_data)
-
-                ai_score_raw = ai_data.get("score") if ai_data else None
-                pc.composite_score = compute_composite_score_4w(
-                    safety=bs.safety_score,
-                    liquidity=bs.liquidity_score,
-                    efficiency=bs.efficiency_score,
-                    ai_score_raw=ai_score_raw,
-                    w_safety=r.safety,
-                    w_liquidity=r.liquidity,
-                    w_ai=r.ai_score,
-                    w_efficiency=r.efficiency,
-                )
-                portfolio_candidates.append(pc)
-
-            # Step 10: Greedy portfolio selection within budget
-            selected, skipped, warnings = build_auto_select_portfolio(
-                portfolio_candidates,
-                available_budget=available_budget,
-                max_positions=settings.budget.max_positions,
-                max_per_sector=settings.budget.max_per_sector,
-            )
-
-            # Step 11: Build config snapshot
-            config_snapshot = {
-                "auto_select_config": settings.model_dump(),
-                "vix": vix,
-                "nlv": nlv,
-                "available_budget": available_budget,
-                "scan_type": scan_type,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-
-            # Build response
-            elapsed = time.time() - t0
-
-            def _candidate_dict(pc: PortfolioCandidate) -> dict:
-                return {
-                    "symbol": pc.symbol,
-                    "stock_price": pc.stock_price,
-                    "strike": pc.strike,
-                    "expiration": pc.expiration,
-                    "dte": pc.dte,
-                    "bid": pc.bid,
-                    "ask": pc.ask,
-                    "delta": pc.delta,
-                    "iv": pc.iv,
-                    "otm_pct": pc.otm_pct,
-                    "volume": pc.volume,
-                    "open_interest": pc.open_interest,
-                    "margin": pc.margin,
-                    "margin_source": pc.margin_source,
-                    "safety_score": pc.safety_score,
-                    "liquidity_score": pc.liquidity_score,
-                    "efficiency_score": pc.efficiency_score,
-                    "composite_score": pc.composite_score,
-                    "premium_margin_ratio": pc.premium_margin_ratio,
-                    "annualized_return_pct": pc.annualized_return_pct,
-                    "contracts": pc.contracts,
-                    "sector": pc.sector,
-                    "ai_score": pc.ai_score,
-                    "ai_recommendation": pc.ai_recommendation,
-                    "ai_reasoning": pc.ai_reasoning,
-                    "ai_risk_flags": pc.ai_risk_flags,
-                    "total_margin": pc.total_margin,
-                    "portfolio_rank": pc.portfolio_rank,
-                    "selected": pc.selected,
-                    "skip_reason": pc.skip_reason,
-                    "opportunity_id": opp_id_map.get(pc.symbol),
-                }
-
-            used_by_selection = sum(s.total_margin for s in selected)
-
-            logger.info(
-                f"Auto-select complete: {len(selected)} selected, "
-                f"{len(skipped)} skipped, ${used_by_selection:,.0f} margin used, "
-                f"{elapsed:.1f}s elapsed, AI cost=${ai_cost:.4f}"
-            )
-
-            return {
-                "portfolio": {
-                    "selected": [_candidate_dict(s) for s in selected],
-                    "skipped": [_candidate_dict(s) for s in skipped],
-                    "warnings": warnings,
-                },
-                "budget": {
-                    "nlv": nlv,
-                    "ceiling": ceiling,
-                    "current_margin": current_margin,
-                    "staged_margin": round(staged_margin, 2),
-                    "available": round(available_budget, 2),
-                    "used_by_selection": round(used_by_selection, 2),
-                    "remaining": round(available_budget - used_by_selection, 2),
-                },
-                "summary": {
-                    "symbols_scanned": len(symbols),
-                    "chains_loaded": chains_loaded,
-                    "candidates_filtered": total_candidates,
-                    "best_strikes_found": len(active_best),
-                    "ai_scored": len(ai_map),
-                    "selected": len(selected),
-                    "skipped": len(skipped),
-                    "elapsed_seconds": round(elapsed, 1),
-                    "ai_cost_usd": round(ai_cost, 4),
-                },
-                "config_snapshot": config_snapshot,
-                "stale_data": request.override_market_hours,
-            }
+            return _format_auto_select_response(result)
 
     # ------------------------------------------------------------------
     # POST /api/scanner/chain — fetch PUT option chain for a symbol
@@ -1263,6 +753,80 @@ def create_scanner_router(verify_token) -> "APIRouter":
     return router
 
 
+def _format_auto_select_response(result: AutoSelectResult) -> dict:
+    """Format an AutoSelectResult into the API JSON response.
+
+    Preserves backwards-compatible response structure for the scanner UI.
+    """
+
+    def _candidate_dict(pc, opp_id_map: dict) -> dict:
+        return {
+            "symbol": pc.symbol,
+            "stock_price": pc.stock_price,
+            "strike": pc.strike,
+            "expiration": pc.expiration,
+            "dte": pc.dte,
+            "bid": pc.bid,
+            "ask": pc.ask,
+            "delta": pc.delta,
+            "iv": pc.iv,
+            "otm_pct": pc.otm_pct,
+            "volume": pc.volume,
+            "open_interest": pc.open_interest,
+            "margin": pc.margin,
+            "margin_source": pc.margin_source,
+            "safety_score": pc.safety_score,
+            "liquidity_score": pc.liquidity_score,
+            "efficiency_score": pc.efficiency_score,
+            "composite_score": pc.composite_score,
+            "premium_margin_ratio": pc.premium_margin_ratio,
+            "annualized_return_pct": pc.annualized_return_pct,
+            "contracts": pc.contracts,
+            "sector": pc.sector,
+            "ai_score": pc.ai_score,
+            "ai_recommendation": pc.ai_recommendation,
+            "ai_reasoning": pc.ai_reasoning,
+            "ai_risk_flags": pc.ai_risk_flags,
+            "total_margin": pc.total_margin,
+            "portfolio_rank": pc.portfolio_rank,
+            "selected": pc.selected,
+            "skip_reason": pc.skip_reason,
+            "opportunity_id": result.opp_id_map.get(pc.symbol),
+        }
+
+    remaining = round(result.available_budget - result.used_margin, 2)
+
+    return {
+        "portfolio": {
+            "selected": [_candidate_dict(s, result.opp_id_map) for s in result.selected],
+            "skipped": [_candidate_dict(s, result.opp_id_map) for s in result.skipped],
+            "warnings": result.warnings,
+        },
+        "budget": {
+            "nlv": result.nlv,
+            "ceiling": round(result.nlv * 0.5, 2) if result.nlv else 0,
+            "current_margin": 0,
+            "staged_margin": 0,
+            "available": round(result.available_budget, 2),
+            "used_by_selection": round(result.used_margin, 2),
+            "remaining": remaining,
+        },
+        "summary": {
+            "symbols_scanned": result.symbols_scanned,
+            "chains_loaded": result.chains_loaded,
+            "candidates_filtered": result.candidates_filtered,
+            "best_strikes_found": result.best_strikes_found,
+            "ai_scored": result.ai_scored,
+            "selected": len(result.selected),
+            "skipped": len(result.skipped),
+            "elapsed_seconds": result.elapsed_seconds,
+            "ai_cost_usd": round(result.ai_cost_usd, 4),
+        },
+        "config_snapshot": result.config_snapshot,
+        "stale_data": result.stale_data,
+    }
+
+
 def _stage_with_contracts(selections: list) -> dict:
     """Stage opportunities with full contract details from chain selection.
 
@@ -1299,7 +863,7 @@ def _stage_with_contracts(selections: list) -> dict:
             opp.expiration = exp_date
             opp.bid = sel.bid
             opp.ask = sel.ask
-            premium = round((sel.bid + sel.ask) / 2, 2) if sel.bid and sel.ask else sel.bid
+            premium = round(sel.bid, 2) if sel.bid else 0.0
             opp.premium = premium
             opp.delta = sel.delta
             opp.iv = sel.iv
@@ -1636,6 +1200,17 @@ _SCANNER_HTML = """<!DOCTYPE html>
               <option value="true">Yes</option>
               <option value="false">No</option>
             </select>
+          </div>
+          <div class="form-group">
+            <label>Earnings: Adjust OTM</label>
+            <div style="display:flex;align-items:center;gap:8px;height:32px;">
+              <input type="checkbox" id="set-earnings-enabled" onchange="toggleEarningsOtm()" style="width:16px;height:16px;">
+              <span style="font-size:10px;color:var(--text-dim);">Add extra OTM cushion</span>
+            </div>
+          </div>
+          <div class="form-group" id="earnings-otm-group">
+            <label>Earnings: Extra OTM %</label>
+            <input type="number" id="set-earnings-additional-otm" step="0.01" min="0" max="1">
           </div>
         </div>
       </div>
@@ -2517,6 +2092,19 @@ function populateSettings(s) {
   document.getElementById('set-price-threshold').value = s.budget.price_threshold;
   document.getElementById('set-max-contracts-expensive').value = s.budget.max_contracts_expensive;
   document.getElementById('set-max-contracts-cheap').value = s.budget.max_contracts_cheap;
+  // Earnings
+  if (s.earnings) {
+    document.getElementById('set-earnings-enabled').checked = s.earnings.enabled;
+    document.getElementById('set-earnings-additional-otm').value = s.earnings.additional_otm_pct;
+    toggleEarningsOtm();
+  }
+}
+
+function toggleEarningsOtm() {
+  const checked = document.getElementById('set-earnings-enabled').checked;
+  const group = document.getElementById('earnings-otm-group');
+  group.style.opacity = checked ? '1' : '0.4';
+  document.getElementById('set-earnings-additional-otm').disabled = !checked;
 }
 
 function updateWeightsSum() {
@@ -2560,6 +2148,11 @@ async function saveSettings() {
       price_threshold: parseFloat(document.getElementById('set-price-threshold').value),
       max_contracts_expensive: parseInt(document.getElementById('set-max-contracts-expensive').value),
       max_contracts_cheap: parseInt(document.getElementById('set-max-contracts-cheap').value),
+    },
+    earnings: {
+      enabled: document.getElementById('set-earnings-enabled').checked,
+      additional_otm_pct: parseFloat(document.getElementById('set-earnings-additional-otm').value),
+      lookahead_days: 0,
     },
   };
 

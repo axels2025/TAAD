@@ -445,6 +445,20 @@ class OrderReconciliation:
                 except Exception:
                     pass
 
+            # Build lookup of ALL open positions (any date) for orphan suppression.
+            # sync scopes DB trades to a single date, but reqCompletedOrders
+            # returns orders from all recent sessions. An order from a prior date
+            # whose position is already tracked should not be flagged as orphan.
+            open_position_keys = set()
+            try:
+                for pos in self.trade_repo.get_open_positions():
+                    try:
+                        open_position_keys.add(position_key_from_trade(pos))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             # Reconcile each trade from IBKR
             reconciled_db_ids = set()
             for ib_trade in ib_trades:
@@ -482,13 +496,28 @@ class OrderReconciliation:
                     )
                     report.add_reconciled(db_trade, ib_trade, discrepancy, fill_price, commission)
                 else:
-                    # Order in TWS but not in database (orphan)
-                    report.add_orphan(ib_trade)
-                    sym = ib_trade.contract.symbol if hasattr(ib_trade, 'contract') else 'Unknown'
-                    logger.warning(
-                        f"Orphan order found: orderId={order_id}, "
-                        f"permId={ib_trade.order.permId} ({sym})"
-                    )
+                    # No match in today's trades — check if this order's contract
+                    # matches ANY open position in the DB (entered on a different date).
+                    matched_open = False
+                    try:
+                        key = position_key_from_contract(ib_trade.contract)
+                        if key in open_position_keys:
+                            matched_open = True
+                            logger.debug(
+                                f"Order {order_id} ({ib_trade.contract.symbol}) "
+                                f"matched open position — not orphan"
+                            )
+                    except Exception:
+                        pass
+
+                    if not matched_open:
+                        # Order in TWS but not in database (orphan)
+                        report.add_orphan(ib_trade)
+                        sym = ib_trade.contract.symbol if hasattr(ib_trade, 'contract') else 'Unknown'
+                        logger.warning(
+                            f"Orphan order found: orderId={order_id}, "
+                            f"permId={ib_trade.order.permId} ({sym})"
+                        )
 
             # Check for database orders not in TWS order history.
             # Cross-reference against IBKR positions — if the position exists,
@@ -654,6 +683,9 @@ class OrderReconciliation:
                     # Create Trade record
                     from src.data.models import Trade
 
+                    acct = self.client.get_account_id() if self.client else None
+                    source = "paper" if (not acct or acct.startswith("DU")) else "real"
+
                     new_trade = Trade(
                         trade_id=trade_id,
                         symbol=symbol,
@@ -669,6 +701,8 @@ class OrderReconciliation:
                         tws_status=status.status,
                         fill_time=us_eastern_now(),  # Use current time (unknown actual)
                         reconciled_at=us_eastern_now(),
+                        account_id=acct,
+                        trade_source=source,
                     )
 
                     self.trade_repo.create(new_trade)
@@ -988,21 +1022,40 @@ class OrderReconciliation:
                     report.add_in_ibkr_not_db(key, ib_pos)
                     logger.warning(f"Position in IBKR but not DB: {key}")
 
-            for key, db_pos in db_by_key.items():
-                if key not in ib_by_key:
-                    # Check if the option expired
-                    if self._close_if_expired(db_pos):
-                        logger.info(f"Expired option closed: {key}")
-                    else:
-                        report.add_in_db_not_ibkr(key, db_pos)
-                        logger.warning(f"Position in DB but not IBKR: {key}")
-
-            # Check stock positions for assignments
+            # Check stock positions for assignments BEFORE expiry handling.
+            # _close_if_expired assumes "expired worthless" (exit_premium=0),
+            # which is wrong for ITM puts that were assigned. We must detect
+            # assignments first so assigned trades are excluded from expiry.
+            assigned_trade_ids: set[str] = set()
             if ib_stock_positions and db_positions:
                 assignments = self._detect_assignments(
                     ib_stock_positions, db_positions
                 )
                 report.assignments = assignments
+                assigned_trade_ids = {
+                    a.matched_trade_id
+                    for a in assignments
+                    if a.matched_trade_id
+                }
+
+            for key, db_pos in db_by_key.items():
+                if key not in ib_by_key:
+                    # Skip trades that were assigned — they'll be handled
+                    # by the assignment processing path (correct P&L)
+                    trade_id = getattr(db_pos, "trade_id", None)
+                    if trade_id and trade_id in assigned_trade_ids:
+                        logger.info(
+                            f"Skipping expiry close for {key} — "
+                            f"detected as assignment"
+                        )
+                        continue
+
+                    # Check if the option expired (worthless OTM)
+                    if self._close_if_expired(db_pos):
+                        logger.info(f"Expired option closed: {key}")
+                    else:
+                        report.add_in_db_not_ibkr(key, db_pos)
+                        logger.warning(f"Position in DB but not IBKR: {key}")
 
             # Check if any tracked stock positions have been sold
             self._check_stock_position_closures(ib_stock_positions)
@@ -1258,6 +1311,9 @@ class OrderReconciliation:
                     # Create Trade record
                     from src.data.models import Trade
 
+                    acct = self.client.get_account_id() if self.client else None
+                    source = "paper" if (not acct or acct.startswith("DU")) else "real"
+
                     new_trade = Trade(
                         trade_id=trade_id,
                         symbol=symbol,
@@ -1275,6 +1331,8 @@ class OrderReconciliation:
                         # Store market data at import time (not entry time)
                         vix_at_entry=vix_at_import,  # Actually "at import" not "at entry"
                         spy_price_at_entry=spy_at_import,  # Actually "at import" not "at entry"
+                        account_id=acct,
+                        trade_source=source,
                         # Use ai_reasoning to store import metadata
                         ai_reasoning=f"IMPORTED_POSITION: Reconciled from IBKR on {us_eastern_now().strftime('%Y-%m-%d')}. "
                                     f"Entry premium=${actual_entry_premium:.2f} (actual from avgCost). "

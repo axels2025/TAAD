@@ -1,60 +1,76 @@
-"""US equity market calendar and hours awareness.
+"""Market calendar and hours awareness with exchange profile support.
 
 This module provides market session detection and holiday awareness for
-accurate order timing and execution scheduling.
+accurate order timing and execution scheduling. Supports multiple exchanges
+(US, ASX) via ExchangeProfile injection.
 """
+
+from __future__ import annotations
 
 from datetime import datetime, time, timedelta
 from enum import Enum
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from src.config.exchange_profile import ExchangeProfile
 
 
 class MarketSession(Enum):
-    """US equity market session types."""
+    """Market session types."""
 
-    PRE_MARKET = "pre_market"  # 4:00 AM - 9:30 AM ET
-    REGULAR = "regular"  # 9:30 AM - 4:00 PM ET
-    AFTER_HOURS = "after_hours"  # 4:00 PM - 8:00 PM ET
-    CLOSED = "closed"  # 8:00 PM - 4:00 AM ET
+    PRE_MARKET = "pre_market"  # 4:00 AM - 9:30 AM ET (US only)
+    REGULAR = "regular"  # 9:30 AM - 4:00 PM ET / 10:00 AM - 4:00 PM AEST
+    AFTER_HOURS = "after_hours"  # 4:00 PM - 8:00 PM ET (US only)
+    CLOSED = "closed"  # Outside all sessions
     HOLIDAY = "holiday"  # Market closed all day
     WEEKEND = "weekend"  # Saturday/Sunday
 
 
 class MarketCalendar:
-    """US equity market hours and holiday awareness.
+    """Exchange-aware market hours and holiday awareness.
 
     Handles market session detection, holiday checking, and provides
-    information about next market open times.
+    information about next market open times. Parameterised by an
+    ExchangeProfile — defaults to the active profile (US unless
+    EXCHANGE env var is set).
 
-    All times are in US Eastern Time (America/New_York).
+    Class-level attributes provide US defaults for backward compatibility
+    (code that accesses MarketCalendar.TZ without an instance). Instance
+    attributes override these with profile-specific values.
     """
 
-    # US Eastern timezone
+    # Class-level US defaults for backward compatibility
     TZ = ZoneInfo("America/New_York")
+    PRE_MARKET_START: time | None = time(4, 0)
+    REGULAR_OPEN = time(9, 30)
+    REGULAR_CLOSE = time(16, 0)
+    AFTER_HOURS_END: time | None = time(20, 0)
+    HOLIDAYS_2026: set[str] | frozenset[str] = frozenset({
+        "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
+        "2026-05-25", "2026-07-03", "2026-09-07", "2026-11-26",
+        "2026-12-25",
+    })
 
-    # Market hours (in Eastern Time)
-    PRE_MARKET_START = time(4, 0)  # 4:00 AM ET
-    REGULAR_OPEN = time(9, 30)  # 9:30 AM ET
-    REGULAR_CLOSE = time(16, 0)  # 4:00 PM ET
-    AFTER_HOURS_END = time(20, 0)  # 8:00 PM ET
+    def __init__(self, profile: ExchangeProfile | None = None):
+        """Initialize market calendar.
 
-    # 2026 US market holidays (NYSE/NASDAQ)
-    # Source: NYSE Holiday Schedule
-    HOLIDAYS_2026 = {
-        "2026-01-01",  # New Year's Day (Thursday)
-        "2026-01-19",  # Martin Luther King Jr. Day (Monday)
-        "2026-02-16",  # Presidents Day (Monday)
-        "2026-04-03",  # Good Friday
-        "2026-05-25",  # Memorial Day (Monday)
-        "2026-07-03",  # Independence Day observed (Friday, July 4 is Saturday)
-        "2026-09-07",  # Labor Day (Monday)
-        "2026-11-26",  # Thanksgiving Day (Thursday)
-        "2026-12-25",  # Christmas Day (Friday)
-    }
+        Args:
+            profile: Exchange profile. Defaults to get_active_profile().
+        """
+        if profile is None:
+            from src.config.exchange_profile import get_active_profile
+            profile = get_active_profile()
 
-    def __init__(self):
-        """Initialize market calendar."""
-        pass
+        self._profile = profile
+
+        # Instance attributes override class defaults
+        self.TZ = profile.timezone
+        self.PRE_MARKET_START = profile.pre_market_start
+        self.REGULAR_OPEN = profile.regular_open
+        self.REGULAR_CLOSE = profile.regular_close
+        self.AFTER_HOURS_END = profile.after_hours_end
+        self.HOLIDAYS_2026 = profile.holidays
 
     def get_current_session(self, dt: datetime | None = None) -> MarketSession:
         """Determine current market session.
@@ -86,14 +102,24 @@ class MarketCalendar:
         # Check time-based sessions
         current_time = dt.time()
 
-        if self.PRE_MARKET_START <= current_time < self.REGULAR_OPEN:
+        # Pre-market (skip if exchange has no pre-market, e.g. ASX)
+        if (
+            self.PRE_MARKET_START is not None
+            and self.PRE_MARKET_START <= current_time < self.REGULAR_OPEN
+        ):
             return MarketSession.PRE_MARKET
-        elif self.REGULAR_OPEN <= current_time < self.REGULAR_CLOSE:
+
+        if self.REGULAR_OPEN <= current_time < self.REGULAR_CLOSE:
             return MarketSession.REGULAR
-        elif self.REGULAR_CLOSE <= current_time < self.AFTER_HOURS_END:
+
+        # After-hours (skip if exchange has no after-hours, e.g. ASX)
+        if (
+            self.AFTER_HOURS_END is not None
+            and self.REGULAR_CLOSE <= current_time < self.AFTER_HOURS_END
+        ):
             return MarketSession.AFTER_HOURS
-        else:
-            return MarketSession.CLOSED
+
+        return MarketSession.CLOSED
 
     def is_market_open(self, dt: datetime | None = None) -> bool:
         """Check if regular trading session is active.

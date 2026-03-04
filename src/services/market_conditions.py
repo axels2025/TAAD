@@ -205,19 +205,25 @@ class MarketConditionMonitor:
     async def _get_vix(self) -> float:
         """Get current VIX level from IBKR.
 
+        Qualifies the VIX contract before requesting market data to ensure
+        IBKR can resolve the instrument (sets conId). Without qualification,
+        reqMktData often returns no data.
+
         Returns:
             Current VIX value, or 20.0 (conservative default) if unavailable
         """
         try:
-            # Create VIX index contract
-            vix_contract = Contract()
-            vix_contract.symbol = "VIX"
-            vix_contract.secType = "IND"
-            vix_contract.exchange = "CBOE"
-            vix_contract.currency = "USD"
+            from ib_insync import Index
 
-            # Get quote
-            quote = await self.client.get_quote(vix_contract, timeout=2.0)
+            vix_contract = Index("VIX", "CBOE")
+            qualified = await self.client.qualify_contracts_async(vix_contract)
+
+            if not qualified or not qualified[0].conId:
+                logger.warning("Could not qualify VIX contract, using default 20.0")
+                return 20.0
+
+            # Get quote with qualified contract
+            quote = await self.client.get_quote(qualified[0], timeout=3.0)
 
             if quote.is_valid and quote.last > 0:
                 logger.debug(f"VIX fetched: {quote.last:.2f}")
@@ -235,21 +241,33 @@ class MarketConditionMonitor:
         """Get current SPY price from IBKR.
 
         SPY price is used as a market direction indicator and for
-        logging/debugging purposes.
+        logging/debugging purposes. Only fetched for US market profile —
+        SPY is a US-listed ETF and is not meaningful on other exchanges.
+
+        Qualifies the SPY contract before requesting market data.
 
         Returns:
-            Current SPY price, or 0.0 if unavailable
+            Current SPY price, or 0.0 if unavailable or not applicable
         """
-        try:
-            # Create SPY stock contract
-            spy_contract = Contract()
-            spy_contract.symbol = "SPY"
-            spy_contract.secType = "STK"
-            spy_contract.exchange = "SMART"
-            spy_contract.currency = "USD"
+        from src.config.exchange_profile import get_active_profile
 
-            # Get quote
-            quote = await self.client.get_quote(spy_contract, timeout=2.0)
+        profile = get_active_profile()
+        if profile.code != "US":
+            logger.debug(f"SPY not applicable for {profile.code} market — skipping")
+            return 0.0
+
+        try:
+            from ib_insync import Stock
+
+            spy_contract = Stock("SPY", "SMART", "USD")
+            qualified = await self.client.qualify_contracts_async(spy_contract)
+
+            if not qualified or not qualified[0].conId:
+                logger.debug("Could not qualify SPY contract")
+                return 0.0
+
+            # Get quote with qualified contract
+            quote = await self.client.get_quote(qualified[0], timeout=3.0)
 
             if quote.is_valid and quote.last > 0:
                 logger.debug(f"SPY fetched: ${quote.last:.2f}")

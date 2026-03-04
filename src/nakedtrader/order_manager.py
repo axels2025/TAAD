@@ -2,7 +2,7 @@
 
 Places IBKR native parent-child bracket orders: a SELL parent with a
 profit-take BUY child (and optional stop-loss BUY child). Uses the
-ib_insync synchronous placeOrder pattern.
+ib_insync synchronous placeOrder pattern. Exchange-aware via config profile.
 """
 
 from dataclasses import dataclass
@@ -32,23 +32,34 @@ class BracketOrderResult:
 def build_option_contract(
     client: IBKRClient,
     selection: StrikeSelection,
+    config: NakedTraderConfig | None = None,
 ) -> Option | None:
     """Build and qualify the option contract for trading.
 
     Args:
         client: Connected IBKR client.
         selection: Strike selection result.
+        config: NakedTrader configuration (for exchange/currency routing).
 
     Returns:
         Qualified Option contract, or None if qualification fails.
     """
+    if config is not None:
+        profile = config.profile
+        exchange = profile.ibkr_exchange
+        currency = profile.currency
+    else:
+        exchange = "SMART"
+        currency = "USD"
+
     contract = client.get_option_contract(
         symbol=selection.symbol,
         expiration=selection.quote.expiration,
         strike=selection.quote.strike,
         right="P",
-        exchange="SMART",
+        exchange=exchange,
         trading_class=selection.trading_class,
+        currency=currency,
     )
     qualified = client.qualify_contract(contract)
     if not qualified:

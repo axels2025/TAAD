@@ -446,7 +446,7 @@ def dashboard(
     console.print("Press CTRL+C to stop the server\n")
 
     try:
-        uvicorn.run(dash_app, host=host, port=port, log_level="info")
+        uvicorn.run(dash_app, host=host, port=port, log_level="warning")
     except KeyboardInterrupt:
         console.print("\n[yellow]✓ Server stopped[/yellow]")
     except Exception as e:
@@ -1223,6 +1223,9 @@ def execute(
                             exp_date = opportunity.expiration
 
                         # Create trade record
+                        acct = client.get_account_id() if client else None
+                        source = "paper" if (not acct or acct.startswith("DU")) else "real"
+
                         trade = Trade(
                             trade_id=f"TRD-{uuid.uuid4().hex[:12]}",
                             symbol=opportunity.symbol,
@@ -1234,6 +1237,8 @@ def execute(
                             contracts=opportunity.contracts,
                             otm_pct=opportunity.otm_pct if hasattr(opportunity, "otm_pct") else None,
                             dte=opportunity.dte,
+                            account_id=acct,
+                            trade_source=source,
                         )
                         session.add(trade)
                         session.flush()  # Get the database-generated ID
@@ -2492,7 +2497,7 @@ def auto_monitor(
                                     )
                                 else:
                                     # Check if it's a foreign exchange issue
-                                    foreign_exchanges = ["ASX", "TSE", "LSE", "HKEX"]
+                                    foreign_exchanges = ["TSE", "LSE", "HKEX"]
                                     is_foreign = any(
                                         ex in pos.position_id
                                         for ex in foreign_exchanges
@@ -5409,6 +5414,21 @@ def reconcile_positions(
                         f"P/L: {pl_text} ({trade.assignment_status})[/{pl_color}]"
                     )
 
+                    # Create StockPosition record for the resulting stock holding
+                    try:
+                        from src.services.stock_position_service import StockPositionService
+                        stock_svc = StockPositionService(session)
+                        sp = stock_svc.create_from_assignment(event)
+                        if sp:
+                            console.print(
+                                f"    [cyan]→ StockPosition created: {sp.symbol} "
+                                f"x{sp.shares} shares, cost basis=${sp.cost_basis_per_share:.2f}[/cyan]"
+                            )
+                    except Exception as sp_err:
+                        console.print(
+                            f"    [yellow]⚠  StockPosition creation failed: {sp_err}[/yellow]"
+                        )
+
                 session.commit()
                 console.print(
                     f"\n  [green]✓ Closed {len(report.assignments)} assigned positions[/green]\n"
@@ -5596,10 +5616,17 @@ def reconcile_positions(
                     db_qty = mismatch.db_quantity
                     ibkr_qty = mismatch.ibkr_quantity
 
-                    # Parse position key: SYMBOL_STRIKE_EXPIRATION_TYPE
+                    # Parse position key: SYMBOL_STRIKE_YYYYMMDD_P/C
                     parts = contract_key.split('_')
                     if len(parts) == 4:
-                        symbol, strike, exp_str, option_type = parts
+                        symbol, strike, exp_str, right_char = parts
+
+                        # Canonical key uses single-char P/C, but DB stores PUT/CALL
+                        option_type_variants = [right_char]
+                        if right_char == "P":
+                            option_type_variants.append("PUT")
+                        elif right_char == "C":
+                            option_type_variants.append("CALL")
 
                         # Find trade in database
                         exp_date = datetime.strptime(exp_str, "%Y%m%d").date()
@@ -5607,7 +5634,7 @@ def reconcile_positions(
                             Trade.symbol == symbol,
                             Trade.strike == float(strike),
                             Trade.expiration == exp_date,
-                            Trade.option_type == option_type,
+                            Trade.option_type.in_(option_type_variants),
                             Trade.exit_date.is_(None)  # Only open trades
                         ).first()
 
@@ -5624,7 +5651,7 @@ def reconcile_positions(
 
             # Final summary
             console.print("=" * 60)
-            console.print("[green]✓ SYNC COMPLETE - Database now matches IBKR![/green]")
+            console.print("[green]✓ RECONCILIATION COMPLETE - Database now matches IBKR![/green]")
             console.print("=" * 60 + "\n")
 
     finally:
@@ -6225,7 +6252,7 @@ def backfill_sectors(
 def nakedtrader_trade(
     symbol: str = typer.Argument(
         ...,
-        help="Underlying symbol: XSP, SPX, or SPY",
+        help="Underlying symbol: XSP, SPX, SPY (US) or XJO, BHP, CBA, etc. (ASX)",
     ),
     contracts: Optional[int] = typer.Option(
         None,
@@ -6236,6 +6263,11 @@ def nakedtrader_trade(
         "config/daily_spx_options.yaml",
         "--config",
         help="Path to YAML config file",
+    ),
+    exchange: Optional[str] = typer.Option(
+        None,
+        "--exchange", "-x",
+        help="Override exchange: US or ASX (overrides YAML setting)",
     ),
     dry_run: bool = typer.Option(
         True,
@@ -6268,15 +6300,17 @@ def nakedtrader_trade(
         help="Skip confirmation prompt",
     ),
 ) -> None:
-    """Sell a daily SPX/XSP/SPY naked put.
+    """Sell a naked put option.
 
     Mechanical delta-targeted put selling with bracket orders.
-    Uses config/daily_spx_options.yaml for parameters.
+    Supports US (SPX/XSP/SPY) and ASX (XJO/BHP/CBA) exchanges.
 
     Examples:
         nakedtrader sell XSP --dry-run
         nakedtrader sell XSP --contracts 2 --live --yes
         nakedtrader sell SPX --delta 0.08 --dry-run
+        nakedtrader sell XJO --exchange ASX --config config/daily_asx_options.yaml --dry-run
+        nakedtrader sell BHP --exchange ASX --dry-run
     """
     from src.cli.commands.nakedtrader_commands import run_nt
 
@@ -6297,6 +6331,7 @@ def nakedtrader_trade(
             delta=delta,
             dte=dte,
             skip_confirm=skip_confirm,
+            exchange=exchange,
         )
         if not success:
             raise typer.Exit(1)

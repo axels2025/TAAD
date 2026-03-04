@@ -1,33 +1,20 @@
-"""Index option chain retrieval with Greeks for SPX/XSP/SPY.
+"""Option chain retrieval with Greeks for index and equity underlyings.
 
-Retrieves option chains from IBKR for index underlyings, fetches live
-Greeks (delta) for candidate strikes, and returns structured data for
-strike selection.
+Retrieves option chains from IBKR for index or equity underlyings, fetches
+live Greeks (delta) for candidate strikes, and returns structured data for
+strike selection. Exchange-aware via NakedTraderConfig.profile.
 """
 
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from loguru import logger
 
+from src.config.exchange_profile import get_multiplier
 from src.nakedtrader.config import NakedTraderConfig
 from src.tools.ibkr_client import IBKRClient
 from src.utils.market_data import safe_field
-
-ET = ZoneInfo("America/New_York")
-
-# Preferred trading classes for index options (tried in order)
-# SPX dailies/weeklies use SPXW; XSP may use XSPW or XSP depending on IBKR
-TRADING_CLASS_PREFERENCES = {
-    "SPX": ["SPXW", "SPX"],
-    "XSP": ["XSPW", "XSP"],
-    "SPY": ["SPY"],
-}
-
-# Contract type: index vs stock
-INDEX_SYMBOLS = {"SPX", "XSP"}
 
 
 @dataclass
@@ -62,7 +49,9 @@ class ChainResult:
     error: str | None = None
 
 
-def _resolve_trading_class(symbol: str, chains: list) -> tuple[str, object]:
+def _resolve_trading_class(
+    symbol: str, chains: list, config: NakedTraderConfig,
+) -> tuple[str, object]:
     """Find the best trading class from IBKR chain definitions.
 
     Tries preferred classes in order, then falls back to the chain with
@@ -71,10 +60,12 @@ def _resolve_trading_class(symbol: str, chains: list) -> tuple[str, object]:
     Args:
         symbol: Underlying symbol.
         chains: List of chain definitions from reqSecDefOptParams.
+        config: NakedTrader configuration (for profile preferences).
 
     Returns:
         Tuple of (trading_class, chain_definition).
     """
+    profile = config.profile
     available = {c.tradingClass: c for c in chains}
     logger.debug(
         f"{symbol}: IBKR returned {len(chains)} chain(s): "
@@ -85,7 +76,7 @@ def _resolve_trading_class(symbol: str, chains: list) -> tuple[str, object]:
     )
 
     # Try preferred classes in order
-    preferences = TRADING_CLASS_PREFERENCES.get(symbol, [symbol])
+    preferences = profile.trading_class_preferences.get(symbol, [symbol])
     for tc in preferences:
         if tc in available:
             logger.debug(f"{symbol}: Using preferred trading class {tc}")
@@ -100,6 +91,11 @@ def _resolve_trading_class(symbol: str, chains: list) -> tuple[str, object]:
     return best.tradingClass, best
 
 
+def _is_index(symbol: str, config: NakedTraderConfig) -> bool:
+    """Check if symbol is an index (vs equity) for the active profile."""
+    return symbol in config.profile.index_symbols
+
+
 def get_valid_expirations(
     client: IBKRClient,
     symbol: str,
@@ -112,17 +108,23 @@ def get_valid_expirations(
 
     Args:
         client: Connected IBKR client.
-        symbol: Underlying symbol (SPX, XSP, SPY).
+        symbol: Underlying symbol (SPX, XSP, SPY, XJO, BHP, etc.).
         config: NakedTrader configuration.
 
     Returns:
         List of (expiration_YYYYMMDD, dte) tuples sorted by DTE ascending.
     """
+    profile = config.profile
+
     # Get the underlying contract
-    if symbol in INDEX_SYMBOLS:
-        underlying = client.get_index_contract(symbol)
+    if _is_index(symbol, config):
+        underlying = client.get_index_contract(
+            symbol, exchange=profile.ibkr_index_exchange, currency=profile.currency,
+        )
     else:
-        underlying = client.get_stock_contract(symbol)
+        underlying = client.get_stock_contract(
+            symbol, exchange=profile.ibkr_exchange, currency=profile.currency,
+        )
 
     qualified = client.qualify_contract(underlying)
     if not qualified:
@@ -130,7 +132,7 @@ def get_valid_expirations(
         return []
 
     # Get option chain definitions
-    sec_type = "IND" if symbol in INDEX_SYMBOLS else "STK"
+    sec_type = "IND" if _is_index(symbol, config) else "STK"
     chains = client.ib.reqSecDefOptParams(
         symbol, "", sec_type, qualified.conId
     )
@@ -140,10 +142,10 @@ def get_valid_expirations(
         return []
 
     # Find the best trading class
-    _, target_chain = _resolve_trading_class(symbol, chains)
+    _, target_chain = _resolve_trading_class(symbol, chains, config)
 
     # Filter expirations to DTE range
-    today = datetime.now(ET).date()
+    today = datetime.now(profile.timezone).date()
     valid_exps: list[tuple[str, int]] = []
 
     for exp_str in sorted(target_chain.expirations):
@@ -159,20 +161,36 @@ def get_valid_expirations(
     return valid_exps
 
 
-def get_underlying_price(client: IBKRClient, symbol: str) -> float | None:
+def get_underlying_price(
+    client: IBKRClient, symbol: str, config: NakedTraderConfig | None = None,
+) -> float | None:
     """Get the current price of the underlying index or stock.
 
     Args:
         client: Connected IBKR client.
         symbol: Underlying symbol.
+        config: NakedTrader configuration (optional; uses US defaults if None).
 
     Returns:
         Current price or None if unavailable.
     """
-    if symbol in INDEX_SYMBOLS:
-        contract = client.get_index_contract(symbol)
+    if config is not None:
+        profile = config.profile
+        is_index = _is_index(symbol, config)
     else:
-        contract = client.get_stock_contract(symbol)
+        # Backward compat: assume US defaults
+        from src.config.exchange_profile import US_PROFILE
+        profile = US_PROFILE
+        is_index = symbol in profile.index_symbols
+
+    if is_index:
+        contract = client.get_index_contract(
+            symbol, exchange=profile.ibkr_index_exchange, currency=profile.currency,
+        )
+    else:
+        contract = client.get_stock_contract(
+            symbol, exchange=profile.ibkr_exchange, currency=profile.currency,
+        )
 
     qualified = client.qualify_contract(contract)
     if not qualified:
@@ -200,7 +218,7 @@ def get_chain_with_greeks(
 
     Args:
         client: Connected IBKR client.
-        symbol: Underlying symbol (SPX, XSP, SPY).
+        symbol: Underlying symbol (SPX, XSP, SPY, XJO, BHP, etc.).
         expiration: Expiration date in YYYYMMDD format.
         underlying_price: Current underlying price.
         config: NakedTrader configuration.
@@ -208,21 +226,26 @@ def get_chain_with_greeks(
     Returns:
         ChainResult with quotes sorted by strike descending (closest to ATM first).
     """
-    trading_class = TRADING_CLASS_PREFERENCES.get(symbol, [symbol])[0]  # Initial guess
+    profile = config.profile
+    preferences = profile.trading_class_preferences.get(symbol, [symbol])
+    trading_class = preferences[0]  # Initial guess
     exp_date = date(int(expiration[:4]), int(expiration[4:6]), int(expiration[6:8]))
-    today = datetime.now(ET).date()
+    today = datetime.now(profile.timezone).date()
     dte = (exp_date - today).days
 
     # Estimate strike range based on delta targets
-    # At delta ~0.05-0.12, strikes are roughly 2-6% OTM for short-dated options
-    lower_bound = underlying_price * 0.90  # 10% OTM (well beyond our range)
-    upper_bound = underlying_price * 0.99  # 1% OTM (closer than we want)
+    lower_bound = underlying_price * 0.90  # 10% OTM
+    upper_bound = underlying_price * 0.99  # 1% OTM
 
     # Get available strikes from chain definition
-    if symbol in INDEX_SYMBOLS:
-        underlying = client.get_index_contract(symbol)
+    if _is_index(symbol, config):
+        underlying = client.get_index_contract(
+            symbol, exchange=profile.ibkr_index_exchange, currency=profile.currency,
+        )
     else:
-        underlying = client.get_stock_contract(symbol)
+        underlying = client.get_stock_contract(
+            symbol, exchange=profile.ibkr_exchange, currency=profile.currency,
+        )
 
     qualified_underlying = client.qualify_contract(underlying)
     if not qualified_underlying:
@@ -235,7 +258,7 @@ def get_chain_with_greeks(
             error=f"Could not qualify {symbol} underlying",
         )
 
-    sec_type = "IND" if symbol in INDEX_SYMBOLS else "STK"
+    sec_type = "IND" if _is_index(symbol, config) else "STK"
     chains = client.ib.reqSecDefOptParams(
         symbol, "", sec_type, qualified_underlying.conId
     )
@@ -243,7 +266,7 @@ def get_chain_with_greeks(
     # Find strikes — resolve actual trading class from IBKR
     available_strikes: list[float] = []
     if chains:
-        trading_class, resolved_chain = _resolve_trading_class(symbol, chains)
+        trading_class, resolved_chain = _resolve_trading_class(symbol, chains, config)
         if expiration in resolved_chain.expirations:
             available_strikes = sorted(resolved_chain.strikes)
         else:
@@ -278,7 +301,6 @@ def get_chain_with_greeks(
 
     # Take ~15 strikes nearest to our estimated zone
     if len(candidate_strikes) > 15:
-        # Focus on the higher end (closer to ATM = higher delta)
         candidate_strikes = candidate_strikes[-15:]
 
     if not candidate_strikes:
@@ -305,8 +327,9 @@ def get_chain_with_greeks(
             expiration=expiration,
             strike=strike,
             right="P",
-            exchange="SMART",
+            exchange=profile.ibkr_exchange,
             trading_class=trading_class,
+            currency=profile.currency,
         )
         contracts.append((strike, opt))
 

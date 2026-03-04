@@ -10,6 +10,9 @@ import subprocess
 import sys
 from datetime import date, datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+from src.utils.timezone import trading_date
 
 from loguru import logger
 
@@ -26,12 +29,86 @@ except ImportError:
 from src.data.database import get_db_session, get_session
 from src.data.models import (
     ClaudeApiCost,
+    DaemonEvent,
     DaemonHealth,
+    DaemonNotification,
     DecisionAudit,
     GuardrailMetric,
     ScanOpportunity,
     Trade,
 )
+from src.services.market_calendar import MarketCalendar
+
+
+from src.config.exchange_profile import get_active_profile as _get_active_profile
+
+ET = _get_active_profile().timezone
+
+
+def _current_session_start() -> datetime:
+    """Get the start of the current (or most recent) trading session.
+
+    Returns the most recent market open time on a trading day, used as the
+    boundary for rejection persistence queries.
+    """
+    from datetime import timedelta
+
+    cal = MarketCalendar()
+    now = datetime.now(ET)
+    today = now.date()
+    market_open_time = cal.REGULAR_OPEN
+
+    if cal.is_trading_day(now) and now.time() >= market_open_time:
+        return datetime.combine(today, market_open_time, ET)
+
+    check = today
+    for _ in range(10):
+        check -= timedelta(days=1)
+        check_dt = datetime.combine(check, market_open_time, ET)
+        if cal.is_trading_day(check_dt):
+            return check_dt
+
+    return datetime.combine(today, datetime.min.time(), ET)
+
+
+def _read_watchdog_status() -> dict:
+    """Read watchdog status from JSON file and check process liveness.
+
+    Returns:
+        Dict with active, pid, last_check, daemon_assessment keys.
+    """
+    import json
+    from pathlib import Path
+
+    result = {
+        "active": False,
+        "pid": None,
+        "last_check": None,
+        "daemon_assessment": None,
+    }
+
+    # Check if watchdog process is alive
+    pid_path = Path("run/watchdog.pid")
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+            result["active"] = True
+            result["pid"] = pid
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+
+    # Read status JSON
+    status_path = Path("run/watchdog_status.json")
+    if status_path.exists():
+        try:
+            data = json.loads(status_path.read_text())
+            result["last_check"] = data.get("checked_at")
+            result["daemon_assessment"] = data.get("overall")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return result
 
 
 def create_dashboard_app(auth_token: str = "") -> "FastAPI":
@@ -88,6 +165,16 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         """HTML guardrails review page."""
         return get_guardrails_html()
 
+    # Include prompt editor router
+    from src.agentic.prompt_api import create_prompt_router, get_prompt_html
+
+    app.include_router(create_prompt_router(verify_token))
+
+    @app.get("/prompts", response_class=HTMLResponse)
+    def prompts_page():
+        """HTML prompt editor page."""
+        return get_prompt_html()
+
     @app.get("/api/status")
     def get_status(token: None = Depends(verify_token)):
         """Get daemon status with live process check."""
@@ -110,6 +197,9 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
             if not live_pid and actual_status in ("running", "paused"):
                 actual_status = "stopped"
 
+            # Watchdog status
+            watchdog = _read_watchdog_status()
+
             return {
                 "pid": live_pid or health.pid,
                 "status": actual_status,
@@ -122,12 +212,13 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 "autonomy_level": health.autonomy_level,
                 "message": health.message,
                 "started_at": str(health.started_at) if health.started_at else None,
+                "watchdog": watchdog,
             }
 
     @app.get("/api/positions")
     def get_positions(token: None = Depends(verify_token)):
         """Get open positions."""
-        today = date.today()
+        today = trading_date()
         with get_db_session() as db:
             trades = db.query(Trade).filter(Trade.exit_date.is_(None)).all()
             return [
@@ -135,6 +226,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                     "trade_id": t.trade_id,
                     "symbol": t.symbol,
                     "strike": t.strike,
+                    "option_type": t.option_type,
                     "expiration": str(t.expiration),
                     "entry_premium": t.entry_premium,
                     "contracts": t.contracts,
@@ -143,6 +235,44 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 }
                 for t in trades
             ]
+
+    @app.get("/api/portfolio-greeks")
+    def get_portfolio_greeks_endpoint(token: None = Depends(verify_token)):
+        """Get aggregated portfolio Greeks from latest snapshots."""
+        from src.services.portfolio_greeks import get_portfolio_greeks
+
+        with get_db_session() as db:
+            return get_portfolio_greeks(db)
+
+    @app.post("/api/refresh-greeks")
+    def refresh_greeks_endpoint(token: None = Depends(verify_token)):
+        """Fetch live Greeks from IBKR and update snapshots."""
+        from src.config.base import IBKRConfig
+        from src.services.portfolio_greeks import refresh_greeks
+        from src.tools.ibkr_client import IBKRClient
+
+        config = IBKRConfig()
+        config.client_id = 10  # Avoid conflict with daemon (client_id=1)
+        client = IBKRClient(config, suppress_errors=True)
+        try:
+            connected = client.connect()
+            if not connected:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not connect to IBKR. Is TWS/Gateway running?",
+                )
+            with get_db_session() as db:
+                return refresh_greeks(client, db)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Greeks refresh failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
 
     @app.get("/api/staged")
     def get_staged(token: None = Depends(verify_token)):
@@ -271,9 +401,43 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 .limit(20)
                 .all()
             )
+            def _extract_target_symbol(audit):
+                """Extract target symbol/trade_id from a CLOSE_POSITION decision."""
+                if audit.action != "CLOSE_POSITION":
+                    return None
+                # Path C: decision_metadata column (multi-action plan)
+                dm = audit.decision_metadata
+                if isinstance(dm, dict):
+                    tid = dm.get("trade_id") or dm.get("position_id")
+                    if tid:
+                        return str(tid)
+                # Legacy paths via execution_result
+                er = audit.execution_result or {}
+                data = er.get("data", {})
+                if isinstance(data, dict):
+                    # Autonomy escalation path
+                    meta = data.get("decision", {}).get("metadata", {})
+                    tid = meta.get("trade_id") or meta.get("position_id")
+                    if tid:
+                        return str(tid)
+                    # Guardrail block path
+                    tid = data.get("trade_id") or data.get("position_id")
+                    if tid:
+                        return str(tid)
+                # Try event payload
+                if audit.event_id:
+                    evt = db.query(DaemonEvent).get(audit.event_id)
+                    if evt and evt.payload:
+                        sym = evt.payload.get("symbol")
+                        if sym:
+                            return sym
+                return None
+
             return [
                 {
                     "id": d.id,
+                    "plan_id": d.plan_id,
+                    "plan_assessment": d.plan_assessment,
                     "timestamp": str(d.timestamp),
                     "action": d.action,
                     "confidence": d.confidence,
@@ -282,9 +446,92 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                     "risks_considered": d.risks_considered or [],
                     "event_type": d.event_type,
                     "autonomy_level": d.autonomy_level,
+                    "guardrail_flags": d.guardrail_flags or [],
+                    "execution_result": d.execution_result or {},
+                    "decision_metadata": d.decision_metadata or {},
+                    "target_symbol": _extract_target_symbol(d),
                 }
                 for d in pending
             ]
+
+    @app.get("/api/notifications")
+    def get_notifications(token: None = Depends(verify_token)):
+        """Get active daemon notifications (self-updating, no approval needed)."""
+        with get_db_session() as db:
+            active = (
+                db.query(DaemonNotification)
+                .filter_by(status="active")
+                .order_by(DaemonNotification.updated_at.desc())
+                .all()
+            )
+            return [
+                {
+                    "id": n.id,
+                    "key": n.notification_key,
+                    "category": n.category,
+                    "title": n.title,
+                    "message": n.message,
+                    "details": n.details or {},
+                    "first_seen": str(n.first_seen_at),
+                    "updated_at": str(n.updated_at),
+                    "occurrence_count": n.occurrence_count,
+                    "action_choices": getattr(n, "action_choices", None),
+                    "chosen_action": getattr(n, "chosen_action", None),
+                    "chosen_at": str(n.chosen_at) if getattr(n, "chosen_at", None) else None,
+                }
+                for n in active
+            ]
+
+    class NotificationActionRequest(BaseModel):
+        action_key: str
+
+    @app.post("/api/notifications/{notification_id}/action")
+    def choose_notification_action(
+        notification_id: int,
+        request: NotificationActionRequest,
+        token: None = Depends(verify_token),
+    ):
+        """Record user's chosen action on a notification.
+
+        Validates action_key against the notification's action_choices.
+        "keep_blocked" keeps the notification active; all others resolve it.
+        """
+        with get_db_session() as db:
+            notif = db.query(DaemonNotification).get(notification_id)
+            if not notif:
+                raise HTTPException(status_code=404, detail="Notification not found")
+            if notif.status != "active":
+                return {"status": "already_resolved", "id": notification_id}
+
+            # Validate action_key against available choices
+            choices = getattr(notif, "action_choices", None) or []
+            valid_keys = {c["key"] for c in choices if isinstance(c, dict)}
+            if request.action_key not in valid_keys:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid action_key '{request.action_key}'. "
+                           f"Valid keys: {sorted(valid_keys)}",
+                )
+
+            notif.chosen_action = request.action_key
+            notif.chosen_at = datetime.utcnow()
+            notif.updated_at = datetime.utcnow()
+
+            # "keep_blocked" keeps notification active; others resolve it
+            if request.action_key != "keep_blocked":
+                notif.status = "resolved"
+                notif.resolved_at = datetime.utcnow()
+
+            db.commit()
+            logger.info(
+                f"Notification '{notif.notification_key}' action: "
+                f"{request.action_key} (id={notification_id})"
+            )
+            return {
+                "status": "action_recorded",
+                "id": notification_id,
+                "action_key": request.action_key,
+            }
 
     class ApprovalRequest(BaseModel):
         decision: str = "approved"
@@ -348,6 +595,94 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
             db.commit()
 
             return {"status": "rejected", "decision_id": decision_id}
+
+    @app.post("/api/override-rejection/{decision_id}")
+    def override_rejection(
+        decision_id: int,
+        token: None = Depends(verify_token),
+    ):
+        """Override a rejected decision: flip to approved and trigger execution.
+
+        Use case: user rejected a CLOSE_POSITION, then changed their mind.
+        This flips the decision to approved and emits a HUMAN_OVERRIDE event
+        so the daemon executes it.
+        """
+        with get_db_session() as db:
+            from src.agentic.event_bus import EventBus, EventType
+
+            audit = db.query(DecisionAudit).get(decision_id)
+            if not audit:
+                raise HTTPException(status_code=404, detail="Decision not found")
+
+            if audit.executed:
+                return {"status": "already_executed", "decision_id": decision_id}
+            if audit.human_decision != "rejected":
+                return {
+                    "status": f"not_rejected (current: {audit.human_decision})",
+                    "decision_id": decision_id,
+                }
+
+            audit.human_decision = "approved"
+            audit.human_decided_at = datetime.utcnow()
+            audit.human_override = True
+            db.commit()
+
+            # Emit event so daemon executes
+            event_bus = EventBus(db)
+            event_bus.emit(
+                EventType.HUMAN_OVERRIDE,
+                payload={
+                    "decision_id": audit.id,
+                    "action": audit.action,
+                    "confidence": audit.confidence,
+                    "reasoning": audit.reasoning,
+                    "key_factors": audit.key_factors,
+                    "risks_considered": audit.risks_considered,
+                    "source": "rejection_override",
+                },
+            )
+
+            return {
+                "status": "override_approved",
+                "decision_id": decision_id,
+                "action": audit.action,
+            }
+
+    @app.get("/api/rejected-today")
+    def get_rejected_today(token: None = Depends(verify_token)):
+        """Get decisions rejected this trading session that can be overridden.
+
+        Uses trading-day boundary (not calendar midnight) so Friday
+        rejections persist through the weekend until Monday 9:30 AM.
+        """
+        session_start = _current_session_start()
+        session_start_utc = session_start.astimezone(
+            ZoneInfo("UTC")
+        ).replace(tzinfo=None)
+        with get_db_session() as db:
+            rejected = (
+                db.query(DecisionAudit)
+                .filter(
+                    DecisionAudit.executed == False,  # noqa: E712
+                    DecisionAudit.human_decision == "rejected",
+                    DecisionAudit.human_decided_at >= session_start_utc,
+                )
+                .order_by(DecisionAudit.timestamp.desc())
+                .limit(20)
+                .all()
+            )
+            return [
+                {
+                    "id": d.id,
+                    "timestamp": str(d.timestamp),
+                    "action": d.action,
+                    "confidence": d.confidence,
+                    "reasoning": d.reasoning,
+                    "event_type": d.event_type,
+                    "rejected_at": str(d.human_decided_at) if d.human_decided_at else None,
+                }
+                for d in rejected
+            ]
 
     @app.post("/api/pause")
     def pause_daemon(token: None = Depends(verify_token)):
@@ -476,29 +811,42 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 .scalar()
             ) or 0
 
+            all_time_total = (
+                db.query(sa_func.sum(ClaudeApiCost.cost_usd))
+                .scalar()
+            ) or 0.0
+
             return {
                 "daily_total_usd": round(daily_total, 4),
                 "monthly_total_usd": round(monthly_total, 4),
+                "all_time_total_usd": round(all_time_total, 4),
                 "calls_today": total_calls,
                 "date": str(today),
             }
 
     @app.get("/api/guardrails")
     def get_guardrails(token: None = Depends(verify_token)):
-        """Get guardrail activity summary for today."""
-        from sqlalchemy import func as sa_func
+        """Get guardrail activity summary for the last 24 hours.
+
+        Uses a 24-hour window instead of strict date boundary to avoid
+        timezone mismatches between datetime.utcnow() stored in DB
+        and the dashboard server's local time.
+        """
+        from datetime import datetime as dt, timedelta, timezone
 
         with get_db_session() as db:
-            today = date.today()
+            # Use 24-hour window to avoid UTC vs local date boundary issues
+            cutoff = dt.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
 
-            # Count today's decisions with guardrail flags
-            decisions_today = (
+            decisions_recent = (
                 db.query(DecisionAudit)
-                .filter(sa_func.date(DecisionAudit.timestamp) == today)
+                .filter(DecisionAudit.timestamp >= cutoff)
+                .order_by(DecisionAudit.timestamp.desc())
+                .limit(100)
                 .all()
             )
 
-            total_decisions = len(decisions_today)
+            total_decisions = len(decisions_recent)
             blocks = 0
             warnings = 0
             flagged_guards = {}
@@ -506,7 +854,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
             # Last 10 findings
             recent_findings = []
 
-            for d in decisions_today:
+            for d in decisions_recent:
                 flags = d.guardrail_flags or []
                 for flag in flags:
                     if not flag.get("passed", True):
@@ -526,7 +874,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                         })
 
             return {
-                "date": str(today),
+                "date": str(dt.now(timezone.utc).date()),
                 "total_decisions": total_decisions,
                 "guardrail_blocks": blocks,
                 "guardrail_warnings": warnings,
@@ -604,6 +952,221 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
 
             return {"status": "unstaged_all", "count": len(candidates)}
 
+    # ------------------------------------------------------------------
+    # Auto-scan endpoints (Phase 4 automation)
+    # ------------------------------------------------------------------
+    @app.post("/api/auto-scan/trigger")
+    def trigger_auto_scan(
+        payload: dict = {},
+        token: None = Depends(verify_token),
+    ):
+        """Manually trigger the auto-scan pipeline.
+
+        Runs scan -> select -> stage (never auto-executes).
+        Requires override_market_hours=true when market is closed.
+        """
+        from src.agentic.config import load_phase5_config
+        from src.services.auto_select_pipeline import (
+            run_auto_select_pipeline,
+            run_scan_and_persist,
+            stage_selected_candidates,
+        )
+        from src.services.market_calendar import MarketCalendar
+
+        override = payload.get("override_market_hours", False)
+        calendar = MarketCalendar()
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+
+        if not calendar.is_market_open(now_et) and not override:
+            return {
+                "error": "Market is closed. Set override_market_hours=true to run with stale data.",
+            }
+
+        config = load_phase5_config()
+        preset = config.auto_scan.scanner_preset
+
+        with get_db_session() as db:
+            try:
+                scan_id, opportunities = run_scan_and_persist(preset=preset, db=db)
+            except RuntimeError as e:
+                return {"error": str(e)}
+
+            if not opportunities:
+                return {
+                    "status": "scan_empty",
+                    "scan_id": scan_id,
+                    "symbols_found": 0,
+                }
+
+            result = run_auto_select_pipeline(
+                scan_id=scan_id,
+                db=db,
+                override_market_hours=override,
+            )
+
+            if not result.success:
+                return {"error": result.error, "scan_id": scan_id}
+
+            # Always stage via manual trigger (never auto-execute)
+            staged_count = 0
+            if result.selected:
+                staged_count = stage_selected_candidates(
+                    selected=result.selected,
+                    opp_id_map=result.opp_id_map,
+                    config_snapshot=result.config_snapshot,
+                    db=db,
+                    earnings_map=result.earnings_map,
+                )
+
+            return {
+                "status": "scan_complete",
+                "scan_id": scan_id,
+                "symbols_scanned": result.symbols_scanned,
+                "selected": len(result.selected),
+                "staged": staged_count,
+                "elapsed_seconds": result.elapsed_seconds,
+                "stale_data": result.stale_data,
+            }
+
+    @app.post("/api/force-scan")
+    def force_scan(
+        payload: dict = {},
+        token: None = Depends(verify_token),
+    ):
+        """Force-scan override: run scan pipeline + emit SCHEDULED_CHECK.
+
+        Unlike /api/auto-scan/trigger which only stages trades, this
+        endpoint also emits a SCHEDULED_CHECK event so the daemon's
+        Claude reasoning sees the newly staged candidates and can
+        recommend EXECUTE_TRADES.
+
+        Use case: Claude returned MONITOR_ONLY on an entry day (too
+        conservative). The user clicks "Force Scan" to override —
+        the pipeline finds and stages trades, then Claude re-evaluates.
+        """
+        from src.agentic.config import load_phase5_config
+        from src.services.auto_select_pipeline import (
+            run_auto_select_pipeline,
+            run_scan_and_persist,
+            stage_selected_candidates,
+        )
+        from src.services.market_calendar import MarketCalendar
+
+        override = payload.get("override_market_hours", False)
+        calendar = MarketCalendar()
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+
+        if not calendar.is_market_open(now_et) and not override:
+            return {
+                "error": "Market is closed. Set override_market_hours=true to run with stale data.",
+            }
+
+        config = load_phase5_config()
+        preset = config.auto_scan.scanner_preset
+
+        with get_db_session() as db:
+            # Step 1: Run scanner + auto-select pipeline
+            try:
+                scan_id, opportunities = run_scan_and_persist(preset=preset, db=db)
+            except RuntimeError as e:
+                return {"error": str(e)}
+
+            if not opportunities:
+                return {
+                    "status": "scan_empty",
+                    "scan_id": scan_id,
+                    "symbols_scanned": 0,
+                    "selected": 0,
+                    "staged": 0,
+                }
+
+            result = run_auto_select_pipeline(
+                scan_id=scan_id,
+                db=db,
+                override_market_hours=override,
+            )
+
+            if not result.success:
+                return {"error": result.error, "scan_id": scan_id}
+
+            # Step 2: Stage selected candidates
+            staged_count = 0
+            if result.selected:
+                staged_count = stage_selected_candidates(
+                    selected=result.selected,
+                    opp_id_map=result.opp_id_map,
+                    config_snapshot=result.config_snapshot,
+                    db=db,
+                    earnings_map=result.earnings_map,
+                )
+
+            # Step 3: Emit SCHEDULED_CHECK so daemon runs Claude reasoning
+            # with newly staged candidates in context
+            from src.agentic.event_bus import EventBus, EventType
+
+            EventBus(db).emit(
+                EventType.SCHEDULED_CHECK,
+                payload={"source": "force_scan"},
+            )
+
+            return {
+                "status": "scan_complete",
+                "scan_id": scan_id,
+                "symbols_scanned": result.symbols_scanned,
+                "selected": len(result.selected),
+                "staged": staged_count,
+            }
+
+    @app.get("/api/auto-scan/status")
+    def auto_scan_status(token: None = Depends(verify_token)):
+        """Return auto-scan config and last scan info."""
+        from src.agentic.config import load_phase5_config
+
+        config = load_phase5_config()
+        scan_cfg = config.auto_scan
+
+        # Last scan info
+        last_scan = None
+        staged_today = 0
+        with get_db_session() as db:
+            from src.data.models import ScanResult
+
+            latest = (
+                db.query(ScanResult)
+                .filter(ScanResult.source == "ibkr_scanner")
+                .order_by(ScanResult.scan_timestamp.desc())
+                .first()
+            )
+            if latest:
+                last_scan = {
+                    "scan_id": latest.id,
+                    "timestamp": str(latest.scan_timestamp),
+                    "total_candidates": latest.total_candidates,
+                }
+
+            # Staged today count
+            today = date.today()
+            staged_today = (
+                db.query(ScanOpportunity)
+                .filter(
+                    ScanOpportunity.state == "STAGED",
+                    ScanOpportunity.staged_at >= datetime.combine(today, datetime.min.time()),
+                )
+                .count()
+            )
+
+        return {
+            "config": {
+                "enabled": scan_cfg.enabled,
+                "delay_minutes": scan_cfg.delay_minutes,
+                "scanner_preset": scan_cfg.scanner_preset,
+                "auto_stage": scan_cfg.auto_stage,
+                "require_ibkr": scan_cfg.require_ibkr,
+            },
+            "last_scan": last_scan,
+            "staged_today": staged_today,
+        }
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard_page():
         """HTML dashboard."""
@@ -660,6 +1223,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .stat.green .value { color: var(--green); }
   .stat.yellow .value { color: var(--yellow); }
   .stat.red .value { color: var(--red); }
+  .stat.dim .value { color: var(--text-dim); }
 
   /* Tables */
   table { width: 100%; border-collapse: collapse; }
@@ -675,6 +1239,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .tag-review { background: rgba(255, 145, 0, 0.15); color: var(--orange); }
   .tag-yes { background: rgba(0, 230, 118, 0.15); color: var(--green); }
   .tag-no { background: rgba(255, 82, 82, 0.15); color: var(--red); }
+  .tag-put { background: rgba(0, 230, 118, 0.15); color: var(--green); }
+  .tag-call { background: rgba(0, 212, 255, 0.12); color: var(--accent); }
 
   /* Buttons */
   .btn { border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 600; transition: all 0.15s; }
@@ -686,13 +1252,23 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .btn-control:hover { border-color: var(--accent); color: var(--accent); }
   .controls { display: flex; gap: 8px; }
 
+  /* Notification cards (blue theme — informational, no action needed) */
+  .notif-item { background: var(--bg3); border: 1px solid rgba(0, 150, 255, 0.3); border-radius: 6px; padding: 14px; margin-bottom: 10px; }
+  .notif-item:last-child { margin-bottom: 0; }
+  .notif-title { font-weight: 700; color: #4da6ff; font-size: 14px; }
+  .notif-meta { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  .notif-message { margin: 8px 0; line-height: 1.6; color: var(--text); font-size: 13px; }
+  .notif-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .notif-actions .btn-sm { padding: 4px 12px; font-size: 12px; border-radius: 4px; cursor: pointer; background: var(--bg); border: 1px solid var(--border); color: var(--text); transition: border-color 0.2s; }
+  .notif-actions .btn-sm:hover { border-color: var(--blue); color: var(--blue); }
+
   /* Pending cards */
   .pending-item { background: var(--bg3); border: 1px solid rgba(255, 214, 0, 0.2); border-radius: 6px; padding: 14px; margin-bottom: 10px; }
   .pending-item:last-child { margin-bottom: 0; }
   .pending-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .pending-action { font-weight: 700; color: var(--yellow); font-size: 14px; }
   .pending-meta { font-size: 11px; color: var(--text-dim); }
-  .pending-reasoning { margin: 8px 0; line-height: 1.5; color: var(--text); }
+  .pending-reasoning { margin: 8px 0; line-height: 1.6; color: var(--text); white-space: pre-wrap; word-break: break-word; font-size: 13px; }
   .pending-factors { margin: 6px 0; }
   .pending-factors span { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); display: block; margin-bottom: 4px; }
   .pending-factors li { font-size: 12px; color: var(--text); margin-left: 16px; margin-bottom: 2px; }
@@ -742,13 +1318,16 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <a href="/scanner" class="btn btn-control" style="text-decoration:none;">Option Scanner</a>
     <a href="/config" class="btn btn-control" style="text-decoration:none;">Settings</a>
     <a href="/guardrails" class="btn btn-control" style="text-decoration:none;">Guardrails</a>
+    <a href="/prompts" class="btn btn-control" style="text-decoration:none;">Prompts</a>
     <div class="controls" id="controls">
       <button class="btn btn-approve" onclick="apiCall('/api/start')" id="btn-start">Start Daemon</button>
       <button class="btn btn-reject" onclick="apiCall('/api/stop')" id="btn-stop">Stop Daemon</button>
       <button class="btn btn-control" onclick="apiCall('/api/pause')" id="btn-pause">Pause</button>
       <button class="btn btn-control" onclick="apiCall('/api/resume')" id="btn-resume">Resume</button>
+      <button class="btn btn-control" onclick="triggerAutoScan()" id="btn-auto-scan" title="Run market scan + auto-select pipeline">Auto-Scan</button>
+      <button class="btn btn-approve" onclick="forceScan()" id="btn-force-scan" title="Override MONITOR_ONLY: scan + stage + trigger Claude reasoning" style="display:none;">Force Scan</button>
     </div>
-    <div class="refresh-badge"><span class="dot" id="status-dot"></span><span id="status-label">Checking...</span> <span id="last-refresh"></span></div>
+    <div class="refresh-badge" style="text-align:right;"><div><span class="dot" id="status-dot"></span><span id="status-label">Checking...</span> <span id="et-time"></span></div><div id="market-countdown" style="font-size:10px;"></div></div>
   </div>
 </div>
 
@@ -759,7 +1338,17 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="status-grid" id="status-grid">
         <div class="stat"><div class="value">--</div><div class="label">Status</div></div>
       </div>
+      <div id="daemon-plan" style="display:none;margin-top:12px;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.7;color:var(--text-dim);"></div>
     </div>
+  </div>
+
+  <!-- Notifications (informational, self-updating — no approve/reject) -->
+  <div class="card full" id="notif-card" style="display:none;">
+    <div class="card-header">
+      <h2>Notifications</h2>
+      <span class="badge" style="background:rgba(0,150,255,0.15);color:#4da6ff;" id="notif-count">0</span>
+    </div>
+    <div class="card-body" id="notif-body"></div>
   </div>
 
   <!-- Pending Approvals -->
@@ -769,6 +1358,17 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <span class="badge" style="background:rgba(255,214,0,0.15);color:var(--yellow);" id="pending-count">0</span>
     </div>
     <div class="card-body" id="pending-body"></div>
+  </div>
+
+  <!-- Rejected Today (overrideable) -->
+  <div class="card full" id="rejected-card" style="display:none;">
+    <div class="card-header">
+      <h2>Rejected Today</h2>
+      <span class="badge" style="background:rgba(255,82,82,0.15);color:var(--red);" id="rejected-count">0</span>
+    </div>
+    <div class="card-body" id="rejected-body" style="font-size:12px;color:var(--text-dim);">
+      <p style="margin:0 0 8px;">These positions won't be re-evaluated until the next trading day. Click Override to approve.</p>
+    </div>
   </div>
 
   <!-- Staged Trades -->
@@ -794,6 +1394,27 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <span class="badge" style="background:rgba(0,212,255,0.12);color:var(--accent);" id="pos-count">0</span>
     </div>
     <div class="card-body" id="positions-body"></div>
+  </div>
+
+  <!-- Portfolio Greeks -->
+  <div class="card full">
+    <div class="card-header">
+      <h2>Portfolio Greeks</h2>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span id="greeks-age" style="font-size:11px;color:var(--text-dim);"></span>
+        <button class="btn btn-control" onclick="refreshGreeks()" id="btn-refresh-greeks"
+                style="padding:3px 10px;font-size:11px;">Refresh from IBKR</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="status-grid" id="greeks-summary" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat"><div class="value">--</div><div class="label">Delta</div></div>
+        <div class="stat"><div class="value">--</div><div class="label">Theta/day</div></div>
+        <div class="stat"><div class="value">--</div><div class="label">Gamma</div></div>
+        <div class="stat"><div class="value">--</div><div class="label">Vega</div></div>
+      </div>
+      <div id="greeks-positions" style="margin-top:12px;"></div>
+    </div>
   </div>
 
   <!-- Costs -->
@@ -842,7 +1463,8 @@ function actionTag(action) {
   const map = {
     'EXECUTE_TRADES': 'tag-exec', 'STAGE_CANDIDATES': 'tag-exec',
     'MONITOR_ONLY': 'tag-monitor', 'CLOSE_POSITION': 'tag-exec',
-    'REQUEST_HUMAN_REVIEW': 'tag-review',
+    'CLOSE_ALL_POSITIONS': 'tag-exec',
+    'REQUEST_HUMAN_REVIEW': 'tag-review', 'GUARDRAIL_BLOCKED': 'tag-no',
   };
   return `<span class="tag ${map[action] || 'tag-pending'}">${action}</span>`;
 }
@@ -929,12 +1551,31 @@ async function apiCall(url) {
   } catch(e) { showToast('Error: ' + e.message); }
 }
 
+async function chooseNotifAction(id, actionKey) {
+  try {
+    const r = await fetch('/api/notifications/' + id + '/action', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action_key: actionKey}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'Failed');
+    showToast('Action recorded: ' + actionKey);
+    fetchData();
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
 async function approveDecision(id) {
   await apiCall('/api/approve/' + id);
 }
 
 async function rejectDecision(id) {
   await apiCall('/api/reject/' + id);
+}
+
+async function overrideRejection(id) {
+  if (!confirm('Override rejection and APPROVE this decision?')) return;
+  await apiCall('/api/override-rejection/' + id);
 }
 
 async function unstage(id) {
@@ -945,6 +1586,57 @@ async function unstage(id) {
 async function unstageAll() {
   if (!confirm('Unstage ALL staged trades?')) return;
   await apiCall('/api/unstage-all');
+}
+
+async function triggerAutoScan() {
+  const btn = document.getElementById('btn-auto-scan');
+  const override = confirm('Run auto-scan now?\\n\\nIf market is closed, stale data will be used.');
+  if (!override) return;
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+  try {
+    const r = await fetch('/api/auto-scan/trigger', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({override_market_hours: true})
+    });
+    const d = await r.json();
+    if (d.error) {
+      showToast('Scan failed: ' + d.error);
+    } else {
+      showToast('Scan complete: ' + (d.staged || 0) + ' staged');
+      fetchData();
+    }
+  } catch(e) {
+    showToast('Error: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Auto-Scan';
+}
+
+async function forceScan() {
+  const btn = document.getElementById('btn-force-scan');
+  if (!confirm('Override MONITOR_ONLY and scan for new trades?\\n\\nThis will run the full pipeline (scan → select → stage) and trigger Claude reasoning on the results.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+  try {
+    const r = await fetch('/api/force-scan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({override_market_hours: !_isMarketOpen()})
+    });
+    const d = await r.json();
+    if (d.error) {
+      showToast('Force scan failed: ' + d.error);
+    } else {
+      showToast('Force scan: ' + (d.staged || 0) + ' staged, Claude will re-evaluate');
+      fetchData();
+    }
+  } catch(e) {
+    showToast('Error: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Force Scan';
 }
 
 async function fetchData() {
@@ -969,6 +1661,22 @@ async function fetchData() {
     document.getElementById('btn-stop').style.display = alive ? '' : 'none';
     document.getElementById('btn-pause').style.display = alive && status.status === 'running' ? '' : 'none';
     document.getElementById('btn-resume').style.display = alive && status.status === 'paused' ? '' : 'none';
+    document.getElementById('btn-force-scan').style.display = alive && status.status === 'running' ? '' : 'none';
+
+    // Watchdog indicator
+    const wd = status.watchdog || {};
+    let wdValue, wdColor;
+    if (!wd.pid && !wd.daemon_assessment) {
+      wdValue = 'OFF'; wdColor = 'dim';
+    } else if (!wd.active) {
+      wdValue = 'DOWN'; wdColor = 'red';
+    } else if (wd.daemon_assessment === 'healthy') {
+      wdValue = 'ACTIVE'; wdColor = 'green';
+    } else if (wd.daemon_assessment && wd.daemon_assessment.includes('warn')) {
+      wdValue = 'WARN'; wdColor = 'yellow';
+    } else {
+      wdValue = (wd.daemon_assessment || 'ACTIVE').toUpperCase(); wdColor = wd.active ? 'green' : 'red';
+    }
 
     document.getElementById('status-grid').innerHTML = `
       <div class="stat ${sColor}"><div class="value">${(status.status||'--').toUpperCase()}</div><div class="label">Daemon</div></div>
@@ -979,7 +1687,38 @@ async function fetchData() {
       <div class="stat ${status.errors_today > 0 ? 'red' : ''}"><div class="value">${status.errors_today||0}</div><div class="label">Errors</div></div>
       <div class="stat"><div class="value">${uptime}</div><div class="label">Uptime</div></div>
       <div class="stat"><div class="value">${timeAgo(status.last_heartbeat)}</div><div class="label">Heartbeat</div></div>
+      <div class="stat ${wdColor}"><div class="value">${wdValue}</div><div class="label">Watchdog</div></div>
     `;
+
+    // Notifications (informational, self-updating)
+    try {
+      const notifs = await (await fetch('/api/notifications')).json();
+      const nc = document.getElementById('notif-card');
+      document.getElementById('notif-count').textContent = notifs.length;
+      if (notifs.length > 0) {
+        nc.style.display = '';
+        document.getElementById('notif-body').innerHTML = notifs.map(n => {
+          let actionsHtml = '';
+          if (n.action_choices && n.action_choices.length > 0 && !n.chosen_action) {
+            actionsHtml = '<div class="notif-actions">' +
+              n.action_choices.map(a =>
+                `<button class="btn btn-sm" onclick="chooseNotifAction(${n.id},'${a.key}')" title="${esc(a.description)}">${esc(a.label)}</button>`
+              ).join(' ') + '</div>';
+          } else if (n.chosen_action) {
+            const chosenLabel = (n.action_choices || []).find(a => a.key === n.chosen_action);
+            actionsHtml = `<div class="notif-actions"><span class="tag tag-yes">Action: ${esc(chosenLabel ? chosenLabel.label : n.chosen_action)}</span></div>`;
+          }
+          return `<div class="notif-item">
+            <div class="notif-title">${esc(n.title)}</div>
+            <div class="notif-meta">Since ${fmtTime(n.first_seen)} | Updated ${fmtTime(n.updated_at)} | ${n.occurrence_count} occurrence${n.occurrence_count !== 1 ? 's' : ''}</div>
+            <div class="notif-message">${esc(n.message)}</div>
+            ${actionsHtml}
+          </div>`;
+        }).join('');
+      } else {
+        nc.style.display = 'none';
+      }
+    } catch(e) { /* notifications endpoint may not exist on older daemons */ }
 
     // Pending approvals
     const queue = await (await fetch('/api/queue')).json();
@@ -987,23 +1726,72 @@ async function fetchData() {
     document.getElementById('pending-count').textContent = queue.length;
     if (queue.length > 0) {
       pc.style.display = '';
-      document.getElementById('pending-body').innerHTML = queue.map(q => `
-        <div class="pending-item">
+      document.getElementById('pending-body').innerHTML = queue.map(q => {
+        const grBlocks = (q.guardrail_flags || []).filter(f => !f.passed && f.severity === 'block');
+        const isGuardrail = grBlocks.length > 0;
+        const execResult = q.execution_result || {};
+        const grLayer = execResult.guardrail_layer || '';
+        const isContextBlock = q.action === 'GUARDRAIL_BLOCKED' || grLayer === 'context';
+        const approveNote = isContextBlock
+          ? 'Approving will re-run with fresh data + Claude'
+          : isGuardrail
+            ? 'Approving will execute ' + esc(q.action) + ' directly, bypassing the guardrail'
+            : '';
+
+        return `<div class="pending-item" style="${isGuardrail ? 'border-color:rgba(255,82,82,0.4);' : ''}">
           <div class="pending-header">
-            <div><span class="pending-action">${q.action}</span> <span class="pending-meta">#${q.id} | ${q.event_type} | ${fmtTime(q.timestamp)}</span></div>
+            <div>
+              ${isGuardrail ? '<span class="tag tag-no" style="margin-right:6px;">GUARDRAIL</span>' : ''}
+              <span class="pending-action">${q.action}${q.target_symbol ? ' <span style="color:var(--blue);font-weight:600;">' + esc(q.target_symbol) + '</span>' : ''}</span>
+              <span class="pending-meta">#${q.id} | ${q.event_type} | ${fmtTime(q.timestamp)}</span>
+            </div>
             <div>${confBar(q.confidence)}</div>
           </div>
-          <div class="pending-reasoning">${esc(q.reasoning) || 'No reasoning provided'}</div>
-          ${q.key_factors && q.key_factors.length ? `<div class="pending-factors"><span>Key Factors</span><ul>${q.key_factors.map(f=>'<li>'+esc(f)+'</li>').join('')}</ul></div>` : ''}
-          ${q.risks_considered && q.risks_considered.length ? `<div class="pending-factors"><span>Risks Considered</span><ul>${q.risks_considered.map(r=>'<li>'+esc(r)+'</li>').join('')}</ul></div>` : ''}
+          ${isGuardrail ? '<div style="background:rgba(255,82,82,0.08);border:1px solid rgba(255,82,82,0.2);border-radius:4px;padding:8px 12px;margin:8px 0;font-size:12px;">' +
+            grBlocks.map(f => '<div style="color:var(--red);margin-bottom:2px;"><b>' + esc(f.guard_name) + ':</b> ' + esc(f.reason) + '</div>').join('') +
+            (grLayer ? '<div style="color:var(--text-dim);margin-top:4px;font-size:11px;">Layer: ' + esc(grLayer) + '</div>' : '') +
+            '</div>' : ''}
+          <div class="pending-reasoning">${fmtReasoning(q.reasoning)}</div>
+          ${q.key_factors && q.key_factors.length ? '<div class="pending-factors"><span>Key Factors</span><ul>' + q.key_factors.map(f=>'<li>'+esc(f)+'</li>').join('') + '</ul></div>' : ''}
+          ${q.risks_considered && q.risks_considered.length ? '<div class="pending-factors"><span>Risks Considered</span><ul>' + q.risks_considered.map(r=>'<li>'+esc(r)+'</li>').join('') + '</ul></div>' : ''}
+          ${approveNote ? '<div style="font-size:11px;color:var(--text-dim);margin-top:6px;font-style:italic;">' + esc(approveNote) + '</div>' : ''}
           <div class="pending-buttons">
             <button class="btn btn-approve" onclick="approveDecision(${q.id})">Approve</button>
             <button class="btn btn-reject" onclick="rejectDecision(${q.id})">Reject</button>
           </div>
-        </div>
-      `).join('');
+        </div>`;
+      }).join('');
     } else {
       pc.style.display = 'none';
+    }
+
+    // Rejected today (overrideable)
+    const rejectedRaw = await (await fetch('/api/rejected-today')).json();
+    const rejected = rejectedRaw.filter(r => !dismissedRejections.has(r.id));
+    const rc = document.getElementById('rejected-card');
+    document.getElementById('rejected-count').textContent = rejected.length;
+    if (rejected.length > 0) {
+      rc.style.display = '';
+      document.getElementById('rejected-body').innerHTML =
+        '<p style="margin:0 0 8px;font-size:12px;color:var(--text-dim);">These positions won\\'t be re-evaluated until the next trading day. Click Override to approve.</p>' +
+        rejected.map(r => `<div class="pending-item" style="border-color:rgba(255,82,82,0.3);opacity:0.85;">
+          <div class="pending-header">
+            <div>
+              <span class="tag tag-no" style="margin-right:6px;">REJECTED</span>
+              <span class="pending-action">${r.action}</span>
+              <span class="pending-meta">#${r.id} | ${r.event_type} | ${fmtTime(r.timestamp)}</span>
+            </div>
+            <div>${confBar(r.confidence)}</div>
+          </div>
+          <div class="pending-reasoning">${fmtReasoning(r.reasoning)}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Rejected at ${fmtTime(r.rejected_at)}</div>
+          <div class="pending-buttons">
+            <button class="btn btn-approve" onclick="overrideRejection(${r.id})">Override → Approve</button>
+            <button class="btn btn-control" onclick="dismissRejection(${r.id})" style="padding:2px 8px;font-size:10px;">Clear</button>
+          </div>
+        </div>`).join('');
+    } else {
+      rc.style.display = 'none';
     }
 
     // Staged trades
@@ -1050,16 +1838,64 @@ async function fetchData() {
     document.getElementById('pos-count').textContent = positions.length;
     document.getElementById('positions-body').innerHTML = positions.length ? `
       <table>
-        <tr><th>Symbol</th><th>Strike</th><th>Exp</th><th>Premium</th><th>Qty</th><th>DTE</th></tr>
+        <tr><th>Symbol</th><th>Strike</th><th>Type</th><th>Exp</th><th>Premium</th><th>Qty</th><th>DTE</th></tr>
         ${positions.map(p => `<tr>
           <td style="font-weight:600;color:var(--accent)">${p.symbol}</td>
           <td>$${p.strike}</td>
+          <td>${optTypeTag(p.option_type)}</td>
           <td>${p.expiration}</td>
           <td>$${Number(p.entry_premium).toFixed(2)}</td>
           <td>${p.contracts}</td>
           <td>${p.dte ?? '--'}</td>
         </tr>`).join('')}
       </table>` : '<div class="empty">No open positions</div>';
+
+    // Portfolio Greeks
+    try {
+      const greeks = await (await fetch('/api/portfolio-greeks')).json();
+      const pg = greeks.portfolio;
+      if (pg && pg.position_count > 0) {
+        const dColor = pg.total_delta < 0 ? 'color:var(--red)' : pg.total_delta > 0 ? 'color:var(--green)' : '';
+        const tColor = pg.total_theta > 0 ? 'color:var(--green)' : pg.total_theta < 0 ? 'color:var(--red)' : '';
+        document.getElementById('greeks-summary').innerHTML = `
+          <div class="stat"><div class="value" style="${dColor}">${pg.total_delta?.toFixed(2) ?? '--'}</div><div class="label">Delta</div></div>
+          <div class="stat"><div class="value" style="${tColor}">${pg.total_theta?.toFixed(2) ?? '--'}</div><div class="label">Theta/day</div></div>
+          <div class="stat"><div class="value">${pg.total_gamma?.toFixed(4) ?? '--'}</div><div class="label">Gamma</div></div>
+          <div class="stat"><div class="value">${pg.total_vega?.toFixed(2) ?? '--'}</div><div class="label">Vega</div></div>
+        `;
+        document.getElementById('greeks-positions').innerHTML = `<table>
+          <tr><th>Symbol</th><th>Strike</th><th>Type</th><th>Qty</th><th>\u0394</th><th>\u0398</th><th>\u0393</th><th>V</th><th>IV</th><th>P&L</th></tr>
+          ${greeks.positions.map(p => `<tr>
+            <td style="font-weight:600;color:var(--accent)">${p.symbol}</td>
+            <td>$${p.strike}</td>
+            <td>${optTypeTag(p.option_type)}</td>
+            <td>${p.contracts}</td>
+            <td>${p.delta != null ? p.delta.toFixed(3) : '--'}</td>
+            <td>${p.theta != null ? p.theta.toFixed(3) : '--'}</td>
+            <td>${p.gamma != null ? p.gamma.toFixed(4) : '--'}</td>
+            <td>${p.vega != null ? p.vega.toFixed(3) : '--'}</td>
+            <td>${p.iv != null ? (p.iv*100).toFixed(0)+'%' : '--'}</td>
+            <td style="color:${p.current_pnl != null && p.current_pnl >= 0 ? 'var(--green)' : 'var(--red)'}">
+              ${p.current_pnl != null ? '$'+p.current_pnl.toFixed(0) : '--'}</td>
+          </tr>`).join('')}
+        </table>`;
+        // Show staleness from the most recent snapshot
+        const ages = greeks.positions.map(p => p.snapshot_age_minutes).filter(a => a != null);
+        const maxAge = ages.length ? Math.max(...ages) : null;
+        document.getElementById('greeks-age').textContent = maxAge != null
+          ? (maxAge < 60 ? Math.round(maxAge) + 'm ago' : Math.floor(maxAge/60) + 'h ago')
+          : '';
+      } else {
+        document.getElementById('greeks-summary').innerHTML =
+          '<div class="empty" style="grid-column:1/-1">No Greeks data \u2014 open positions needed</div>';
+        document.getElementById('greeks-positions').innerHTML = '';
+        document.getElementById('greeks-age').textContent = '';
+      }
+    } catch(e) {
+      console.error('Greeks fetch error:', e);
+      document.getElementById('greeks-summary').innerHTML =
+        '<div class="empty" style="grid-column:1/-1">Greeks unavailable</div>';
+    }
 
     // Daemon focus — derived from staged + positions + alive state
     const focusEl = document.getElementById('focus-stat');
@@ -1086,12 +1922,62 @@ async function fetchData() {
       focusEl.innerHTML = `<div class="value" style="font-size:14px;">${focusLabel}</div><div class="label">Focus</div>`;
     }
 
+    // Daemon plan message
+    const planEl = document.getElementById('daemon-plan');
+    if (planEl) {
+      const mktOpen = _isMarketOpen();
+      let plan = '';
+
+      if (!alive) {
+        plan = '';
+      } else if (status.status === 'paused') {
+        plan = 'Daemon is paused. Resume to continue normal operations.';
+      } else if (!mktOpen) {
+        const hasPositions = positions.length > 0;
+        const lines = ['Waiting for US market to open. At market open the daemon will:'];
+        if (hasPositions) {
+          lines.push('\u2022 Check ' + positions.length + ' open position' + (positions.length > 1 ? 's' : '') + ' and evaluate for exit/close');
+        }
+        lines.push('\u2022 Run the auto-scan pipeline to find new trade candidates');
+        lines.push('\u2022 Evaluate candidates against strategy criteria (delta, OTM%, premium, margin)');
+        lines.push('\u2022 Stage qualifying trades and execute if autonomy level permits');
+        lines.push('\u2022 Monitor all positions until market close, checking every 15 minutes');
+        lines.push('\u2022 Run end-of-day sync, reconcile with IBKR, and record the day');
+        plan = lines.join('<br>');
+      } else {
+        const hasPositions = positions.length > 0;
+        const stagedCount = staged.summary.count;
+        const pendingCount = queue.length;
+        const lines = ['Market is open. The daemon is actively:'];
+        if (hasPositions) {
+          lines.push('\u2022 Monitoring ' + positions.length + ' open position' + (positions.length > 1 ? 's' : '') + ' for exit triggers (profit target, stop loss, time exit)');
+        }
+        if (stagedCount > 0) {
+          lines.push('\u2022 Processing ' + stagedCount + ' staged trade' + (stagedCount > 1 ? 's' : '') + ' for execution');
+        }
+        if (pendingCount > 0) {
+          lines.push('\u2022 Awaiting human review on ' + pendingCount + ' pending decision' + (pendingCount > 1 ? 's' : ''));
+        }
+        lines.push('\u2022 Running scheduled checks every 15 minutes (market data, VIX, position P&L)');
+        lines.push('\u2022 Reasoning with Claude on any new events or material changes');
+        plan = lines.join('<br>');
+      }
+
+      if (plan) {
+        planEl.innerHTML = plan;
+        planEl.style.display = '';
+      } else {
+        planEl.style.display = 'none';
+      }
+    }
+
     // Costs
     const costs = await (await fetch('/api/costs')).json();
     document.getElementById('costs-body').innerHTML = `
-      <div class="status-grid" style="grid-template-columns:repeat(3,1fr);">
+      <div class="status-grid" style="grid-template-columns:repeat(4,1fr);">
         <div class="stat"><div class="value">$${costs.daily_total_usd.toFixed(4)}</div><div class="label">Today</div></div>
         <div class="stat"><div class="value">$${costs.monthly_total_usd.toFixed(4)}</div><div class="label">This Month</div></div>
+        <div class="stat"><div class="value">$${costs.all_time_total_usd.toFixed(2)}</div><div class="label">All Time</div></div>
         <div class="stat"><div class="value">${costs.calls_today}</div><div class="label">Calls Today</div></div>
       </div>`;
 
@@ -1106,13 +1992,23 @@ async function fetchData() {
           <div class="stat ${warnsColor}"><div class="value">${gr.guardrail_warnings||0}</div><div class="label">Warnings</div></div>
           <div class="stat"><div class="value">${gr.total_decisions||0}</div><div class="label">Decisions</div></div>
         </div>
-        ${gr.recent_findings && gr.recent_findings.length ? '<div style="margin-top:10px;font-size:11px;color:var(--text-dim);">' +
-          gr.recent_findings.slice(0,5).map(f =>
-            '<div style="margin-bottom:4px;">' +
-            '<span class="tag ' + (f.severity === 'block' ? 'tag-no' : 'tag-pending') + '">' + f.severity.toUpperCase() + '</span> ' +
-            esc(f.guard_name) + ': ' + esc(f.reason).substring(0,80) +
-            '</div>'
-          ).join('') + '</div>' : ''}`;
+        ${gr.recent_findings && gr.recent_findings.length ? (() => {
+          const findings = gr.recent_findings.slice(0,5);
+          const unreadCount = findings.filter(f => !readFindings.has(f.decision_id + ':' + f.guard_name)).length;
+          return '<div style="margin-top:10px;font-size:11px;">' +
+            (unreadCount > 0 ? '<div style="margin-bottom:6px;text-align:right;"><button class="btn btn-control" onclick="markAllFindingsRead()" style="padding:2px 8px;font-size:10px;">Mark All Read</button></div>' : '') +
+            findings.map(f => {
+              const key = f.decision_id + ':' + f.guard_name;
+              const isNew = !readFindings.has(key);
+              return '<div data-finding-key="' + key + '" style="margin-bottom:6px;padding:4px 6px;border-radius:3px;' +
+                (isNew ? 'background:rgba(255,214,0,0.08);color:var(--text);' : 'color:var(--text-dim);') + '">' +
+                (isNew ? '<span style="color:var(--yellow);font-weight:600;margin-right:4px;">\u25cf</span>' : '') +
+                '<span class="tag ' + (f.severity === 'block' ? 'tag-no' : 'tag-pending') + '">' + f.severity.toUpperCase() + '</span> ' +
+                '<span style="color:var(--text-dim);margin:0 4px;">' + fmtTime(f.timestamp) + '</span> ' +
+                esc(f.guard_name) + ': ' + esc(f.reason).substring(0,80) +
+                '</div>';
+            }).join('') + '</div>';
+        })() : ''}`;
     } catch(e) { document.getElementById('guardrails-body').innerHTML = '<div class="empty">Guardrails not available</div>'; }
 
     // Decisions
@@ -1132,8 +2028,23 @@ async function fetchData() {
         </tr>`).join('')}
       </table>` : '<div class="empty">No decisions recorded</div>';
 
-    document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
   } catch(e) { console.error('Fetch error:', e); }
+}
+
+async function refreshGreeks() {
+  const btn = document.getElementById('btn-refresh-greeks');
+  const origText = btn.textContent;
+  btn.textContent = 'Refreshing...';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/refresh-greeks', {method:'POST'});
+    if (res.ok) { await fetchData(); }
+    else {
+      const err = await res.json().catch(() => ({detail:'Unknown error'}));
+      alert(err.detail || 'Refresh failed');
+    }
+  } catch(e) { alert('Refresh failed: ' + e.message); }
+  finally { btn.textContent = origText; btn.disabled = false; }
 }
 
 function colorLog(line) {
@@ -1145,6 +2056,33 @@ function colorLog(line) {
   return esc(line);
 }
 function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+function fmtReasoning(s) {
+  if (!s) return 'No reasoning provided';
+  let t = esc(s);
+  t = t.replace(/STEP (\d+)\s*[-–:]\s*/g, '<br><br><b>STEP $1 — </b>');
+  t = t.replace(/(OBSERVATION:|ASSESSMENT:|ACTION:|CONCLUSION:)/g, '<br><br><b>$1</b>');
+  return t.replace(/^(<br>)+/, '').trim();
+}
+
+const dismissedRejections = new Set();
+function dismissRejection(id) {
+  dismissedRejections.add(id);
+  fetchData();
+}
+
+const readFindings = new Set();
+function markAllFindingsRead() {
+  document.querySelectorAll('[data-finding-key]').forEach(el => {
+    readFindings.add(el.getAttribute('data-finding-key'));
+  });
+  fetchData();
+}
+
+function optTypeTag(t) {
+  if (!t) return '';
+  const c = t === 'PUT' ? 'tag-put' : 'tag-call';
+  return '<span class="tag ' + c + '">' + t + '</span>';
+}
 
 async function fetchLogs() {
   try {
@@ -1158,9 +2096,69 @@ async function fetchLogs() {
   } catch(e) { console.error('Log fetch error:', e); }
 }
 
+// Market hours helper: returns {isOpen, nowSecs, openSecs, closeSecs, dow}
+function _getMarketState() {
+  const now = new Date();
+  const etParts = now.toLocaleString('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const [datePart, timePart] = etParts.split(', ');
+  const [hh, mm, ss] = timePart.split(':').map(Number);
+  const etDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const dow = etDate.getDay();
+  const openSecs = 9 * 3600 + 30 * 60;
+  const closeSecs = 16 * 3600;
+  const nowSecs = hh * 3600 + mm * 60 + ss;
+  const isWeekday = dow >= 1 && dow <= 5;
+  const isOpen = isWeekday && nowSecs >= openSecs && nowSecs < closeSecs;
+  return { isOpen, nowSecs, openSecs, closeSecs, dow, isWeekday };
+}
+function _isMarketOpen() { return _getMarketState().isOpen; }
+
+// Market clock: ET time + open/close countdown (ticks every second)
+function updateMarketClock() {
+  const now = new Date();
+  // ET time display
+  const etStr = now.toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  document.getElementById('et-time').textContent = etStr + ' ET';
+
+  const { isOpen, nowSecs, openSecs, closeSecs, dow, isWeekday } = _getMarketState();
+
+  const el = document.getElementById('market-countdown');
+
+  if (isOpen) {
+    // Market open: show time remaining until close
+    const remaining = closeSecs - nowSecs;
+    const rh = Math.floor(remaining / 3600);
+    const rm = Math.floor((remaining % 3600) / 60);
+    const rs = remaining % 60;
+    el.textContent = 'Closes in ' + rh + 'h ' + String(rm).padStart(2,'0') + 'm ' + String(rs).padStart(2,'0') + 's';
+    el.style.color = 'var(--green)';
+  } else {
+    // Market closed: compute seconds until next open
+    let secsUntilOpen;
+    if (isWeekday && nowSecs < openSecs) {
+      // Before open today
+      secsUntilOpen = openSecs - nowSecs;
+    } else {
+      // After close or weekend — count days to next weekday
+      let daysAhead = 1;
+      if (dow === 5 && nowSecs >= closeSecs) daysAhead = 3; // Fri after close -> Mon
+      else if (dow === 6) daysAhead = 2; // Sat -> Mon
+      else if (dow === 0) daysAhead = 1; // Sun -> Mon
+      secsUntilOpen = (86400 - nowSecs) + (daysAhead - 1) * 86400 + openSecs;
+    }
+    const uh = Math.floor(secsUntilOpen / 3600);
+    const um = Math.floor((secsUntilOpen % 3600) / 60);
+    const us = secsUntilOpen % 60;
+    el.textContent = 'Opens in ' + uh + 'h ' + String(um).padStart(2,'0') + 'm ' + String(us).padStart(2,'0') + 's';
+    el.style.color = 'var(--text-dim)';
+  }
+}
+
 initTzButton();
+updateMarketClock();
 fetchData();
 fetchLogs();
+setInterval(updateMarketClock, 1000);
 setInterval(fetchData, 8000);
 setInterval(fetchLogs, 5000);
 </script>
@@ -1266,7 +2264,8 @@ function actionTag(action) {
   const map = {
     'EXECUTE_TRADES': 'tag-exec', 'STAGE_CANDIDATES': 'tag-exec',
     'MONITOR_ONLY': 'tag-monitor', 'CLOSE_POSITION': 'tag-exec',
-    'REQUEST_HUMAN_REVIEW': 'tag-review',
+    'CLOSE_ALL_POSITIONS': 'tag-exec',
+    'REQUEST_HUMAN_REVIEW': 'tag-review', 'GUARDRAIL_BLOCKED': 'tag-no',
   };
   return `<span class="tag ${map[action] || 'tag-pending'}">${action}</span>`;
 }
@@ -1283,6 +2282,14 @@ function esc(s) {
   const d = document.createElement('div');
   d.textContent = String(s);
   return d.innerHTML;
+}
+
+function fmtReasoning(s) {
+  if (!s) return 'No reasoning provided';
+  let t = esc(s);
+  t = t.replace(/STEP (\\d+)\\s*[-–:]\\s*/g, '<br><br><b>STEP $1 — </b>');
+  t = t.replace(/(OBSERVATION:|ASSESSMENT:|ACTION:|CONCLUSION:)/g, '<br><br><b>$1</b>');
+  return t.replace(/^(<br>)+/, '').trim();
 }
 
 function fmtJson(obj) {
@@ -1330,7 +2337,7 @@ async function loadDecision() {
         <div class="card-body">
           <div class="field">
             <div class="field-label">Full Reasoning</div>
-            <div class="field-value mono">${esc(d.reasoning)}</div>
+            <div class="field-value mono">${fmtReasoning(d.reasoning)}</div>
           </div>
           <div class="field-row two">
             <div class="field">

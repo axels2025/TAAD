@@ -29,7 +29,7 @@ Usage:
 
 import asyncio
 import os
-from datetime import datetime, time
+from datetime import date as date_type, datetime, time
 from enum import Enum
 from zoneinfo import ZoneInfo
 
@@ -132,7 +132,19 @@ class TwoTierExecutionScheduler:
         """
         self.client = ibkr_client
         self.validator = premarket_validator or PremarketValidator(ibkr_client=ibkr_client)
-        self.executor = rapid_fire_executor  # Will be created with adaptive executor
+        if rapid_fire_executor:
+            self.executor = rapid_fire_executor
+        else:
+            from src.services.limit_price_calculator import LimitPriceCalculator
+            from src.services.adaptive_order_executor import AdaptiveOrderExecutor
+
+            limit_calc = LimitPriceCalculator()
+            adaptive = AdaptiveOrderExecutor(
+                ibkr_client=ibkr_client, limit_calc=limit_calc
+            )
+            self.executor = RapidFireExecutor(
+                ibkr_client=ibkr_client, adaptive_executor=adaptive
+            )
         self.reconciler = reconciler  # Will be created if needed
         self.conditions = condition_monitor or MarketConditionMonitor(ibkr_client)
         self.strike_selector = strike_selector
@@ -980,18 +992,20 @@ class TwoTierExecutionScheduler:
                         if not staged_opp:
                             contracts = 5
                             otm_pct = 0.0
-                            dte = 0
                             expiration = summary.submission_time.date()
                         else:
                             contracts = staged_opp.staged_contracts or 5
                             otm_pct = staged_opp.otm_pct or 0.0
-                            dte = getattr(staged_opp, "dte", 0) or 0
                             expiration = staged_opp.expiration
 
                         # Ensure expiration is a date object (StagedOpportunity stores it as string)
                         if isinstance(expiration, str):
-                            from datetime import date as date_type
                             expiration = date_type.fromisoformat(expiration)
+
+                        # Calculate DTE from expiration (StagedOpportunity has no dte field)
+                        from src.utils.timezone import market_now
+                        exp_date = expiration if isinstance(expiration, date_type) else date_type.fromisoformat(str(expiration))
+                        dte = max(0, (exp_date - market_now().date()).days)
 
                         exp_str = (
                             expiration.strftime("%Y%m%d")
@@ -999,6 +1013,9 @@ class TwoTierExecutionScheduler:
                             else str(expiration).replace("-", "")
                         )
                         canonical_trade_id = f"{summary.symbol}_{summary.strike}_{exp_str}_P"
+
+                        acct = self.client.get_account_id() if self.client else None
+                        source = "paper" if (not acct or acct.startswith("DU")) else "real"
 
                         trade_record = Trade(
                             trade_id=canonical_trade_id,
@@ -1014,6 +1031,8 @@ class TwoTierExecutionScheduler:
                             dte=dte,
                             ai_reasoning="PENDING - awaiting fill",
                             ai_confidence=0.0,
+                            account_id=acct,
+                            trade_source=source,
                         )
 
                         session.add(trade_record)
@@ -1093,19 +1112,21 @@ class TwoTierExecutionScheduler:
                             # Use defaults if no match found
                             contracts = 5
                             otm_pct = 0.0
-                            dte = 0
                             expiration = summary.submission_time.date()
                         else:
                             # Extract data from staged opportunity
                             contracts = staged_opp.staged_contracts or 5
                             otm_pct = staged_opp.otm_pct or 0.0
-                            dte = getattr(staged_opp, "dte", 0) or 0
                             expiration = staged_opp.expiration
 
                         # Ensure expiration is a date object (StagedOpportunity stores it as string)
                         if isinstance(expiration, str):
-                            from datetime import date as date_type
                             expiration = date_type.fromisoformat(expiration)
+
+                        # Calculate DTE from expiration (StagedOpportunity has no dte field)
+                        from src.utils.timezone import market_now
+                        exp_date = expiration if isinstance(expiration, date_type) else date_type.fromisoformat(str(expiration))
+                        dte = max(0, (exp_date - market_now().date()).days)
 
                         # Check if a PENDING record already exists for this order
                         existing = None
@@ -1132,6 +1153,10 @@ class TwoTierExecutionScheduler:
                             # Create new Trade record
                             exp_str = expiration.strftime("%Y%m%d") if hasattr(expiration, "strftime") else str(expiration).replace("-", "")
                             canonical_trade_id = f"{summary.symbol}_{summary.strike}_{exp_str}_P"
+
+                            acct = self.client.get_account_id() if self.client else None
+                            source = "paper" if (not acct or acct.startswith("DU")) else "real"
+
                             trade_record = Trade(
                                 trade_id=canonical_trade_id,
                                 order_id=summary.order_id,
@@ -1146,6 +1171,8 @@ class TwoTierExecutionScheduler:
                                 dte=dte,
                                 ai_reasoning="Executed via two-tier scheduler",
                                 ai_confidence=0.8,
+                                account_id=acct,
+                                trade_source=source,
                             )
                             session.add(trade_record)
                             session.flush()  # Get ID
@@ -1163,6 +1190,12 @@ class TwoTierExecutionScheduler:
                             orig_strike = getattr(staged_opp, "strike", None) if staged_opp else None
                             live_delta = getattr(staged_opp, "live_delta", None) if staged_opp else None
 
+                            # Build scanner fallback dict for after-hours snapshots
+                            # Priority: live IBKR > StagedOpportunity live_* > ScanOpportunity DB
+                            scanner_fallback = self._build_scanner_fallback(
+                                staged_opp, session
+                            )
+
                             snapshot = snapshot_service.capture_entry_snapshot(
                                 trade_id=trade_record.id,
                                 opportunity_id=getattr(staged_opp, "id", None),
@@ -1178,6 +1211,7 @@ class TwoTierExecutionScheduler:
                                 strike_selection_method=sel_method,
                                 original_strike=orig_strike,
                                 live_delta_at_selection=live_delta,
+                                scanner_fallback=scanner_fallback,
                             )
                             snapshot_service.save_snapshot(snapshot, session)
                             logger.debug(f"  ✓ Entry snapshot captured for {summary.symbol}")
@@ -1219,6 +1253,78 @@ class TwoTierExecutionScheduler:
                 "✗ Critical error saving trades to database: " + str(e)
             )
             # Don't raise - execution already happened, just log the failure
+
+    def _build_scanner_fallback(
+        self, staged_opp: StagedOpportunity | None, session
+    ) -> dict | None:
+        """Build a fallback dict from staged opportunity and scan DB record.
+
+        When the entry snapshot is captured after hours, IBKR can't provide
+        Greeks or option pricing. This method assembles fallback data from
+        two sources:
+          1. StagedOpportunity live_* fields (from 9:30 AM strike selection)
+          2. ScanOpportunity DB record (from overnight scanner)
+
+        Priority: StagedOpportunity live_* wins over ScanOpportunity (fresher).
+
+        Args:
+            staged_opp: Staged opportunity with live_* fields (may be None)
+            session: DB session for querying ScanOpportunity
+
+        Returns:
+            Fallback dict, or None if no fallback data available
+        """
+        if not staged_opp:
+            return None
+
+        fallback: dict = {}
+
+        # Layer 1: ScanOpportunity DB record (overnight scanner data)
+        opp_id = getattr(staged_opp, "id", None)
+        if opp_id:
+            try:
+                from src.data.models import ScanOpportunity
+
+                scan_opp = session.get(ScanOpportunity, opp_id)
+                if scan_opp:
+                    fallback.update({
+                        "delta": scan_opp.delta,
+                        "iv": scan_opp.iv,
+                        "gamma": scan_opp.gamma,
+                        "theta": scan_opp.theta,
+                        "vega": scan_opp.vega,
+                        "bid": scan_opp.bid,
+                        "ask": scan_opp.ask,
+                        "volume": scan_opp.volume,
+                        "open_interest": scan_opp.open_interest,
+                        "dte": scan_opp.dte,
+                        "stock_price": scan_opp.stock_price,
+                        "_source": "scan_opportunity",
+                    })
+            except Exception as e:
+                logger.debug(f"Could not load ScanOpportunity {opp_id}: {e}")
+
+        # Layer 2: StagedOpportunity live_* fields (9:30 AM, fresher — overwrites Layer 1)
+        live_fields = {
+            "delta": getattr(staged_opp, "live_delta", None),
+            "iv": getattr(staged_opp, "live_iv", None),
+            "gamma": getattr(staged_opp, "live_gamma", None),
+            "theta": getattr(staged_opp, "live_theta", None),
+            "bid": getattr(staged_opp, "current_bid", None),
+            "ask": getattr(staged_opp, "current_ask", None),
+            "volume": getattr(staged_opp, "live_volume", None),
+            "open_interest": getattr(staged_opp, "live_open_interest", None),
+            "stock_price": getattr(staged_opp, "current_stock_price", None),
+        }
+        for key, val in live_fields.items():
+            if val is not None:
+                fallback[key] = val
+                fallback["_source"] = "staged_live"
+
+        if not fallback or fallback.keys() == {"_source"}:
+            return None
+
+        return fallback
 
     def _send_execution_summary(self, report: ExecutionReport):
         """Send execution summary to user (console for now).

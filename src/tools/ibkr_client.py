@@ -264,6 +264,7 @@ class IBKRClient:
         self._is_connected = False
         self._suppress_errors = suppress_errors
         self._order_audit_log: list[OrderAuditEntry] = []
+        self._account_id: str | None = None
 
         # Disable ib_insync console logging to prevent error spam
         if suppress_errors:
@@ -418,6 +419,16 @@ class IBKRClient:
                         self.ib.errorEvent += self._error_filter
 
                     self._is_connected = True
+
+                    # Cache the account ID for trade tagging
+                    try:
+                        accounts = self.ib.managedAccounts()
+                        if accounts:
+                            self._account_id = accounts[0]
+                            logger.info(f"IBKR account: {self._account_id}")
+                    except Exception:
+                        pass
+
                     logger.info("Successfully connected to IBKR")
                     return True
 
@@ -521,6 +532,40 @@ class IBKRClient:
         """
         return self._is_connected and self.ib.isConnected()
 
+    def get_account_id(self) -> str | None:
+        """Return the IBKR account ID (first managed account).
+
+        Returns cached value if available, otherwise queries IBKR.
+        Paper accounts start with 'DU', live accounts start with 'U'.
+
+        Returns:
+            Account ID string, or None if not connected.
+        """
+        if self._account_id:
+            return self._account_id
+        if self._is_connected:
+            try:
+                accounts = self.ib.managedAccounts()
+                if accounts:
+                    self._account_id = accounts[0]
+            except Exception:
+                pass
+        return self._account_id
+
+    def is_paper_account(self) -> bool:
+        """Check if connected to a paper trading account.
+
+        Paper accounts start with 'DU', live accounts start with 'U'.
+        Returns True (safe default) if account ID is unknown.
+
+        Returns:
+            True if paper account or unknown.
+        """
+        acct = self.get_account_id()
+        if not acct:
+            return True  # Assume paper if unknown (safety first)
+        return acct.startswith("DU")
+
     def ensure_connected(self) -> None:
         """Ensure connection is active, reconnect if necessary.
 
@@ -531,12 +576,15 @@ class IBKRClient:
             logger.warning("Connection lost, attempting to reconnect...")
             self.connect()
 
-    def get_index_contract(self, symbol: str, exchange: str = "CBOE") -> Index:
-        """Get an index contract (SPX, XSP, VIX, etc.).
+    def get_index_contract(
+        self, symbol: str, exchange: str = "CBOE", currency: str = "USD",
+    ) -> Index:
+        """Get an index contract (SPX, XSP, VIX, XJO, etc.).
 
         Args:
-            symbol: Index symbol (e.g. SPX, XSP, VIX)
+            symbol: Index symbol (e.g. SPX, XSP, VIX, XJO)
             exchange: Exchange name (default: CBOE)
+            currency: Currency code (default: USD)
 
         Returns:
             Index contract
@@ -547,14 +595,17 @@ class IBKRClient:
             'SPX'
         """
         self.ensure_connected()
-        return Index(symbol, exchange, "USD")
+        return Index(symbol, exchange, currency)
 
-    def get_stock_contract(self, symbol: str, exchange: str = "SMART") -> Stock:
+    def get_stock_contract(
+        self, symbol: str, exchange: str = "SMART", currency: str = "USD",
+    ) -> Stock:
         """Get a stock contract.
 
         Args:
             symbol: Stock ticker symbol
             exchange: Exchange name (default: SMART)
+            currency: Currency code (default: USD)
 
         Returns:
             Stock contract
@@ -565,7 +616,7 @@ class IBKRClient:
             'AAPL'
         """
         self.ensure_connected()
-        return Stock(symbol, exchange, "USD")
+        return Stock(symbol, exchange, currency)
 
     def get_option_contract(
         self,
@@ -575,6 +626,7 @@ class IBKRClient:
         right: str = "P",
         exchange: str = "SMART",
         trading_class: str = "",
+        currency: str = "USD",
     ) -> Option:
         """Get an option contract.
 
@@ -585,6 +637,7 @@ class IBKRClient:
             right: Option right ('P' for put, 'C' for call)
             exchange: Exchange name (default: SMART)
             trading_class: Trading class (required for proper contract qualification)
+            currency: Currency code (default: USD)
 
         Returns:
             Option contract
@@ -596,7 +649,8 @@ class IBKRClient:
         """
         self.ensure_connected()
         return Option(
-            symbol, expiration, strike, right, exchange, tradingClass=trading_class
+            symbol, expiration, strike, right, exchange,
+            tradingClass=trading_class, currency=currency,
         )
 
     def qualify_contract(self, contract: Contract) -> Contract | None:
@@ -1345,7 +1399,28 @@ class IBKRClient:
                     )
                 await asyncio.sleep(0.05)  # Check every 50ms
 
-            # Timeout - return invalid quote
+            # Timeout — try frozen/close fallback before giving up
+            last_val = ticker.last if (ticker.last is not None and not math.isnan(ticker.last) and ticker.last > 0) else 0
+            close_val = getattr(ticker, "close", None)
+            close_val = close_val if (close_val is not None and not math.isnan(close_val) and close_val > 0) else 0
+
+            if close_val > 0:
+                return Quote(
+                    bid=close_val, ask=close_val,
+                    last=last_val or close_val,
+                    timestamp=datetime.now(),
+                    is_valid=True,
+                    reason="frozen_close",
+                )
+            if last_val > 0:
+                return Quote(
+                    bid=last_val, ask=last_val,
+                    last=last_val,
+                    timestamp=datetime.now(),
+                    is_valid=True,
+                    reason="last_price",
+                )
+
             return Quote(
                 bid=0,
                 ask=0,
@@ -1509,6 +1584,18 @@ class IBKRClient:
         """
         self.ensure_connected()
         return self.ib.positions()
+
+    def get_portfolio(self) -> list:
+        """Get portfolio items with mark-to-market P&L.
+
+        Returns PortfolioItem objects with marketPrice, marketValue,
+        unrealizedPNL — available even when market is closed (frozen prices).
+
+        Returns:
+            List of PortfolioItem objects
+        """
+        self.ensure_connected()
+        return self.ib.portfolio()
 
     def get_executions(self) -> list:
         """Get all executions (fills) for this session.
