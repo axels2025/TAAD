@@ -1173,7 +1173,6 @@ class OrderReconciliation:
         imported_count = 0
 
         # Fetch VIX and SPY once before the loop (not per position)
-        import asyncio
         from datetime import datetime, date
         vix_at_import = None
         spy_at_import = None
@@ -1182,7 +1181,7 @@ class OrderReconciliation:
             vix_contract = Index("VIX", "CBOE")
             vix_qualified = self.client.qualify_contract(vix_contract)
             if vix_qualified:
-                vix_quote = asyncio.run(self.client.get_quote(vix_qualified, timeout=3.0))
+                vix_quote = await self.client.get_quote(vix_qualified, timeout=3.0)
                 vix_at_import = vix_quote.last if vix_quote.last and vix_quote.last > 0 else None
         except Exception as e:
             logger.warning(f"Could not fetch VIX: {e}")
@@ -1191,7 +1190,7 @@ class OrderReconciliation:
             spy_contract = self.client.get_stock_contract("SPY")
             spy_qualified = self.client.qualify_contract(spy_contract)
             if spy_qualified:
-                spy_quote = asyncio.run(self.client.get_quote(spy_qualified, timeout=3.0))
+                spy_quote = await self.client.get_quote(spy_qualified, timeout=3.0)
                 spy_at_import = spy_quote.last if spy_quote.last and spy_quote.last > 0 else None
         except Exception as e:
             logger.warning(f"Could not fetch SPY: {e}")
@@ -1247,7 +1246,7 @@ class OrderReconciliation:
                     stock_contract = self.client.get_stock_contract(symbol)
                     stock_qualified = self.client.qualify_contract(stock_contract)
                     if stock_qualified:
-                        stock_quote = asyncio.run(self.client.get_quote(stock_qualified, timeout=3.0))
+                        stock_quote = await self.client.get_quote(stock_qualified, timeout=3.0)
                         current_stock_price = stock_quote.last if stock_quote.last and stock_quote.last > 0 else None
 
                         if current_stock_price:
