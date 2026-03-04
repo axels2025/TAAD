@@ -67,11 +67,12 @@ class HealthMonitor:
             message="Daemon started",
         )
 
-    def heartbeat(self, message: Optional[str] = None) -> None:
+    def heartbeat(self, message: Optional[str] = None, ibkr_connected: bool = False) -> None:
         """Send a heartbeat update.
 
         Args:
             message: Optional status message
+            ibkr_connected: Whether IBKR/TWS is currently connected
         """
         uptime = 0
         if self._started_at:
@@ -82,6 +83,7 @@ class HealthMonitor:
             status="running",
             message=message or "Heartbeat OK",
             uptime_seconds=uptime,
+            ibkr_connected=ibkr_connected,
         )
 
     def record_event(self, event_type: str) -> None:
@@ -166,6 +168,7 @@ class HealthMonitor:
         status: Optional[str] = None,
         message: Optional[str] = None,
         uptime_seconds: Optional[int] = None,
+        ibkr_connected: Optional[bool] = None,
     ) -> None:
         """Update or create the daemon_health row.
 
@@ -185,6 +188,8 @@ class HealthMonitor:
                 row.message = message
             if uptime_seconds is not None:
                 row.uptime_seconds = uptime_seconds
+            if ibkr_connected is not None:
+                row.ibkr_connected = ibkr_connected
 
             row.last_heartbeat = datetime.utcnow()
             row.events_processed_today = self._events_processed

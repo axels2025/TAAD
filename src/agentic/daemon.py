@@ -3136,7 +3136,8 @@ class TAADDaemon:
         interval = self.config.daemon.heartbeat_interval_seconds
         while self._running:
             try:
-                self.health.heartbeat()
+                ibkr_ok = self.ibkr_client is not None and self.ibkr_client.is_connected()
+                self.health.heartbeat(ibkr_connected=ibkr_ok)
             except Exception as e:
                 logger.error(f"Heartbeat failed: {e}")
             await asyncio.sleep(interval)

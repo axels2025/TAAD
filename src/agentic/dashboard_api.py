@@ -178,6 +178,8 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
     @app.get("/api/status")
     def get_status(token: None = Depends(verify_token)):
         """Get daemon status with live process check."""
+        from pathlib import Path
+
         from src.agentic.health_monitor import HealthMonitor
 
         live_pid = HealthMonitor.is_daemon_running()
@@ -212,6 +214,8 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 "autonomy_level": health.autonomy_level,
                 "message": health.message,
                 "started_at": str(health.started_at) if health.started_at else None,
+                "ibkr_connected": getattr(health, "ibkr_connected", False) or False,
+                "stop_requested": Path("run/stop_requested").exists(),
                 "watchdog": watchdog,
             }
 
@@ -709,11 +713,16 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
     @app.post("/api/start")
     def start_daemon(token: None = Depends(verify_token)):
         """Start the daemon as a background process."""
+        from pathlib import Path
+
         from src.agentic.health_monitor import HealthMonitor
 
         pid = HealthMonitor.is_daemon_running()
         if pid:
             return {"status": "already_running", "pid": pid}
+
+        # Clear stop flag so watchdog knows this is an intentional start
+        Path("run/stop_requested").unlink(missing_ok=True)
 
         # Find the nakedtrader executable in the same venv
         venv_bin = os.path.dirname(sys.executable)
@@ -739,6 +748,8 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
     @app.post("/api/stop")
     def stop_daemon(token: None = Depends(verify_token)):
         """Stop the daemon gracefully via SIGTERM."""
+        from pathlib import Path
+
         from src.agentic.health_monitor import HealthMonitor
 
         pid = HealthMonitor.is_daemon_running()
@@ -747,7 +758,10 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
 
         try:
             os.kill(pid, signal.SIGTERM)
-            logger.info(f"SIGTERM sent to daemon (pid={pid})")
+            # Write stop flag so watchdog knows this was intentional
+            Path("run").mkdir(parents=True, exist_ok=True)
+            Path("run/stop_requested").touch()
+            logger.info(f"SIGTERM sent to daemon (pid={pid}), stop flag written")
             return {"status": "stopping", "pid": pid}
         except ProcessLookupError:
             return {"status": "not_running"}
@@ -1654,7 +1668,11 @@ async function fetchData() {
     const label = document.getElementById('status-label');
     dot.style.background = alive ? 'var(--green)' : 'var(--red)';
     dot.style.animation = alive ? 'pulse 2s infinite' : 'none';
-    label.textContent = alive ? 'Daemon Live' : 'Daemon Stopped';
+    if (alive) {
+      label.textContent = 'Daemon Live';
+    } else {
+      label.textContent = status.stop_requested ? 'Stopped (User)' : 'Stopped (Crash)';
+    }
 
     // Show/hide buttons based on state
     document.getElementById('btn-start').style.display = alive ? 'none' : '';
@@ -1678,8 +1696,12 @@ async function fetchData() {
       wdValue = (wd.daemon_assessment || 'ACTIVE').toUpperCase(); wdColor = wd.active ? 'green' : 'red';
     }
 
+    const ibkrColor = status.ibkr_connected ? 'green' : 'red';
+    const ibkrValue = status.ibkr_connected ? 'ON' : 'OFF';
+
     document.getElementById('status-grid').innerHTML = `
       <div class="stat ${sColor}"><div class="value">${(status.status||'--').toUpperCase()}</div><div class="label">Daemon</div></div>
+      <div class="stat ${ibkrColor}"><div class="value">${ibkrValue}</div><div class="label">IBKR</div></div>
       <div class="stat" id="focus-stat"><div class="value" style="font-size:14px;">--</div><div class="label">Focus</div></div>
       <div class="stat"><div class="value">L${status.autonomy_level||'?'}</div><div class="label">Autonomy</div></div>
       <div class="stat"><div class="value">${status.events_processed_today||0}</div><div class="label">Events Today</div></div>

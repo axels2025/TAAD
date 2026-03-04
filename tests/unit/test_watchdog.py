@@ -5,13 +5,15 @@ Covers:
 - Heartbeat freshness check (_check_heartbeat)
 - Alert debouncing and state reset
 - Status JSON writing
+- Stop-flag aware restart behaviour
 - Plist XML generation
 """
 
 import json
 import os
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy.orm import Session
@@ -160,7 +162,8 @@ class TestCheckHeartbeat:
 class TestAlertDebouncing:
     """Test that duplicate alerts are suppressed."""
 
-    def test_first_alert_fires(self, watchdog):
+    @patch.object(DaemonWatchdog, "_restart_daemon")
+    def test_first_alert_fires(self, mock_restart, watchdog):
         """First alert of a type always fires."""
         mock_notifier = MagicMock()
         watchdog._notifier = mock_notifier
@@ -168,9 +171,11 @@ class TestAlertDebouncing:
         watchdog._handle_daemon_down()
 
         mock_notifier.notify.assert_called_once()
-        assert "Down" in mock_notifier.notify.call_args.kwargs["title"]
+        assert "Crashed" in mock_notifier.notify.call_args.kwargs["title"]
+        mock_restart.assert_called_once()
 
-    def test_second_identical_alert_suppressed(self, watchdog):
+    @patch.object(DaemonWatchdog, "_restart_daemon")
+    def test_second_identical_alert_suppressed(self, mock_restart, watchdog):
         """Second consecutive identical alert is suppressed."""
         mock_notifier = MagicMock()
         watchdog._notifier = mock_notifier
@@ -180,7 +185,8 @@ class TestAlertDebouncing:
 
         assert mock_notifier.notify.call_count == 1
 
-    def test_third_identical_alert_fires(self, watchdog):
+    @patch.object(DaemonWatchdog, "_restart_daemon")
+    def test_third_identical_alert_fires(self, mock_restart, watchdog):
         """Third consecutive identical alert re-fires (re-alert)."""
         mock_notifier = MagicMock()
         watchdog._notifier = mock_notifier
@@ -191,7 +197,8 @@ class TestAlertDebouncing:
 
         assert mock_notifier.notify.call_count == 2
 
-    def test_different_alert_type_fires(self, watchdog):
+    @patch.object(DaemonWatchdog, "_restart_daemon")
+    def test_different_alert_type_fires(self, mock_restart, watchdog):
         """Switching to a different alert type fires immediately."""
         mock_notifier = MagicMock()
         watchdog._notifier = mock_notifier
@@ -201,7 +208,8 @@ class TestAlertDebouncing:
 
         assert mock_notifier.notify.call_count == 2
 
-    def test_state_reset_on_recovery(self, watchdog, tmp_run_dir):
+    @patch.object(DaemonWatchdog, "_restart_daemon")
+    def test_state_reset_on_recovery(self, mock_restart, watchdog, tmp_run_dir):
         """After recovery (healthy), new failure triggers alert again."""
         mock_notifier = MagicMock()
         watchdog._notifier = mock_notifier
@@ -293,7 +301,8 @@ class TestCheckCycle:
         assert data["daemon_alive"] is True
         mock_notifier.notify.assert_not_called()
 
-    def test_daemon_down_cycle(self, watchdog, temp_database):
+    @patch.object(DaemonWatchdog, "_restart_daemon")
+    def test_daemon_down_cycle(self, mock_restart, watchdog, temp_database):
         """Dead daemon produces daemon_down status and alert."""
         # No PID file = daemon not running
         mock_notifier = MagicMock()
@@ -304,6 +313,73 @@ class TestCheckCycle:
         data = json.loads(watchdog.status_file.read_text())
         assert data["overall"] == "daemon_down"
         mock_notifier.notify.assert_called_once()
+        mock_restart.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Stop-flag aware restart tests
+# ---------------------------------------------------------------------------
+
+
+class TestStopFlagRestart:
+    """Test intentional stop vs crash restart behaviour."""
+
+    def test_intentional_stop_no_restart(self, watchdog, monkeypatch, tmp_path):
+        """When stop flag exists, alert but don't restart."""
+        # Create stop flag in the CWD that watchdog checks
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "run").mkdir(exist_ok=True)
+        (tmp_path / "run" / "stop_requested").touch()
+
+        mock_notifier = MagicMock()
+        watchdog._notifier = mock_notifier
+
+        with patch.object(DaemonWatchdog, "_restart_daemon") as mock_restart:
+            watchdog._handle_daemon_down()
+
+            # Should alert with INFO severity, not CRITICAL
+            mock_notifier.notify.assert_called_once()
+            call_kwargs = mock_notifier.notify.call_args.kwargs
+            assert call_kwargs["severity"] == "INFO"
+            assert "Intentional" in call_kwargs["title"]
+
+            # Should NOT restart
+            mock_restart.assert_not_called()
+
+    def test_crash_triggers_restart(self, watchdog, monkeypatch, tmp_path):
+        """When no stop flag, treat as crash and restart."""
+        # No stop flag present
+        monkeypatch.chdir(tmp_path)
+
+        mock_notifier = MagicMock()
+        watchdog._notifier = mock_notifier
+
+        with patch.object(DaemonWatchdog, "_restart_daemon") as mock_restart:
+            watchdog._handle_daemon_down()
+
+            # Should alert with CRITICAL severity
+            mock_notifier.notify.assert_called_once()
+            call_kwargs = mock_notifier.notify.call_args.kwargs
+            assert call_kwargs["severity"] == "CRITICAL"
+            assert "Crashed" in call_kwargs["title"]
+
+            # Should restart
+            mock_restart.assert_called_once()
+
+    def test_intentional_stop_uses_different_alert_type(self, watchdog, monkeypatch, tmp_path):
+        """Intentional stop uses 'daemon_stopped' alert type, not 'daemon_down'."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "run").mkdir(exist_ok=True)
+        (tmp_path / "run" / "stop_requested").touch()
+
+        mock_notifier = MagicMock()
+        watchdog._notifier = mock_notifier
+
+        with patch.object(DaemonWatchdog, "_restart_daemon"):
+            watchdog._handle_daemon_down()
+
+        # The internal alert type should be daemon_stopped
+        assert watchdog._last_alert_type == "daemon_stopped"
 
 
 # ---------------------------------------------------------------------------

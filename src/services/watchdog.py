@@ -4,8 +4,12 @@ Monitors daemon liveness via PID file and heartbeat freshness via
 the daemon_health database table. Sends alerts through the Notifier
 when the daemon is down, hung, or experiencing error spikes.
 
-Does NOT restart the daemon — that is launchd's responsibility.
-This watchdog only observes and alerts.
+Restart behaviour:
+- If the daemon was stopped intentionally (via dashboard STOP), a
+  ``run/stop_requested`` flag file exists. The watchdog alerts but
+  does NOT restart.
+- If the daemon dies unexpectedly (crash, OOM, etc.) and no stop
+  flag is present, the watchdog automatically restarts it.
 """
 
 import json
@@ -222,16 +226,51 @@ class DaemonWatchdog:
     # ── Alert handlers ──────────────────────────────────────
 
     def _handle_daemon_down(self) -> None:
-        """Alert when daemon process is not running."""
+        """Handle daemon process not running.
+
+        If ``run/stop_requested`` exists, the stop was intentional (dashboard
+        STOP) — alert at INFO and do NOT restart.  Otherwise treat it as an
+        unexpected crash and attempt automatic restart.
+        """
+        stop_flag = Path("run/stop_requested")
+        if stop_flag.exists():
+            self._send_alert(
+                alert_type="daemon_stopped",
+                severity="INFO",
+                title="Daemon Stopped (Intentional)",
+                message="Daemon was stopped via dashboard. Use START to restart.",
+            )
+            return
+
+        # Unexpected crash — alert and restart
         self._send_alert(
             alert_type="daemon_down",
             severity="CRITICAL",
-            title="Daemon Process Down",
-            message=(
-                "The TAAD daemon process is not running. "
-                "If launchd is managing it, automatic restart should occur within 30 seconds."
-            ),
+            title="Daemon Crashed — Restarting",
+            message="Daemon process died unexpectedly. Attempting automatic restart.",
         )
+        self._restart_daemon()
+
+    def _restart_daemon(self) -> None:
+        """Restart the daemon as a background subprocess."""
+        import subprocess
+
+        try:
+            venv_bin = os.path.dirname(sys.executable)
+            exe = os.path.join(venv_bin, "nakedtrader")
+            log_file = os.path.join(os.getcwd(), "logs", "daemon_restart.log")
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+            with open(log_file, "a") as log_f:
+                subprocess.Popen(
+                    [exe, "daemon", "start", "--fg"],
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            logger.info("Daemon restart initiated by watchdog")
+        except Exception as e:
+            logger.error(f"Watchdog failed to restart daemon: {e}")
 
     def _handle_no_heartbeat(self) -> None:
         """Alert when daemon has no heartbeat record."""
