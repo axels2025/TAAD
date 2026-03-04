@@ -1671,12 +1671,18 @@ class TAADDaemon:
     def _emit_material_position_checks(
         self, db: Session, exited_pids: set[str]
     ) -> int:
-        """Emit POSITION_EXIT_CHECK events for positions with material P&L.
+        """Emit POSITION_EXIT_CHECK events for positions in the grey zone.
 
-        "Material" means P&L% ≥ +50% (approaching profit target) or
-        P&L% ≤ -100% (approaching stop loss). Each qualifying position
-        gets its own event so Claude evaluates them independently and
-        the dashboard shows separate Approve/Reject for each.
+        Hard thresholds (≥+75% profit, ≤-300% loss, DTE≤1) are already
+        handled deterministically by _monitor_positions(). This function
+        only emits events for the GREY ZONE — positions with material P&L
+        where Claude's judgment on ambiguity adds genuine value.
+
+        Grey zone: +50% ≤ P&L < +75% (profit) or -100% ≥ P&L > -300% (loss).
+
+        Each event includes an escalation_reason explaining WHY the rule
+        engine couldn't decide, plus available risk data (delta, IV, etc.)
+        from position snapshots.
 
         Args:
             db: Database session
@@ -1711,29 +1717,217 @@ class TAADDaemon:
             if pnl_pct is None:
                 continue
 
-            # Material thresholds: ≥+50% profit or ≤-100% loss
-            if pnl_pct >= 50.0 or pnl_pct <= -100.0:
-                self.event_bus.emit(
-                    EventType.POSITION_EXIT_CHECK,
-                    payload={
-                        "trade_id": trade.trade_id,
-                        "symbol": trade.symbol,
-                        "strike": trade.strike,
-                        "pnl_pct": round(pnl_pct, 1),
-                        "option_type": trade.option_type or "PUT",
-                    },
-                )
-                emitted += 1
-                opt_code = (trade.option_type or "PUT")[0]
-                logger.info(
-                    f"POSITION_EXIT_CHECK emitted: {trade.symbol} "
-                    f"${trade.strike}{opt_code} (P&L={pnl_pct:+.1f}%)"
-                )
+            from src.utils.timezone import trading_date
+
+            today = trading_date()
+            dte = (trade.expiration - today).days if trade.expiration else 999
+
+            # Build escalation context — why is this ambiguous?
+            escalation = self._build_escalation_context(trade, pnl_pct, dte, db)
+            if escalation is None:
+                continue  # Not in grey zone — skip
+
+            # Gather snapshot data for Claude
+            snapshot_data = self._get_latest_snapshot_data(trade, db)
+
+            # Find same-sector positions
+            sector_context = self._get_sector_context(trade, open_trades, db)
+
+            self.event_bus.emit(
+                EventType.POSITION_EXIT_CHECK,
+                payload={
+                    "trade_id": trade.trade_id,
+                    "symbol": trade.symbol,
+                    "strike": trade.strike,
+                    "pnl_pct": round(pnl_pct, 1),
+                    "option_type": trade.option_type or "PUT",
+                    "dte": dte,
+                    "escalation_reason": escalation,
+                    "snapshot": snapshot_data,
+                    "sector_context": sector_context,
+                },
+            )
+            emitted += 1
+            opt_code = (trade.option_type or "PUT")[0]
+            logger.info(
+                f"POSITION_EXIT_CHECK emitted: {trade.symbol} "
+                f"${trade.strike}{opt_code} (P&L={pnl_pct:+.1f}%, DTE={dte}) "
+                f"reason: {escalation}"
+            )
 
         if emitted:
             logger.info(f"Emitted {emitted} per-position exit check(s)")
 
         return emitted
+
+    def _build_escalation_context(
+        self, trade: Trade, pnl_pct: float, dte: int, db: Session
+    ) -> Optional[str]:
+        """Determine if a position is in the grey zone and build escalation reason.
+
+        Returns an escalation reason string if the position should be escalated
+        to Claude, or None if it's outside the grey zone.
+
+        Grey zone criteria:
+        - Profit approaching target: +50% ≤ pnl < +75% (especially with low DTE)
+        - Loss approaching stop: -100% ≥ pnl > -300% (especially with delta creep)
+        - Delta creep: abs(delta) > 0.35 regardless of P&L
+        """
+        reasons = []
+
+        # Profit grey zone: approaching but not at target
+        if 50.0 <= pnl_pct < 75.0:
+            if dte <= 3:
+                reasons.append(
+                    f"P&L is +{pnl_pct:.1f}% (below +75% hard target). "
+                    f"DTE={dte} — theta nearly exhausted, risk/reward may have inverted."
+                )
+            else:
+                reasons.append(
+                    f"P&L is +{pnl_pct:.1f}% (below +75% hard target). "
+                    f"DTE={dte} — meaningful time remaining for further decay vs. reversal risk."
+                )
+
+        # Loss grey zone: stressed but not at stop
+        elif pnl_pct <= -100.0 and pnl_pct > -300.0:
+            reasons.append(
+                f"P&L is {pnl_pct:+.1f}% (above -300% hard stop). "
+                f"Position is stressed but stop loss has not triggered."
+            )
+
+        # Check for delta creep from snapshot
+        snapshot = self._get_latest_snapshot_data(trade, db)
+        if snapshot.get("delta") is not None:
+            delta = abs(snapshot["delta"])
+            if delta > 0.35:
+                reasons.append(
+                    f"Delta has crept to {snapshot['delta']:.3f} — assignment risk elevated."
+                )
+            elif delta > 0.25 and pnl_pct <= -70.0:
+                reasons.append(
+                    f"Delta at {snapshot['delta']:.3f} with P&L {pnl_pct:+.1f}% — "
+                    f"deteriorating but no hard rule fires."
+                )
+
+        if not reasons:
+            return None
+
+        return " ".join(reasons)
+
+    def _get_latest_snapshot_data(self, trade: Trade, db: Session) -> dict:
+        """Get latest position snapshot data for enriched context.
+
+        Queries the most recent PositionSnapshot and last 3 snapshots for
+        trend computation.
+
+        Returns:
+            Dict with delta, theta, iv, stock_price, trends, etc.
+        """
+        result: dict = {}
+        try:
+            from src.data.models import PositionSnapshot
+
+            # Latest snapshot
+            latest = (
+                db.query(PositionSnapshot)
+                .filter(PositionSnapshot.trade_id == trade.id)
+                .order_by(PositionSnapshot.snapshot_date.desc())
+                .first()
+            )
+            if not latest:
+                return result
+
+            result["delta"] = latest.delta
+            result["theta"] = latest.theta
+            result["gamma"] = latest.gamma
+            result["iv"] = latest.iv
+            result["stock_price"] = latest.stock_price
+            result["distance_to_strike_pct"] = latest.distance_to_strike_pct
+            result["current_premium"] = latest.current_premium
+            result["snapshot_date"] = str(latest.snapshot_date)
+
+            # Last 3 snapshots for trend computation
+            recent_snapshots = (
+                db.query(PositionSnapshot)
+                .filter(PositionSnapshot.trade_id == trade.id)
+                .order_by(PositionSnapshot.snapshot_date.desc())
+                .limit(3)
+                .all()
+            )
+
+            if len(recent_snapshots) >= 2:
+                # Delta trend
+                deltas = [s.delta for s in reversed(recent_snapshots) if s.delta is not None]
+                if len(deltas) >= 2:
+                    if all(abs(deltas[i]) < abs(deltas[i + 1]) for i in range(len(deltas) - 1)):
+                        result["delta_trend"] = f"deteriorating: {' -> '.join(f'{d:.3f}' for d in deltas)}"
+                    elif all(abs(deltas[i]) > abs(deltas[i + 1]) for i in range(len(deltas) - 1)):
+                        result["delta_trend"] = f"improving: {' -> '.join(f'{d:.3f}' for d in deltas)}"
+                    else:
+                        result["delta_trend"] = f"mixed: {' -> '.join(f'{d:.3f}' for d in deltas)}"
+
+                # IV trend
+                ivs = [s.iv for s in reversed(recent_snapshots) if s.iv is not None]
+                if len(ivs) >= 2:
+                    iv_change = ivs[-1] - ivs[0]
+                    if iv_change > 2.0:
+                        result["iv_trend"] = f"expanding: {' -> '.join(f'{v:.1f}%' for v in ivs)}"
+                    elif iv_change < -2.0:
+                        result["iv_trend"] = f"crushing: {' -> '.join(f'{v:.1f}%' for v in ivs)}"
+                    else:
+                        result["iv_trend"] = f"stable: {' -> '.join(f'{v:.1f}%' for v in ivs)}"
+
+                # Stock trend
+                prices = [s.stock_price for s in reversed(recent_snapshots) if s.stock_price is not None]
+                if len(prices) >= 2:
+                    pct_change = (prices[-1] - prices[0]) / prices[0] * 100
+                    if pct_change < -2.0:
+                        result["stock_trend"] = f"downtrend ({pct_change:+.1f}%)"
+                    elif pct_change > 2.0:
+                        result["stock_trend"] = f"uptrend ({pct_change:+.1f}%)"
+                    else:
+                        result["stock_trend"] = f"sideways ({pct_change:+.1f}%)"
+
+        except Exception as e:
+            logger.debug(f"Snapshot query failed for {trade.symbol}: {e}")
+
+        return result
+
+    def _get_sector_context(
+        self, trade: Trade, all_trades: list[Trade], db: Session
+    ) -> str:
+        """Find other open positions in the same sector.
+
+        Returns:
+            Human-readable string of same-sector positions, or "none"
+        """
+        try:
+            from src.data.sector_map import get_sector
+
+            target_sector = get_sector(trade.symbol)
+            if target_sector == "Unknown":
+                return "Unknown sector"
+
+            peers = []
+            for t in all_trades:
+                if t.trade_id == trade.trade_id:
+                    continue
+                if get_sector(t.symbol) == target_sector:
+                    pnl = self._get_position_pnl_pct(t, db)
+                    pnl_str = f"{pnl:+.0f}%" if pnl is not None else "?"
+                    from src.utils.timezone import trading_date
+
+                    today = trading_date()
+                    t_dte = (t.expiration - today).days if t.expiration else "?"
+                    peers.append(f"{t.symbol} ({pnl_str}, DTE={t_dte})")
+
+            if not peers:
+                return f"Sector: {target_sector} — no other positions"
+
+            return f"Sector: {target_sector} — also holding: {', '.join(peers)}"
+        except Exception as e:
+            logger.debug(f"Sector context failed: {e}")
+            return "Unknown"
 
     def _get_position_pnl_pct(self, trade: Trade, db: Session) -> Optional[float]:
         """Compute P&L percentage for an open position.

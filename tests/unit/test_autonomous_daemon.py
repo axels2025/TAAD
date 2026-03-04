@@ -1627,8 +1627,8 @@ class TestPositionScopedReasoning:
         # Verify position-scoped prompt was used
         call_kwargs = mock_agent.send_message.call_args[1]
         assert call_kwargs["system_prompt"] == POSITION_EXIT_SYSTEM_PROMPT
-        assert "POSITION_EXIT_CHECK" in call_kwargs["user_message"]
         assert "AAPL" in call_kwargs["user_message"]
+        assert "Position Under Evaluation" in call_kwargs["user_message"]
 
     def test_position_exit_injects_trade_id_if_missing(self):
         """trade_id is injected into metadata if Claude omits it."""

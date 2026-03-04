@@ -261,37 +261,49 @@ Context: Day=Monday, VIX=52.4 [market_data], SPY=$498.30 -6.8% intraday [market_
 }"""
 
 
-POSITION_EXIT_SYSTEM_PROMPT = """You are evaluating ONE specific position for exit in an autonomous options trading system.
+POSITION_EXIT_SYSTEM_PROMPT = """You are the exit judgment layer in an autonomous naked put options trading system.
 
-## Your Task
-Decide whether to close this specific position or continue monitoring it.
-You MUST respond with a valid JSON object.
+You are ONLY called when the rule engine cannot make a clear decision.
+Hard rules (>=+75% profit, <=-300% loss, DTE=0) are handled in code before you are called.
+Your job is to resolve GENUINE AMBIGUITY — situations where multiple valid considerations conflict.
 
-## Decision Criteria
-- Take profit on positions at +70% or better (option value has dropped significantly)
-- Cut losses on positions at -150% or worse (option value has increased significantly)
-- Consider time to expiration (DTE): closer to expiry with profit → close
-- Consider market conditions: VIX spike + underwater position → more reason to close
-- Do NOT consider other positions — focus ONLY on the one described below
+## Your Decision
+Evaluate whether to CLOSE_POSITION or MONITOR_ONLY based on the full context provided.
 
-## Valid Actions (only these two)
-- CLOSE_POSITION: Close this position — metadata MUST include {"trade_id": "<id>"}
-- MONITOR_ONLY: Continue holding this position
+## What Constitutes Genuine Reasons to Close Early
+- Delta has deteriorated significantly (abs delta trending toward 0.40+) with no recovery signal
+- Stock is in confirmed downtrend AND approaching the strike (distance_to_strike_pct < 8%)
+- IV has expanded significantly AFTER entry (not mean-reverting) — premium you sold is now worth much more
+- VIX has spiked AND this position is underwater — compounding risk
+- Earnings discovered within DTE window that were not present at entry
+- Profit is solid (+50%+) with very little DTE remaining — theta is nearly exhausted, risk/reward has inverted
 
-## Grounding Requirements
-- ONLY reference data provided in the context below
-- If data is missing, state this — never fabricate values
+## What Does NOT Justify Early Close
+- VIX elevated but position is comfortably OTM and profitable
+- Stock moved down modestly but delta is still well below 0.30
+- Profit exists but DTE still sufficient for further theta decay
+- Market is volatile but position has strong OTM buffer
+
+## Confidence Calibration
+- 0.9+: Strong conviction with multiple confirming signals
+- 0.7-0.9: Clear lean with one counterargument acknowledged
+- 0.5-0.7: Genuine coin-flip — your TENSION section should be substantial
+- Below 0.5: Default to MONITOR_ONLY (if you are not confident, do not act)
+
+## Grounding Rules
+- ONLY reference data in the context provided
+- If a field is null or missing, state this — do not infer or fabricate
+- Do NOT speculate about news, earnings, or events not mentioned in the context
 
 ## Reasoning Format — CRITICAL
 Your reasoning field MUST start by identifying the position using its EXACT option type:
-  "SYMBOL STRIKE<TYPE> exp=YYYY-MM-DD (DTE=N): OBSERVATION → ASSESSMENT → ACTION"
+  "SYMBOL STRIKE<TYPE> exp=YYYY-MM-DD (DTE=N):"
 
-Where <TYPE> is the option type from the context: P for puts, C for calls.
+Then structure as: OBSERVATION (what the data shows) -> TENSION (what makes this ambiguous) -> RESOLUTION (your judgment call)
 
-Example (put):  "NVDA 800.0P exp=2026-03-20 (DTE=23): Position shows +65% profit..."
-Example (call): "ALAB 150.0C exp=2026-03-13 (DTE=16): Position shows -772% loss..."
+The TENSION field is mandatory — if there is no genuine tension, this position should have been handled by the rule engine, not you.
 
-This ensures the human reviewer can immediately identify which position is being evaluated.
+Example: "NVDA 800.0P exp=2026-03-20 (DTE=3): OBSERVATION: Position at +58% profit, delta stable at 0.15, stock sideways. TENSION: Profit is solid but 17 points below the 75% hard target. DTE=3 means minimal theta left to capture vs. reversal risk over 3 trading days. RESOLUTION: Close — risk/reward has inverted with so little time remaining."
 
 ## Response Format
 Respond with ONLY a JSON object:
@@ -299,9 +311,10 @@ Respond with ONLY a JSON object:
 {
   "action": "CLOSE_POSITION",
   "confidence": 0.80,
-  "reasoning": "ALAB 150.0C exp=2026-03-13 (DTE=16): OBSERVATION: ... ASSESSMENT: ... ACTION: ...",
-  "key_factors": ["factor1", "factor2"],
-  "risks_considered": ["risk1"],
+  "reasoning": "SYMBOL STRIKEtype exp=DATE (DTE=N): OBSERVATION: ... TENSION: ... RESOLUTION: ...",
+  "key_factors": ["the 2-3 factors that drove your decision"],
+  "risks_considered": ["risks on the other side of your decision"],
+  "learning_signal": "one sentence on what pattern this decision represents for the learning engine",
   "metadata": {"trade_id": "<id from context>"}
 }
 ```"""
@@ -602,14 +615,16 @@ class ClaudeReasoningEngine:
         context: ReasoningContext,
         event_payload: dict,
     ) -> str:
-        """Build a focused user message for a single position exit check.
+        """Build an enriched user message for a single position exit check.
 
-        Only includes the target position's details and market context
-        (VIX, SPY). No other positions or staged candidates.
+        Includes position identity, P&L status, risk indicators (delta, IV,
+        stock trends from PositionSnapshot), market context, and the
+        escalation reason explaining why the rule engine couldn't decide.
 
         Args:
             context: Full reasoning context (we extract selectively)
-            event_payload: Must contain trade_id, symbol, strike, pnl_pct
+            event_payload: Enriched payload with trade_id, symbol, strike,
+                pnl_pct, snapshot data, escalation_reason, sector_context
 
         Returns:
             User message string for Claude
@@ -619,47 +634,101 @@ class ClaudeReasoningEngine:
         strike = event_payload.get("strike", 0)
         pnl_pct = event_payload.get("pnl_pct", 0)
         option_type = event_payload.get("option_type", "PUT")
-        # Short code: P for put, C for call
+        dte = event_payload.get("dte", "Unknown")
         option_code = "C" if option_type.upper() in ("CALL", "C") else "P"
+        snapshot = event_payload.get("snapshot", {})
+        escalation_reason = event_payload.get("escalation_reason", "No specific reason provided")
+        sector_context = event_payload.get("sector_context", "Unknown")
 
-        # Find the matching position from context
+        # Find the matching position from context for entry data
         target_pos = None
         for pos in context.open_positions:
             if pos.get("trade_id") == trade_id:
                 target_pos = pos
                 break
 
-        parts = [
-            f"## Event: POSITION_EXIT_CHECK",
-            f"\n## Target Position",
-            f"- trade_id: {trade_id}",
-            f"- symbol: {symbol}",
-            f"- strike: ${strike}",
-            f"- option_type: {option_type} ({option_code})",
-            f"- P&L: {pnl_pct:+.1f}%",
-        ]
+        entry_premium = target_pos.get("entry_premium", "Unknown") if target_pos else "Unknown"
+        expiration = target_pos.get("expiration", "Unknown") if target_pos else "Unknown"
+        contracts = target_pos.get("contracts", "Unknown") if target_pos else "Unknown"
+        entry_date = target_pos.get("entry_date", "Unknown") if target_pos else "Unknown"
+        current_premium = snapshot.get("current_premium", "Unknown")
 
-        if target_pos:
-            parts.append(f"- entry_premium: ${target_pos.get('entry_premium', 'UNKNOWN')}")
-            parts.append(f"- expiration: {target_pos.get('expiration', 'UNKNOWN')}")
-            parts.append(f"- contracts: {target_pos.get('contracts', 'UNKNOWN')}")
-            parts.append(f"- DTE: {target_pos.get('dte', 'UNKNOWN')}")
-            if target_pos.get("current_mid"):
-                parts.append(f"- current_mid: ${target_pos['current_mid']}")
+        # Compute derived fields
+        profit_target_pct = 75.0
+        stop_loss_pct = -300.0
+        if isinstance(pnl_pct, (int, float)):
+            pt_status = f"{profit_target_pct - pnl_pct:.1f}pp away" if pnl_pct < profit_target_pct else "TRIGGERED"
+            sl_status = f"{abs(stop_loss_pct - pnl_pct):.1f}pp away" if pnl_pct > stop_loss_pct else "TRIGGERED"
+        else:
+            pt_status = "Unknown"
+            sl_status = "Unknown"
 
-        # Market context (minimal)
+        # Market context
         mc = context.market_context
-        parts.append(f"\n## Market Context")
-        parts.append(f"- VIX: {mc.get('vix', 'UNKNOWN')}")
-        parts.append(f"- SPY: ${mc.get('spy_price', 'UNKNOWN')}")
-        if mc.get("conditions_favorable") is not None:
-            parts.append(f"- Conditions favorable: {mc['conditions_favorable']}")
+        vix_current = mc.get("vix", "Unknown")
+        spy_price = mc.get("spy_price", "Unknown")
 
-        parts.append(
-            f"\n## Instructions\n"
-            f"Evaluate this single position and decide: CLOSE_POSITION or MONITOR_ONLY.\n"
-            f"If closing, metadata MUST include {{\"trade_id\": \"{trade_id}\"}}."
-        )
+        # Format snapshot fields (use "Unknown" for missing data)
+        def fmt(val, fmt_str=".3f", prefix="", suffix=""):
+            if val is None:
+                return "Unknown"
+            try:
+                return f"{prefix}{val:{fmt_str}}{suffix}"
+            except (ValueError, TypeError):
+                return str(val)
+
+        parts = [
+            "## Position Under Evaluation",
+            "",
+            "**Identity**",
+            f"- Trade ID: {trade_id}",
+            f"- Symbol: {symbol}",
+            f"- Option: {strike}{option_code} exp={expiration} (DTE={dte})",
+            f"- Entry date: {entry_date}",
+            f"- Contracts: {contracts}",
+            "",
+            "**P&L Status**",
+            f"- Entry premium: ${entry_premium}",
+            f"- Current premium: ${current_premium}" + (f" ({pnl_pct:+.1f}%)" if isinstance(pnl_pct, (int, float)) else ""),
+            f"- Profit target (+{profit_target_pct:.0f}%): {pt_status}",
+            f"- Stop loss ({stop_loss_pct:.0f}%): {sl_status}",
+            "",
+            "**Risk Indicators**",
+            f"- Current delta: {fmt(snapshot.get('delta'))}",
+            f"- Delta trend: {snapshot.get('delta_trend', 'Unknown')}",
+            f"- Distance to strike: {fmt(snapshot.get('distance_to_strike_pct'), '.1f', suffix='%')}",
+            f"- Stock price: {fmt(snapshot.get('stock_price'), '.2f', prefix='$')}",
+            f"- Stock trend: {snapshot.get('stock_trend', 'Unknown')}",
+            f"- Theta per day: {fmt(snapshot.get('theta'))}",
+            "",
+            "**Volatility Context**",
+            f"- Current IV: {fmt(snapshot.get('iv'), '.1f', suffix='%')}",
+            f"- IV trend: {snapshot.get('iv_trend', 'Unknown')}",
+            f"- Entry IV: Unknown",  # Phase B
+            f"- VIX current: {vix_current}",
+            "",
+            "**Context**",
+            f"- {sector_context}",
+            f"- Earnings within DTE: Unknown",  # Phase C
+            f"- Is OpEx week: Unknown",  # Phase C
+            "",
+            "## Why the Rule Engine Escalated This",
+            escalation_reason,
+            "",
+            "## Response Format",
+            "Respond with ONLY valid JSON:",
+            "```json",
+            "{",
+            '  "action": "CLOSE_POSITION" or "MONITOR_ONLY",',
+            "  \"confidence\": 0.0-1.0,",
+            f'  "reasoning": "{symbol} {strike}{option_code} exp={expiration} (DTE={dte}): OBSERVATION: ... TENSION: ... RESOLUTION: ...",',
+            '  "key_factors": ["the 2-3 factors that drove your decision"],',
+            '  "risks_considered": ["risks on the other side of your decision"],',
+            '  "learning_signal": "one sentence on what pattern this decision represents for the learning engine",',
+            f'  "metadata": {{"trade_id": "{trade_id}"}}',
+            "}",
+            "```",
+        ]
 
         return "\n".join(parts)
 
@@ -752,13 +821,18 @@ class ClaudeReasoningEngine:
 
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
 
+        metadata = data.get("metadata") or {}
+        # Capture learning_signal if present (position exit ambiguity resolver)
+        if data.get("learning_signal"):
+            metadata["learning_signal"] = data["learning_signal"]
+
         return DecisionOutput(
             action=action,
             confidence=confidence,
             reasoning=data.get("reasoning", ""),
             key_factors=data.get("key_factors", []),
             risks_considered=data.get("risks_considered", []),
-            metadata=data.get("metadata") or {},
+            metadata=metadata,
         )
 
     @staticmethod
