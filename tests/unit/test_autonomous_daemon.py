@@ -2777,6 +2777,125 @@ class TestDataFreshnessNotification:
 
 
 # ---------------------------------------------------------------------------
+# EOD_REFLECTION data freshness exemption
+# ---------------------------------------------------------------------------
+
+
+class TestEodReflectionFreshnessExemption:
+    """EOD_REFLECTION and MARKET_CLOSE bypass data freshness blocks."""
+
+    @pytest.fixture
+    def daemon(self, db_session):
+        from src.agentic.daemon import TAADDaemon
+        from src.agentic.guardrails.config import GuardrailConfig
+        from src.agentic.guardrails.registry import GuardrailRegistry
+        from src.agentic.guardrails.context_validator import ContextValidator
+
+        d = TAADDaemon.__new__(TAADDaemon)
+        d.config = MagicMock()
+        d.config.claude.reasoning_model = "test-model"
+        d.ibkr_client = MagicMock()
+        d.ibkr_client.is_connected.return_value = True
+        d.event_bus = MagicMock()
+        d.health = MagicMock()
+        d.health.shutdown_requested = False
+        d.memory = MagicMock()
+        d.memory.assemble_context.return_value = MagicMock(
+            market_context={"data_stale": True},
+            open_positions=[],
+            staged_candidates=[],
+        )
+        d.memory.market_context = {}
+        d._db = db_session
+
+        # Real guardrails with data freshness enabled
+        gc = GuardrailConfig()
+        d.guardrails = GuardrailRegistry(gc)
+        d.guardrails.register_context_validator(ContextValidator())
+        d._last_scheduled_fingerprint = ""
+
+        # Reasoning engine mock — returns MONITOR_ONLY
+        d.reasoning = MagicMock()
+        from src.agentic.reasoning_engine import DecisionOutput
+        d.reasoning.reason.return_value = DecisionOutput(
+            action="MONITOR_ONLY", confidence=0.9, reasoning="EOD reflection"
+        )
+        d.reasoning._reasoning_agent = MagicMock(
+            total_input_tokens=0, total_output_tokens=0, session_cost=0.0
+        )
+
+        d.governor = MagicMock()
+        d.governor.level = 2
+        d.executor = MagicMock()
+        from src.agentic.action_executor import ExecutionResult
+        d.executor.execute = AsyncMock(
+            return_value=ExecutionResult(success=True, action="MONITOR_ONLY", message="ok")
+        )
+        d.confidence_calibrator = MagicMock()
+        d.entropy_monitor = MagicMock()
+        d.calendar = MagicMock()
+        d.calendar.is_trading_day.return_value = True
+        d.position_monitor = None
+        d.exit_manager = None
+        d.event_detector = None
+        d._reconnect_attempts = 0
+
+        return d
+
+    def _make_event(self, db_session, event_type):
+        event = DaemonEvent(
+            event_type=event_type,
+            payload={},
+            created_at=datetime.utcnow(),
+        )
+        db_session.add(event)
+        db_session.commit()
+        return event
+
+    def test_eod_reflection_bypasses_data_freshness(self, daemon, db_session):
+        """EOD_REFLECTION should proceed despite data_stale=True."""
+        event = self._make_event(db_session, "EOD_REFLECTION")
+
+        asyncio.get_event_loop().run_until_complete(
+            daemon._process_event(event, db_session)
+        )
+
+        # Claude reasoning should have been called (not blocked)
+        daemon.reasoning.reason.assert_called_once()
+
+    def test_market_close_bypasses_data_freshness(self, daemon, db_session):
+        """MARKET_CLOSE should proceed despite data_stale=True.
+
+        Patches out EOD side-effects (_run_eod_sync, etc.) to isolate the
+        freshness exemption check from the full MARKET_CLOSE pipeline.
+        """
+        event = self._make_event(db_session, "MARKET_CLOSE")
+
+        with patch.object(daemon, "_run_eod_sync", new_callable=AsyncMock), \
+             patch.object(daemon, "_close_expired_positions", new_callable=AsyncMock), \
+             patch.object(daemon, "_auto_reject_stale_guardrail_blocks"), \
+             patch.object(daemon, "_calibrate_closed_trades"), \
+             patch.object(daemon, "_persist_guardrail_metrics"), \
+             patch.object(daemon, "_record_clean_day"):
+            asyncio.get_event_loop().run_until_complete(
+                daemon._process_event(event, db_session)
+            )
+
+        daemon.reasoning.reason.assert_called_once()
+
+    def test_scheduled_check_still_blocked_by_data_freshness(self, daemon, db_session):
+        """SCHEDULED_CHECK should still be blocked by data freshness."""
+        event = self._make_event(db_session, "SCHEDULED_CHECK")
+
+        asyncio.get_event_loop().run_until_complete(
+            daemon._process_event(event, db_session)
+        )
+
+        # Claude reasoning should NOT have been called
+        daemon.reasoning.reason.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Double-submission prevention: STAGED → EXECUTING lock
 # ---------------------------------------------------------------------------
 

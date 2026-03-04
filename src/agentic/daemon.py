@@ -474,6 +474,22 @@ class TAADDaemon:
             # Honor _guardrail_override flag from human-approved context re-emit
             guardrail_override = (event.payload or {}).get("_guardrail_override", False)
 
+            # Retrospective events don't need fresh market data — they reflect
+            # on decisions/outcomes from the day using data already collected.
+            _FRESHNESS_EXEMPT_EVENTS = {"EOD_REFLECTION", "MARKET_CLOSE"}
+            if (
+                self.guardrails.has_block(ctx_results)
+                and not guardrail_override
+                and event_type in _FRESHNESS_EXEMPT_EVENTS
+                and self._is_only_data_freshness_block(ctx_results)
+            ):
+                logger.info(
+                    f"Data freshness block ignored for {event_type} "
+                    f"(retrospective event — stale data expected)"
+                )
+                # Clear the block so processing continues
+                ctx_results = [r for r in ctx_results if r.passed or r.severity != "block"]
+
             if self.guardrails.has_block(ctx_results) and not guardrail_override:
                 block_reasons = self.guardrails.get_block_reasons(ctx_results)
                 logger.warning(f"Context guardrail blocked: {'; '.join(block_reasons)}")
