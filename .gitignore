@@ -22,10 +22,8 @@ dist/
 *.swo
 *~
 
-# Data
-data/databases/*.db
-data/cache/
-data/
+# Data (anchored to repo root so src/data/ is not excluded)
+/data/
 *.csv
 logs/
 Voices
