@@ -1026,53 +1026,61 @@ class TAADDaemon:
         message: str,
         details: dict | None = None,
         action_choices: list[dict] | None = None,
-    ) -> DaemonNotification:
+    ) -> Optional[DaemonNotification]:
         """Create or update a daemon notification by key.
 
-        If an active notification with this key exists, update it in-place
-        and increment occurrence_count. Otherwise create a new one.
+        Finds existing row by notification_key (any status). If the row
+        was previously resolved, reactivates it. If no row exists, creates
+        a new one. Rolls back on error to prevent session poisoning.
 
         Args:
             action_choices: Optional list of [{key, label, description}] for
                 structured user responses (e.g. resume/block/authorize).
                 On update, preserves existing chosen_action if user already acted.
         """
-        existing = (
-            db.query(DaemonNotification)
-            .filter_by(notification_key=key, status="active")
-            .first()
-        )
-        if existing:
-            existing.title = title
-            existing.message = message
-            existing.details = details
-            # Set action_choices but preserve existing chosen_action
-            if action_choices is not None:
-                existing.action_choices = action_choices
-            existing.occurrence_count += 1
-            existing.updated_at = utc_now()
-            db.commit()
-            logger.debug(
-                f"Notification '{key}' updated (count={existing.occurrence_count})"
+        try:
+            existing = (
+                db.query(DaemonNotification)
+                .filter_by(notification_key=key)
+                .first()
             )
-            return existing
-        else:
-            notif = DaemonNotification(
-                notification_key=key,
-                category=category,
-                status="active",
-                title=title,
-                message=message,
-                details=details,
-                action_choices=action_choices,
-                first_seen_at=utc_now(),
-                updated_at=utc_now(),
-                occurrence_count=1,
-            )
-            db.add(notif)
-            db.commit()
-            logger.info(f"Notification '{key}' created")
-            return notif
+            if existing:
+                existing.title = title
+                existing.message = message
+                existing.details = details
+                existing.status = "active"
+                existing.resolved_at = None
+                # Set action_choices but preserve existing chosen_action
+                if action_choices is not None:
+                    existing.action_choices = action_choices
+                existing.occurrence_count += 1
+                existing.updated_at = utc_now()
+                db.commit()
+                logger.debug(
+                    f"Notification '{key}' updated (count={existing.occurrence_count})"
+                )
+                return existing
+            else:
+                notif = DaemonNotification(
+                    notification_key=key,
+                    category=category,
+                    status="active",
+                    title=title,
+                    message=message,
+                    details=details,
+                    action_choices=action_choices,
+                    first_seen_at=utc_now(),
+                    updated_at=utc_now(),
+                    occurrence_count=1,
+                )
+                db.add(notif)
+                db.commit()
+                logger.info(f"Notification '{key}' created")
+                return notif
+        except Exception as e:
+            logger.warning(f"Notification upsert failed for '{key}': {e}")
+            db.rollback()
+            return None
 
     def _resolve_notification(self, db: Session, key: str) -> None:
         """Resolve an active notification (e.g. when IBKR reconnects)."""
@@ -3158,6 +3166,10 @@ class TAADDaemon:
 
         except Exception as e:
             logger.warning(f"Staged candidates query failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
     def _annotate_candidates_with_deviation(
         self, candidate_dicts: list[dict], db_candidates: list
