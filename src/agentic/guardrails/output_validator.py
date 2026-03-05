@@ -293,6 +293,8 @@ class OutputValidator:
             "THOSE", "THREE", "TODAY", "TOTAL", "TRADE", "TREND", "UNDER",
             "UNTIL", "UPPER", "VALUE", "WATCH", "WHERE", "WHICH", "WHILE",
             "WHOLE", "WHOSE", "WOULD", "WORST",
+            # Plurals of trading terms that appear in options reasoning
+            "PUTS", "CALLS", "SELLS", "BUYS",
         }
         unknown_symbols = found_symbols - known_symbols - COMMON_ABBREVIATIONS - short_words
 
