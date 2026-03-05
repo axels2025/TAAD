@@ -1,3 +1,5 @@
+scanner:
+  num_rows: 100
 filters:
   delta_min: 0.05
   delta_max: 0.15
@@ -12,8 +14,8 @@ ranking:
   ai_score: 20
   efficiency: 10
 budget:
-  margin_budget_pct: 0.2
-  max_positions: 10
+  margin_budget_pct: 0.5
+  max_positions: 25
   max_per_sector: 5
   price_threshold: 90.0
   max_contracts_expensive: 3

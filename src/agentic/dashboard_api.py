@@ -198,6 +198,14 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         """HTML prompt editor page."""
         return _inject_auth(get_prompt_html())
 
+    # Scanner settings page (uses existing /api/scanner/* endpoints)
+    from src.agentic.scanner_settings_page import get_scanner_settings_html
+
+    @app.get("/scanner-settings", response_class=HTMLResponse)
+    def scanner_settings_page():
+        """HTML scanner settings page."""
+        return _inject_auth(get_scanner_settings_html())
+
     @app.get("/api/status")
     def get_status(token: None = Depends(verify_token)):
         """Get daemon status with live process check."""
@@ -1621,6 +1629,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <h1>TAAD <span>The Autonomous Agentic Trading Daemon</span></h1>
   <div style="display:flex;align-items:center;gap:12px;">
     <a href="/scanner" class="btn btn-control" style="text-decoration:none;">Scanner</a>
+    <a href="/scanner-settings" class="btn btn-control" style="text-decoration:none;">Scan Config</a>
     <a href="/config" class="btn btn-control" style="text-decoration:none;">Settings</a>
     <a href="/guardrails" class="btn btn-control" style="text-decoration:none;">Guardrails</a>
     <a href="/prompts" class="btn btn-control" style="text-decoration:none;">Prompts</a>

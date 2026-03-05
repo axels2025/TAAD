@@ -299,9 +299,12 @@ def run_scan_and_persist(
     Raises:
         RuntimeError: If scanner fails or preset is unknown.
     """
+    from src.agentic.scanner_settings import load_scanner_settings
+
     if preset not in SCANNER_PRESETS:
         raise RuntimeError(f"Unknown scanner preset: {preset}")
 
+    settings = load_scanner_settings()
     preset_data = SCANNER_PRESETS[preset]
     config = ScannerConfig(
         scan_code=scan_code or preset_data.get("scan_code", "HIGH_OPT_IMP_VOLAT"),
@@ -309,7 +312,7 @@ def run_scan_and_persist(
         location=preset_data.get("location", "STK.US.MAJOR"),
         min_price=preset_data.get("min_price", 20.0),
         max_price=preset_data.get("max_price", 200.0),
-        num_rows=preset_data.get("num_rows", 50),
+        num_rows=settings.scanner.num_rows,
         market_cap_above=preset_data.get("market_cap_above", 0),
         market_cap_below=preset_data.get("market_cap_below", 0),
         avg_volume_above=preset_data.get("avg_volume_above", 0),

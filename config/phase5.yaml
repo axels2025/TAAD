@@ -48,7 +48,7 @@ learning:
   min_trades_for_experiment: 10
   max_concurrent_experiments: 3
 auto_scan:
-  enabled: false
+  enabled: true
   delay_minutes: 5
   scanner_preset: naked-put
   auto_stage: true

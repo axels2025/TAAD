@@ -60,6 +60,12 @@ class BudgetSettings(BaseModel):
     max_contracts_cheap: int = Field(default=5, ge=1)
 
 
+class ScannerScanSettings(BaseModel):
+    """IBKR scanner parameters (num_rows, etc.)."""
+
+    num_rows: int = Field(default=50, ge=10, le=500)
+
+
 class EarningsFilterSettings(BaseModel):
     """Earnings detection and optional filter adjustment.
 
@@ -82,6 +88,7 @@ class ScannerSettings(BaseModel):
     ranking: RankingWeights = RankingWeights()
     budget: BudgetSettings = BudgetSettings()
     earnings: EarningsFilterSettings = Field(default_factory=EarningsFilterSettings)
+    scanner: ScannerScanSettings = Field(default_factory=ScannerScanSettings)
 
 
 def load_scanner_settings(path: str | Path = DEFAULT_PATH) -> ScannerSettings:

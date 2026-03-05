@@ -449,6 +449,11 @@ class TAADDaemon:
             # This runs before Claude reasoning so expired positions never appear
             # as open in the context — preventing spurious REQUEST_HUMAN_REVIEW loops.
             await self._close_expired_positions(db)
+            # Expire stale STAGED/VALIDATING/READY rows from prior days
+            # (catches the case where daemon was down at Friday close).
+            # Must run before scan so budget calculation isn't reduced by
+            # phantom staged margin from the previous week.
+            self._auto_unstage_eod(db)
             await self._run_market_open_scan(db)
 
         if event_type == "MARKET_CLOSE":
