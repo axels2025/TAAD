@@ -23,6 +23,7 @@ except ImportError:
     FASTAPI_AVAILABLE = False
 
 from src.data.database import get_db_session
+from src.utils.timezone import utc_now
 from src.data.models import ClaudeApiCost, ScanOpportunity, ScanResult
 from src.services.auto_select_pipeline import (
     AutoSelectResult,
@@ -334,7 +335,7 @@ def create_scanner_router(verify_token) -> "APIRouter":
         # Persist scan result + opportunities to DB
         with get_db_session() as db:
             scan = ScanResult(
-                scan_timestamp=datetime.utcnow(),
+                scan_timestamp=utc_now(),
                 source="ibkr_scanner",
                 config_used={
                     "scan_code": config.scan_code,
@@ -738,7 +739,7 @@ def create_scanner_router(verify_token) -> "APIRouter":
             staged_count = 0
             for opp in opps:
                 opp.state = "STAGED"
-                opp.staged_at = datetime.utcnow()
+                opp.staged_at = utc_now()
                 staged_count += 1
 
             db.commit()
@@ -873,7 +874,7 @@ def _stage_with_contracts(selections: list) -> dict:
             opp.staged_contracts = sel.contracts
             opp.staged_limit_price = premium
             opp.state = "STAGED"
-            opp.staged_at = datetime.utcnow()
+            opp.staged_at = utc_now()
 
             # Use Phase 3 IBKR margin if provided, else Reg-T estimate
             if sel.margin_actual is not None and sel.margin_actual > 0:

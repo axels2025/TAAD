@@ -18,6 +18,8 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime
+
+from src.utils.timezone import utc_now
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -194,7 +196,7 @@ class DaemonWatchdog:
                     return None
 
                 # Compute age — last_heartbeat is stored as naive UTC
-                now = datetime.now(UTC)
+                now = utc_now()
                 hb = health.last_heartbeat
                 if hb.tzinfo is None:
                     hb = hb.replace(tzinfo=UTC)
@@ -399,4 +401,4 @@ class DaemonWatchdog:
 
 def _utcnow_iso() -> str:
     """Return current UTC time as ISO 8601 string."""
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")

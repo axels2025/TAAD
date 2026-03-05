@@ -21,12 +21,13 @@ import signal
 import subprocess
 import threading
 import time
-from datetime import UTC, datetime, date, timedelta
+from datetime import datetime, date, timedelta
 from typing import Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from src.utils.timezone import utc_now
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
@@ -646,7 +647,7 @@ class TAADDaemon:
                 # Step 3: Log decision to audit (per action, with plan_id)
                 audit = DecisionAudit(
                     event_id=event.id,
-                    timestamp=datetime.utcnow(),
+                    timestamp=utc_now(),
                     autonomy_level=self.governor.level,
                     event_type=event_type,
                     action=decision.action,
@@ -766,22 +767,26 @@ class TAADDaemon:
 
                 self.health.record_decision()
 
-                # Update working memory per action
-                decision_entry = {
-                    "timestamp": self._market_timestamp(),
-                    "event_type": event_type,
-                    "action": decision.action,
-                    "confidence": decision.confidence,
-                    "reasoning": decision.reasoning[:200] if decision.reasoning else "",
-                    "executed": audit.executed,
-                    "result": result.message[:200] if result.message else "",
-                }
-                # Enrich EXECUTE_TRADES with fill counts for Claude feedback
-                if decision.action == "EXECUTE_TRADES" and result.data:
-                    decision_entry["filled_count"] = result.data.get("filled_count")
-                    decision_entry["failed_count"] = result.data.get("failed_count")
-                    decision_entry["symbols_filled"] = result.data.get("symbols_filled")
-                self.memory.add_decision(decision_entry)
+                # Update working memory per action (skip duplicate-suppressed noise)
+                is_duplicate_suppressed = (
+                    decision.key_factors == ["duplicate_suppressed"]
+                )
+                if not is_duplicate_suppressed:
+                    decision_entry = {
+                        "timestamp": self._market_timestamp(),
+                        "event_type": event_type,
+                        "action": decision.action,
+                        "confidence": decision.confidence,
+                        "reasoning": decision.reasoning[:200] if decision.reasoning else "",
+                        "executed": audit.executed,
+                        "result": result.message[:200] if result.message else "",
+                    }
+                    # Enrich EXECUTE_TRADES with fill counts for Claude feedback
+                    if decision.action == "EXECUTE_TRADES" and result.data:
+                        decision_entry["filled_count"] = result.data.get("filled_count")
+                        decision_entry["failed_count"] = result.data.get("failed_count")
+                        decision_entry["symbols_filled"] = result.data.get("symbols_filled")
+                    self.memory.add_decision(decision_entry)
 
                 logger.info(
                     f"Event processed: {event_type} -> {decision.action} "
@@ -864,7 +869,7 @@ class TAADDaemon:
 
         audit = DecisionAudit(
             event_id=event.id,
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             autonomy_level=self.governor.level,
             event_type=event_type,
             action=action,
@@ -1045,7 +1050,7 @@ class TAADDaemon:
             if action_choices is not None:
                 existing.action_choices = action_choices
             existing.occurrence_count += 1
-            existing.updated_at = datetime.now(UTC)
+            existing.updated_at = utc_now()
             db.commit()
             logger.debug(
                 f"Notification '{key}' updated (count={existing.occurrence_count})"
@@ -1060,8 +1065,8 @@ class TAADDaemon:
                 message=message,
                 details=details,
                 action_choices=action_choices,
-                first_seen_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
+                first_seen_at=utc_now(),
+                updated_at=utc_now(),
                 occurrence_count=1,
             )
             db.add(notif)
@@ -1078,8 +1083,8 @@ class TAADDaemon:
         )
         if existing:
             existing.status = "resolved"
-            existing.resolved_at = datetime.now(UTC)
-            existing.updated_at = datetime.now(UTC)
+            existing.resolved_at = utc_now()
+            existing.updated_at = utc_now()
             db.commit()
             logger.info(
                 f"Notification '{key}' resolved "
@@ -1116,7 +1121,7 @@ class TAADDaemon:
                 audit.executed = True
                 audit.autonomy_approved = True
                 audit.human_decision = "acknowledged"
-                audit.human_decided_at = datetime.now(UTC)
+                audit.human_decided_at = utc_now()
                 db.commit()
                 self.memory.add_decision({
                     "timestamp": self._market_timestamp(),
@@ -1158,7 +1163,7 @@ class TAADDaemon:
 
                 # Mark the original audit as human-approved
                 audit.human_decision = "approved"
-                audit.human_decided_at = datetime.now(UTC)
+                audit.human_decided_at = utc_now()
                 audit.human_override = True
                 db.commit()
 
@@ -1204,7 +1209,7 @@ class TAADDaemon:
                     trade = db.query(Trade).filter(Trade.trade_id == trade_id).first()
                     if trade and trade.exit_date is not None:
                         audit.human_decision = "auto_dismissed"
-                        audit.human_decided_at = datetime.now(UTC)
+                        audit.human_decided_at = utc_now()
                         audit.executed = False
                         db.commit()
                         self.event_bus.mark_completed(event)
@@ -1462,7 +1467,7 @@ class TAADDaemon:
         Args:
             db: Database session
         """
-        today_utc = datetime.now(UTC).date()
+        today_utc = utc_now().date()
         try:
             stale = (
                 db.query(DecisionAudit)
@@ -1480,7 +1485,7 @@ class TAADDaemon:
 
             for audit in stale:
                 audit.human_decision = "auto_rejected"
-                audit.human_decided_at = datetime.now(UTC)
+                audit.human_decided_at = utc_now()
 
             db.commit()
             logger.info(
@@ -1558,7 +1563,7 @@ class TAADDaemon:
                 )
                 if trade and trade.exit_date is not None:
                     audit.human_decision = "auto_dismissed"
-                    audit.human_decided_at = datetime.now(UTC)
+                    audit.human_decided_at = utc_now()
                     dismissed += 1
                     logger.info(
                         f"Auto-dismissed stale CLOSE_POSITION (audit_id={audit.id}): "
@@ -2133,40 +2138,51 @@ class TAADDaemon:
         suppressed_trade_ids: set[str] = set()
 
         try:
-            # 1. Check pending CLOSE_POSITION decisions in audit queue
+            session_start = self._current_session_start()
+            # Convert to naive UTC for DB comparison (DecisionAudit.timestamp stores UTC)
+            session_start_utc = session_start.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+            # 1. Suppress any position with an un-executed CLOSE_POSITION
+            # this session — covers: pending (NULL), auto_dismissed, rejected.
+            # Excludes human-approved decisions (those should proceed to execution).
+            # This prevents the 15-minute re-ask loop where Claude keeps
+            # recommending CLOSE_POSITION for the same position every cycle.
+            from sqlalchemy import or_
+            session_close_decisions = (
+                db.query(DecisionAudit)
+                .filter(
+                    DecisionAudit.action == "CLOSE_POSITION",
+                    DecisionAudit.executed == False,  # noqa: E712
+                    or_(
+                        DecisionAudit.human_decision.is_(None),
+                        DecisionAudit.human_decision.in_(
+                            ["rejected", "auto_dismissed"]
+                        ),
+                    ),
+                    DecisionAudit.timestamp >= session_start_utc,
+                )
+                .all()
+            )
+
+            for audit in session_close_decisions:
+                tid = self._extract_trade_id_from_audit(audit)
+                if tid:
+                    suppressed_trade_ids.add(tid)
+
+            # 2. Also suppress positions with pending decisions from
+            # prior sessions (human hasn't reviewed yet)
             pending_audits = (
                 db.query(DecisionAudit)
                 .filter(
                     DecisionAudit.action == "CLOSE_POSITION",
                     DecisionAudit.executed == False,  # noqa: E712
                     DecisionAudit.human_decision.is_(None),
+                    DecisionAudit.timestamp < session_start_utc,
                 )
                 .all()
             )
 
             for audit in pending_audits:
-                tid = self._extract_trade_id_from_audit(audit)
-                if tid:
-                    suppressed_trade_ids.add(tid)
-
-            # 2. Check CLOSE_POSITION decisions rejected since session start.
-            # Uses trading-day boundary (not calendar midnight) so Friday
-            # rejections persist through the weekend until Monday 9:30 AM.
-            session_start = self._current_session_start()
-            # Convert to naive UTC for DB comparison (DecisionAudit stores UTC)
-            session_start_utc = session_start.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-            rejected_this_session = (
-                db.query(DecisionAudit)
-                .filter(
-                    DecisionAudit.action == "CLOSE_POSITION",
-                    DecisionAudit.executed == False,  # noqa: E712
-                    DecisionAudit.human_decision == "rejected",
-                    DecisionAudit.human_decided_at >= session_start_utc,
-                )
-                .all()
-            )
-
-            for audit in rejected_this_session:
                 tid = self._extract_trade_id_from_audit(audit)
                 if tid:
                     suppressed_trade_ids.add(tid)
@@ -3447,7 +3463,7 @@ class TAADDaemon:
         last_market_open_emitted: Optional[date] = None
         last_market_close_emitted: Optional[date] = None
         last_eod_reflection_emitted: Optional[date] = None
-        last_scheduled_check = datetime.utcnow()
+        last_scheduled_check = utc_now()
         last_reconnect_attempt: float = 0.0
 
         logger.info("Time-based emitter started (30s check interval)")
@@ -3508,7 +3524,7 @@ class TAADDaemon:
                     # Reset SCHEDULED_CHECK timer so it doesn't fire immediately
                     # after MARKET_OPEN (both would see same staged candidates
                     # and produce duplicate EXECUTE_TRADES decisions)
-                    last_scheduled_check = datetime.utcnow()
+                    last_scheduled_check = utc_now()
 
                 # Market close event (once per day, at close hour).
                 # Window is 30 minutes wide to survive daemon restarts
@@ -3540,11 +3556,11 @@ class TAADDaemon:
                 # Periodic scheduled check (every 15 minutes during market hours)
                 if (
                     self.calendar.is_market_open(now_et)
-                    and (datetime.utcnow() - last_scheduled_check).total_seconds() > 900
+                    and (utc_now() - last_scheduled_check).total_seconds() > 900
                 ):
                     logger.info("Emitting SCHEDULED_CHECK")
                     self.event_bus.emit(EventType.SCHEDULED_CHECK)
-                    last_scheduled_check = datetime.utcnow()
+                    last_scheduled_check = utc_now()
 
             except Exception as e:
                 logger.error(f"Time-based emitter error: {e}", exc_info=True)

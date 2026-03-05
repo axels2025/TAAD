@@ -8,7 +8,7 @@ Supports pgvector semantic search for past decision retrieval.
 import json
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Optional
 
 from loguru import logger
@@ -22,6 +22,7 @@ from src.data.models import (
     Trade,
     WorkingMemoryRow,
 )
+from src.utils.timezone import utc_now
 
 # Maximum recent decisions to keep in memory
 MAX_RECENT_DECISIONS = 50
@@ -273,7 +274,7 @@ class WorkingMemory:
         row.autonomy_level = self.autonomy_level
         row.reflection_reports = self.reflection_reports
         row.last_scheduled_fingerprint = self.last_scheduled_fingerprint
-        row.updated_at = datetime.now(UTC)
+        row.updated_at = utc_now()
 
         self.db.commit()
 

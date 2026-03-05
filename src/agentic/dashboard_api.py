@@ -12,7 +12,7 @@ from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from src.utils.timezone import trading_date
+from src.utils.timezone import trading_date, utc_now
 
 from loguru import logger
 
@@ -549,13 +549,13 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 )
 
             notif.chosen_action = request.action_key
-            notif.chosen_at = datetime.utcnow()
-            notif.updated_at = datetime.utcnow()
+            notif.chosen_at = utc_now()
+            notif.updated_at = utc_now()
 
             # "keep_blocked" keeps notification active; others resolve it
             if request.action_key != "keep_blocked":
                 notif.status = "resolved"
-                notif.resolved_at = datetime.utcnow()
+                notif.resolved_at = utc_now()
 
             db.commit()
             logger.info(
@@ -592,7 +592,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 return {"status": f"already_{audit.human_decision}", "decision_id": decision_id}
 
             audit.human_decision = "approved"
-            audit.human_decided_at = datetime.utcnow()
+            audit.human_decided_at = utc_now()
             audit.human_override = True
             db.commit()
 
@@ -625,7 +625,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 raise HTTPException(status_code=404, detail="Decision not found")
 
             audit.human_decision = "rejected"
-            audit.human_decided_at = datetime.utcnow()
+            audit.human_decided_at = utc_now()
             audit.human_override = True
             db.commit()
 
@@ -658,7 +658,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 }
 
             audit.human_decision = "approved"
-            audit.human_decided_at = datetime.utcnow()
+            audit.human_decided_at = utc_now()
             audit.human_override = True
             db.commit()
 
@@ -1085,7 +1085,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         """Get guardrail activity summary for the last 24 hours.
 
         Uses a 24-hour window instead of strict date boundary to avoid
-        timezone mismatches between datetime.utcnow() stored in DB
+        timezone mismatches between utc_now() stored in DB
         and the dashboard server's local time.
         """
         from datetime import datetime as dt, timedelta, timezone
@@ -1773,7 +1773,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="badge" style="background:rgba(0,212,255,0.12);color:var(--accent);" id="dec-count">0</span>
       </div>
     </div>
-    <div class="card-body" id="decisions-body" style="max-height:400px;overflow-y:auto;"></div>
+    <div class="card-body" id="decisions-body" style="max-height:600px;overflow-y:auto;"></div>
   </div>
 
   <!-- Logs -->
@@ -2470,13 +2470,14 @@ async function fetchData() {
         })() : ''}`;
     } catch(e) { document.getElementById('guardrails-body').innerHTML = '<div class="empty">Guardrails not available</div>'; }
 
-    // Decisions
-    const decisions = await (await fetch('/api/decisions?limit=15')).json();
+    // Decisions (filter out duplicate-suppressed noise)
+    const allDecisions = await (await fetch('/api/decisions?limit=50')).json();
+    const decisions = allDecisions.filter(d => !(d.action === 'MONITOR_ONLY' && d.reasoning && d.reasoning.startsWith('Duplicate ')));
     document.getElementById('dec-count').textContent = decisions.length;
     document.getElementById('decisions-body').innerHTML = decisions.length ? `
       <table>
         <tr><th>ID</th><th>Time</th><th>Event</th><th>Action</th><th>Confidence</th><th>Exec</th><th>Reasoning</th></tr>
-        ${decisions.map(d => `<tr style="cursor:pointer" onclick="location.href='/decision/${d.id}'">
+        ${decisions.slice(0, 25).map(d => `<tr style="cursor:pointer" onclick="location.href='/decision/${d.id}'">
           <td style="color:var(--text-dim)">${d.id}</td>
           <td style="color:var(--text-dim)">${fmtTime(d.timestamp)}</td>
           <td>${d.event_type}</td>

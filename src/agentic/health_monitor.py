@@ -15,6 +15,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from src.data.models import DaemonHealth
+from src.utils.timezone import utc_now
 
 
 class HealthMonitor:
@@ -49,7 +50,7 @@ class HealthMonitor:
 
     def start(self) -> None:
         """Start health monitoring: write PID file and initial heartbeat."""
-        self._started_at = datetime.utcnow()
+        self._started_at = utc_now()
         pid = os.getpid()
 
         # Write PID file
@@ -76,7 +77,7 @@ class HealthMonitor:
         """
         uptime = 0
         if self._started_at:
-            uptime = int((datetime.utcnow() - self._started_at).total_seconds())
+            uptime = int((utc_now() - self._started_at).total_seconds())
 
         self._update_health(
             pid=os.getpid(),
@@ -191,7 +192,7 @@ class HealthMonitor:
             if ibkr_connected is not None:
                 row.ibkr_connected = ibkr_connected
 
-            row.last_heartbeat = datetime.utcnow()
+            row.last_heartbeat = utc_now()
             row.events_processed_today = self._events_processed
             row.decisions_made_today = self._decisions_made
             row.errors_today = self._errors

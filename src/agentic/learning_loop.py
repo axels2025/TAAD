@@ -17,6 +17,7 @@ from src.agentic.reasoning_engine import ClaudeReasoningEngine
 from src.agentic.working_memory import WorkingMemory
 from src.data.models import DecisionAudit, Trade
 from src.learning.learning_orchestrator import LearningOrchestrator
+from src.utils.timezone import utc_now
 
 
 class LearningLoop:
@@ -224,12 +225,22 @@ class LearningLoop:
                 "exit_reason": trade.exit_reason,
                 "days_held": trade.days_held,
                 "linked_decision_id": decision.id if decision else None,
-                "recorded_at": datetime.utcnow().isoformat(),
+                "recorded_at": utc_now().isoformat(),
             }
 
-            # Update working memory with outcome
+            # Update working memory with outcome (proper decision schema)
             self.memory.add_decision(
                 {
+                    "timestamp": utc_now().isoformat(),
+                    "event_type": "OUTCOME_FEEDBACK",
+                    "action": "TRADE_CLOSED",
+                    "confidence": 1.0,
+                    "reasoning": (
+                        f"{trade.symbol} closed: P/L=${trade.profit_loss:.2f} "
+                        f"({trade.exit_reason or 'unknown'})"
+                    ),
+                    "executed": True,
+                    "result": f"trade_id={trade_id}",
                     "type": "outcome_feedback",
                     **outcome,
                 }

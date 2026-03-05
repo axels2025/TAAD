@@ -25,6 +25,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from src.data.models import ScanOpportunity, ScanResult
+from src.utils.timezone import utc_now
 from src.services.earnings_service import EarningsInfo, get_cached_earnings
 from src.services.ibkr_scanner import (
     SCANNER_PRESETS,
@@ -332,7 +333,7 @@ def run_scan_and_persist(
 
     # Persist scan result + opportunities
     scan = ScanResult(
-        scan_timestamp=datetime.utcnow(),
+        scan_timestamp=utc_now(),
         source="ibkr_scanner",
         config_used={
             "scan_code": config.scan_code,
@@ -749,7 +750,7 @@ def run_auto_select_pipeline(
         "nlv": nlv,
         "available_budget": available_budget,
         "scan_type": scan_type,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now().isoformat(),
     }
 
     elapsed = time.time() - t0
@@ -843,7 +844,7 @@ def stage_selected_candidates(
         opp.staged_contracts = pc.contracts
         opp.staged_limit_price = premium
         opp.state = "STAGED"
-        opp.staged_at = datetime.utcnow()
+        opp.staged_at = utc_now()
 
         # Margin data
         if pc.margin and pc.margin > 0:

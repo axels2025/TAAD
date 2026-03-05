@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from src.agentic.autonomy_governor import AutonomyGovernor, AutonomyDecision
 from src.agentic.reasoning_engine import DecisionOutput
+from src.utils.timezone import utc_now
 
 
 @dataclass
@@ -626,7 +627,7 @@ class ActionExecutor:
             },
             "escalation_reason": gate.reason,
             "escalation_trigger": gate.escalation_trigger,
-            "queued_at": datetime.utcnow().isoformat(),
+            "queued_at": utc_now().isoformat(),
             "status": "pending",
         }
         self._pending_approvals.append(approval)
@@ -706,7 +707,7 @@ class ActionExecutor:
         pending = self.get_pending_approvals()
         if 0 <= index < len(pending):
             pending[index]["status"] = "approved"
-            pending[index]["decided_at"] = datetime.utcnow().isoformat()
+            pending[index]["decided_at"] = utc_now().isoformat()
             return pending[index]
         return None
 
@@ -724,7 +725,7 @@ class ActionExecutor:
         if 0 <= index < len(pending):
             pending[index]["status"] = "rejected"
             pending[index]["rejection_reason"] = reason
-            pending[index]["decided_at"] = datetime.utcnow().isoformat()
+            pending[index]["decided_at"] = utc_now().isoformat()
             self.governor.record_override()
             return pending[index]
         return None

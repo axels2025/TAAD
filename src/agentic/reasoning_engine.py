@@ -18,6 +18,7 @@ from src.agents.base_agent import BaseAgent
 from src.agentic.config import ClaudeConfig
 from src.agentic.working_memory import ReasoningContext
 from src.data.models import ClaudeApiCost
+from src.utils.timezone import utc_now
 
 
 # Valid actions the reasoning engine can output
@@ -387,7 +388,7 @@ class CostTracker:
         """
         daily_total = self.get_daily_total() + cost_usd
         record = ClaudeApiCost(
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             model=model,
             purpose=purpose,
             input_tokens=input_tokens,

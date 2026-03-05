@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from src.agentic.config import AutonomyConfig
 from src.data.models import DecisionAudit, Trade
+from src.utils.timezone import utc_now
 
 
 class AutonomyLevel(IntEnum):
@@ -364,7 +365,7 @@ class AutonomyGovernor:
 
     def record_override(self) -> None:
         """Record a human override (immediate demotion)."""
-        self._last_override_time = datetime.utcnow()
+        self._last_override_time = utc_now()
         self._demote("Human override")
 
     def _load_counters(self) -> None:
@@ -460,7 +461,7 @@ class AutonomyGovernor:
     def _calculate_recent_win_rate(self, days: int = 30) -> float:
         """Calculate win rate over recent trades."""
         try:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff = utc_now() - timedelta(days=days)
             trades = (
                 self.db.query(Trade)
                 .filter(Trade.exit_date.isnot(None))

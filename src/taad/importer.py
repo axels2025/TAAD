@@ -14,6 +14,7 @@ from src.taad.flex_parser import ParsedExecution, parse_flex_xml
 from src.taad.flex_query_client import FlexQueryClient, FlexQueryError
 from src.taad.models import IBKRRawImport, ImportSession
 from src.taad.trade_matcher import match_trades, persist_matches
+from src.utils.timezone import utc_now
 
 
 class ImportResult:
@@ -139,7 +140,7 @@ def run_import(
 
         # Mark session complete
         import_session.status = "completed"
-        import_session.completed_at = datetime.utcnow()
+        import_session.completed_at = utc_now()
 
         logger.info(
             f"Import complete: {result.imported} imported, "
@@ -151,7 +152,7 @@ def run_import(
     except Exception as e:
         import_session.status = "failed"
         import_session.error_details = str(e)
-        import_session.completed_at = datetime.utcnow()
+        import_session.completed_at = utc_now()
         logger.error(f"Import failed: {e}")
         raise
 

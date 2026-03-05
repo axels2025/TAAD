@@ -7,7 +7,7 @@ use MarketCalendar. IBKR callbacks register for fill/disconnect/reconnect.
 
 import asyncio
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
@@ -16,6 +16,7 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from src.data.models import DaemonEvent
+from src.utils.timezone import utc_now
 
 
 class EventType(str, Enum):
@@ -107,7 +108,7 @@ class EventBus:
             priority=priority,
             status="pending",
             payload=payload or {},
-            created_at=datetime.now(UTC),
+            created_at=utc_now(),
         )
         self.db.add(event)
         self.db.commit()
@@ -176,7 +177,7 @@ class EventBus:
             sa_update(DaemonEvent)
             .where(DaemonEvent.id == event.id)
             .where(DaemonEvent.status == "pending")
-            .values(status="processing", processed_at=datetime.now(UTC))
+            .values(status="processing", processed_at=utc_now())
         )
         self.db.commit()
         if result.rowcount == 0:
@@ -194,7 +195,7 @@ class EventBus:
             event: The event to mark
         """
         event.status = "completed"
-        event.completed_at = datetime.now(UTC)
+        event.completed_at = utc_now()
         self.db.commit()
 
     def mark_failed(self, event: DaemonEvent, error: str) -> None:
@@ -206,7 +207,7 @@ class EventBus:
         """
         event.status = "failed"
         event.error_message = error
-        event.completed_at = datetime.now(UTC)
+        event.completed_at = utc_now()
         self.db.commit()
 
     async def stream(
