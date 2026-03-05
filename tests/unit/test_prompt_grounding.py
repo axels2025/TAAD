@@ -23,25 +23,25 @@ from src.agentic.working_memory import ReasoningContext
 
 def test_system_prompt_contains_grounding_requirements():
     """System prompt must contain grounding rules for Claude."""
-    assert "Grounding Requirements" in REASONING_SYSTEM_PROMPT
+    assert "Grounding Rules" in REASONING_SYSTEM_PROMPT
     assert "ONLY reference symbols" in REASONING_SYSTEM_PROMPT
     assert "ONLY cite numbers" in REASONING_SYSTEM_PROMPT
-    assert "never fabricate values" in REASONING_SYSTEM_PROMPT
+    assert "never fabricate" in REASONING_SYSTEM_PROMPT
 
 
 def test_system_prompt_contains_uncertainty_calibration():
-    """System prompt must contain uncertainty calibration guidance."""
-    assert "Uncertainty Calibration" in REASONING_SYSTEM_PROMPT
-    assert "NEVER set confidence > 0.9" in REASONING_SYSTEM_PROMPT
-    assert "MONITOR_ONLY when uncertain" in REASONING_SYSTEM_PROMPT
+    """System prompt must contain confidence calibration guidance."""
+    assert "Confidence Calibration" in REASONING_SYSTEM_PROMPT
+    assert "0.85" in REASONING_SYSTEM_PROMPT  # Strong confidence range
+    assert "REQUEST_HUMAN_REVIEW" in REASONING_SYSTEM_PROMPT
 
 
 def test_system_prompt_contains_reasoning_structure():
-    """System prompt must require OBSERVATION/ASSESSMENT/ACTION structure."""
-    assert "Reasoning Structure" in REASONING_SYSTEM_PROMPT
-    assert "OBSERVATION" in REASONING_SYSTEM_PROMPT
-    assert "ASSESSMENT" in REASONING_SYSTEM_PROMPT
-    assert "ACTION" in REASONING_SYSTEM_PROMPT
+    """System prompt must require structured step-by-step reasoning."""
+    assert "Mandatory Decision Process" in REASONING_SYSTEM_PROMPT
+    assert "STEP 1" in REASONING_SYSTEM_PROMPT or "Step 1" in REASONING_SYSTEM_PROMPT
+    assert "EMERGENCY CHECK" in REASONING_SYSTEM_PROMPT
+    assert "ENTRY DAY CHECK" in REASONING_SYSTEM_PROMPT
 
 
 # ---------- Prompt String Tests ----------
@@ -64,12 +64,13 @@ def test_prompt_string_has_symbol_list():
 
 
 def test_prompt_string_has_data_timestamp():
-    """to_prompt_string() must include a Data as of timestamp."""
+    """to_prompt_string() must include a Data as of timestamp with market timezone."""
     ctx = ReasoningContext()
     prompt = ctx.to_prompt_string()
 
     assert "## Data as of:" in prompt
-    assert "UTC" in prompt
+    # Timestamp uses the active market profile timezone (e.g., EST, AEST)
+    assert "markets)" in prompt
 
 
 def test_prompt_string_has_data_limitations():

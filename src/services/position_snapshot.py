@@ -55,6 +55,9 @@ class PositionSnapshotService:
         snapshots = []
         today = us_trading_date()
 
+        # Fetch VIX/SPY once for all positions
+        market_ctx = self._fetch_market_context()
+
         for trade in open_trades:
             try:
                 # Check if already captured today
@@ -73,7 +76,7 @@ class PositionSnapshotService:
                     )
                     continue
 
-                snapshot = self._capture_single_position(trade, today)
+                snapshot = self._capture_single_position(trade, today, market_ctx)
                 if snapshot:
                     self.db.add(snapshot)
                     snapshots.append(snapshot)
@@ -86,14 +89,39 @@ class PositionSnapshotService:
 
         return snapshots
 
+    def _fetch_market_context(self) -> dict:
+        """Fetch VIX and SPY once (shared across all positions).
+
+        Returns:
+            Dict with 'vix' and 'spy_price' keys (values may be None).
+        """
+        ctx = {"vix": None, "spy_price": None}
+        try:
+            vix_contract = Index("VIX", "CBOE", "USD")
+            vix_data = self.ibkr.get_market_data(vix_contract)
+            if vix_data:
+                ctx["vix"] = vix_data["last"]
+        except Exception as e:
+            logger.debug(f"Failed to capture VIX: {e}")
+        try:
+            spy_stock = Stock("SPY", "SMART", "USD")
+            spy_data = self.ibkr.get_market_data(spy_stock)
+            if spy_data:
+                ctx["spy_price"] = spy_data["last"]
+        except Exception as e:
+            logger.debug(f"Failed to capture SPY: {e}")
+        return ctx
+
     def _capture_single_position(
-        self, trade: Trade, snapshot_date: date
+        self, trade: Trade, snapshot_date: date,
+        market_ctx: Optional[dict] = None,
     ) -> Optional[PositionSnapshot]:
         """Capture snapshot for a single position.
 
         Args:
             trade: Trade object
             snapshot_date: Date of snapshot
+            market_ctx: Pre-fetched VIX/SPY dict (avoids redundant queries)
 
         Returns:
             PositionSnapshot or None if capture failed
@@ -121,7 +149,7 @@ class PositionSnapshotService:
 
             # Request market data with Greeks
             ticker = self.ibkr.ib.reqMktData(qualified[0], "", False, False)
-            self.ibkr.ib.sleep(2)  # Wait for data
+            self.ibkr.ib.sleep(1)  # Wait for data
 
             # Capture current premium (NaN-safe)
             snapshot.current_premium = safe_price(ticker)
@@ -158,23 +186,11 @@ class PositionSnapshotService:
                         snapshot.stock_price - trade.strike
                     ) / snapshot.stock_price
 
-            # Capture VIX
-            try:
-                vix_contract = Index("VIX", "CBOE", "USD")
-                vix_data = self.ibkr.get_market_data(vix_contract)
-                if vix_data:
-                    snapshot.vix = vix_data["last"]
-            except Exception as e:
-                logger.debug(f"Failed to capture VIX: {e}")
-
-            # Capture SPY
-            try:
-                spy_stock = Stock("SPY", "SMART", "USD")
-                spy_data = self.ibkr.get_market_data(spy_stock)
-                if spy_data:
-                    snapshot.spy_price = spy_data["last"]
-            except Exception as e:
-                logger.debug(f"Failed to capture SPY: {e}")
+            # Use pre-fetched market context if available, otherwise fetch per-position
+            if market_ctx is None:
+                market_ctx = self._fetch_market_context()
+            snapshot.vix = market_ctx.get("vix")
+            snapshot.spy_price = market_ctx.get("spy_price")
 
             logger.debug(
                 f"Position snapshot captured for {trade.symbol} trade {trade.id}",

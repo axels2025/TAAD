@@ -140,10 +140,33 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
 
     app.include_router(create_scanner_router(verify_token))
 
+    # Auth bootstrap script injected into all sub-page HTMLs
+    _AUTH_SCRIPT = """<script>
+(function(){
+  var t = new URLSearchParams(location.search).get('token') || sessionStorage.getItem('taad_token') || '';
+  if (t) sessionStorage.setItem('taad_token', t);
+  var _f = window.fetch;
+  window.fetch = function(u, o) {
+    if (t && typeof u === 'string' && u.startsWith('/api')) {
+      o = o || {}; o.headers = o.headers || {};
+      o.headers['Authorization'] = 'Bearer ' + t;
+    }
+    return _f.call(this, u, o);
+  };
+  if (t) document.querySelectorAll('a[href^="/"]').forEach(function(a) {
+    var u = new URL(a.href); u.searchParams.set('token', t); a.href = u.toString();
+  });
+})();
+</script>"""
+
+    def _inject_auth(html: str) -> str:
+        """Inject auth bootstrap script into HTML page."""
+        return html.replace("<script>", _AUTH_SCRIPT + "\n<script>", 1)
+
     @app.get("/scanner", response_class=HTMLResponse)
     def scanner_page():
         """HTML scanner page."""
-        return get_scanner_html()
+        return _inject_auth(get_scanner_html())
 
     # Include config router
     from src.agentic.config_api import create_config_router, get_config_html
@@ -153,7 +176,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
     @app.get("/config", response_class=HTMLResponse)
     def config_page():
         """HTML config editor page."""
-        return get_config_html()
+        return _inject_auth(get_config_html())
 
     # Include guardrails router
     from src.agentic.guardrails_api import create_guardrails_router, get_guardrails_html
@@ -163,7 +186,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
     @app.get("/guardrails", response_class=HTMLResponse)
     def guardrails_page():
         """HTML guardrails review page."""
-        return get_guardrails_html()
+        return _inject_auth(get_guardrails_html())
 
     # Include prompt editor router
     from src.agentic.prompt_api import create_prompt_router, get_prompt_html
@@ -173,7 +196,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
     @app.get("/prompts", response_class=HTMLResponse)
     def prompts_page():
         """HTML prompt editor page."""
-        return get_prompt_html()
+        return _inject_auth(get_prompt_html())
 
     @app.get("/api/status")
     def get_status(token: None = Depends(verify_token)):
@@ -768,6 +791,217 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         except PermissionError:
             raise HTTPException(status_code=500, detail="Permission denied sending signal")
 
+    @app.post("/api/restart-daemon")
+    def restart_daemon(token: None = Depends(verify_token)):
+        """Restart the daemon: stop existing process then start a new one."""
+        import time
+        from pathlib import Path
+
+        from src.agentic.health_monitor import HealthMonitor
+
+        pid = HealthMonitor.is_daemon_running()
+        if pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                logger.info(f"SIGTERM sent to daemon (pid={pid}) for restart")
+                # Wait for process to exit (up to 10s)
+                for _ in range(20):
+                    time.sleep(0.5)
+                    try:
+                        os.kill(pid, 0)  # Check if still alive
+                    except ProcessLookupError:
+                        break
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                raise HTTPException(status_code=500, detail="Permission denied")
+
+        # Clear stop flag so watchdog doesn't interfere
+        Path("run/stop_requested").unlink(missing_ok=True)
+
+        # Start fresh daemon
+        venv_bin = os.path.dirname(sys.executable)
+        exe = os.path.join(venv_bin, "nakedtrader")
+        if not os.path.exists(exe):
+            raise HTTPException(status_code=500, detail=f"nakedtrader not found at {exe}")
+
+        log_file = os.path.join(os.getcwd(), "logs", "daemon.log")
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+        with open(log_file, "a") as log_f:
+            proc = subprocess.Popen(
+                [exe, "daemon", "start", "--fg"],
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+        logger.info(f"Daemon restarted via dashboard (new pid={proc.pid})")
+        return {"status": "restarted", "pid": proc.pid}
+
+    @app.post("/api/restart-dashboard")
+    def restart_dashboard(token: None = Depends(verify_token)):
+        """Restart the dashboard process by re-exec'ing itself."""
+        logger.info("Dashboard restart requested via UI")
+
+        def _delayed_restart():
+            """Give the HTTP response time to complete, then restart."""
+            import time
+            time.sleep(1)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        import threading
+        threading.Thread(target=_delayed_restart, daemon=True).start()
+        return {"status": "restarting"}
+
+    @app.post("/api/sync-orders")
+    def sync_orders_endpoint(token: None = Depends(verify_token)):
+        """Sync order status with IBKR (order fills, commissions, status)."""
+        import asyncio
+
+        from src.config.base import IBKRConfig
+        from src.data.repositories import TradeRepository
+        from src.services.order_reconciliation import OrderReconciliation
+        from src.tools.ibkr_client import IBKRClient
+
+        config = IBKRConfig()
+        config.client_id = 10
+        client = IBKRClient(config, suppress_errors=True)
+        lines = []
+        try:
+            connected = client.connect()
+            if not connected:
+                return {"status": "error", "lines": ["IBKR not connected. Is TWS/Gateway running?"]}
+
+            with get_db_session() as db:
+                trade_repo = TradeRepository(db)
+                reconciler = OrderReconciliation(client, trade_repo)
+
+                report = asyncio.get_event_loop().run_until_complete(
+                    reconciler.sync_all_orders(include_filled=True)
+                )
+
+                lines.append(f"Order Sync — {report.date}")
+                lines.append(f"Reconciled: {report.total_reconciled}")
+                lines.append(f"Discrepancies: {report.total_discrepancies}")
+                lines.append(f"Resolved: {report.total_resolved}")
+
+                if report.reconciled:
+                    lines.append("")
+                    lines.append("SYMBOL     ORDER    DB STATUS     TWS STATUS    FILL     COMMISSION")
+                    lines.append("-" * 72)
+                    for t in report.reconciled:
+                        disc = " *" if t.discrepancy else ""
+                        fill = f"${t.fill_price:.2f}" if t.fill_price else "--"
+                        comm = f"${t.commission:.2f}" if t.commission else "--"
+                        lines.append(
+                            f"{t.symbol:<10} {t.order_id:<8} {t.db_status:<13} "
+                            f"{t.tws_status:<13} {fill:<8} {comm}{disc}"
+                        )
+
+                if report.orphans:
+                    lines.append("")
+                    lines.append(f"Orphan orders (in IBKR, not DB): {len(report.orphans)}")
+                    for o in report.orphans:
+                        sym = o.contract.symbol if hasattr(o, 'contract') else "?"
+                        oid = o.order.orderId if hasattr(o, 'order') else "?"
+                        lines.append(f"  {sym} order #{oid}")
+
+                if report.missing_in_tws:
+                    lines.append("")
+                    lines.append(f"Missing in TWS (in DB only): {len(report.missing_in_tws)}")
+                    for m in report.missing_in_tws:
+                        sym = m.symbol if hasattr(m, 'symbol') else "?"
+                        lines.append(f"  {sym} order #{getattr(m, 'order_id', '?')}")
+
+                if not report.reconciled and not report.orphans and not report.missing_in_tws:
+                    lines.append("No orders to sync.")
+
+            return {"status": "ok", "lines": lines}
+        except Exception as e:
+            logger.error(f"Sync orders failed: {e}", exc_info=True)
+            return {"status": "error", "lines": lines + [f"Error: {e}"]}
+        finally:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+
+    @app.post("/api/reconcile-positions")
+    def reconcile_positions_endpoint(token: None = Depends(verify_token)):
+        """Reconcile positions between DB and IBKR (detect mismatches, orphans, assignments)."""
+        import asyncio
+
+        from src.config.base import IBKRConfig
+        from src.data.repositories import TradeRepository
+        from src.services.order_reconciliation import OrderReconciliation
+        from src.tools.ibkr_client import IBKRClient
+
+        config = IBKRConfig()
+        config.client_id = 10
+        client = IBKRClient(config, suppress_errors=True)
+        lines = []
+        try:
+            connected = client.connect()
+            if not connected:
+                return {"status": "error", "lines": ["IBKR not connected. Is TWS/Gateway running?"]}
+
+            with get_db_session() as db:
+                trade_repo = TradeRepository(db)
+                reconciler = OrderReconciliation(client, trade_repo)
+
+                report = asyncio.get_event_loop().run_until_complete(
+                    reconciler.reconcile_positions()
+                )
+
+                lines.append("Position Reconciliation")
+                lines.append("")
+
+                if not report.has_discrepancies:
+                    lines.append("All positions in sync — no discrepancies found.")
+                else:
+                    if report.quantity_mismatches:
+                        lines.append(f"Quantity Mismatches: {len(report.quantity_mismatches)}")
+                        lines.append("CONTRACT                           DB QTY   IBKR QTY   DIFF")
+                        lines.append("-" * 62)
+                        for m in report.quantity_mismatches:
+                            lines.append(
+                                f"{m.contract_key:<34} {m.db_quantity:<8} "
+                                f"{m.ibkr_quantity:<10} {m.difference:+d}"
+                            )
+                        lines.append("")
+
+                    if report.in_ibkr_not_db:
+                        lines.append(f"In IBKR but not DB (orphans): {len(report.in_ibkr_not_db)}")
+                        for key, pos in report.in_ibkr_not_db:
+                            qty = pos.position if hasattr(pos, 'position') else '?'
+                            lines.append(f"  {key}  qty={qty}")
+                        lines.append("")
+
+                    if report.in_db_not_ibkr:
+                        lines.append(f"In DB but not IBKR (ghosts): {len(report.in_db_not_ibkr)}")
+                        for key, trade in report.in_db_not_ibkr:
+                            lines.append(f"  {key}")
+                        lines.append("")
+
+                    if report.assignments:
+                        lines.append(f"Possible Assignments: {len(report.assignments)}")
+                        for a in report.assignments:
+                            lines.append(
+                                f"  {a.symbol}: {a.shares} shares @ ${a.avg_cost:.2f}"
+                                f"  (matched trade #{a.matched_trade_id})"
+                            )
+
+            return {"status": "ok", "lines": lines}
+        except Exception as e:
+            logger.error(f"Reconcile positions failed: {e}", exc_info=True)
+            return {"status": "error", "lines": lines + [f"Error: {e}"]}
+        finally:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+
     @app.get("/api/logs")
     def get_logs(
         lines: int = 100,
@@ -1182,14 +1416,17 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         }
 
     @app.get("/", response_class=HTMLResponse)
-    def dashboard_page():
-        """HTML dashboard."""
-        return _DASHBOARD_HTML
+    def dashboard_page(token: str = ""):
+        """HTML dashboard. Pass ?token=<auth_token> to authenticate API calls."""
+        html = _DASHBOARD_HTML.replace("__AUTH_TOKEN__", token or "")
+        return html
 
     @app.get("/decision/{decision_id}", response_class=HTMLResponse)
-    def decision_detail_page(decision_id: int):
+    def decision_detail_page(decision_id: int, token: str = ""):
         """HTML detail page for a single decision."""
-        return _DECISION_DETAIL_HTML.replace("__DECISION_ID__", str(decision_id))
+        html = _DECISION_DETAIL_HTML.replace("__DECISION_ID__", str(decision_id))
+        html = html.replace("__AUTH_TOKEN__", token or "")
+        return html
 
     return app
 
@@ -1266,6 +1503,60 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .btn-control:hover { border-color: var(--accent); color: var(--accent); }
   .controls { display: flex; gap: 8px; }
 
+  /* Dropdown menu */
+  .dropdown { position: relative; display: inline-block; }
+  .dropdown-toggle { cursor: pointer; }
+  .dropdown-toggle::after { content: ' \u25BE'; font-size: 10px; }
+  .dropdown-menu {
+    display: none; position: absolute; right: 0; top: calc(100% + 4px);
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+    min-width: 180px; z-index: 100; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: 4px 0; white-space: nowrap;
+  }
+  .dropdown-menu.open { display: block; }
+  .dropdown-menu .menu-item {
+    display: block; width: 100%; padding: 8px 16px; border: none;
+    background: transparent; color: var(--text); font-family: inherit;
+    font-size: 12px; text-align: left; cursor: pointer; transition: background 0.1s;
+  }
+  .dropdown-menu .menu-item:hover { background: var(--bg3); color: var(--accent); }
+  .dropdown-menu .menu-item.danger { color: var(--red); }
+  .dropdown-menu .menu-item.danger:hover { background: rgba(255,82,82,0.1); }
+  .dropdown-menu .menu-item.success { color: var(--green); }
+  .dropdown-menu .menu-item.success:hover { background: rgba(0,230,118,0.1); }
+  .dropdown-menu .menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+  /* Output panel (for sync/reconcile results) */
+  .output-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    z-index: 200; justify-content: center; align-items: center;
+  }
+  .output-overlay.open { display: flex; }
+  .output-panel {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    width: 90%; max-width: 700px; max-height: 80vh; display: flex; flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  .output-panel-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+  }
+  .output-panel-header h3 { font-size: 13px; color: var(--accent); font-weight: 600; margin: 0; }
+  .output-panel-close {
+    background: none; border: none; color: var(--text-dim); font-size: 18px;
+    cursor: pointer; padding: 0 4px; line-height: 1;
+  }
+  .output-panel-close:hover { color: var(--text); }
+  .output-panel-body {
+    padding: 16px; overflow-y: auto; flex: 1;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 12px;
+    line-height: 1.6; white-space: pre-wrap; color: var(--text);
+  }
+  .output-panel-body.loading { color: var(--text-dim); font-style: italic; }
+  .output-panel-body .out-ok { color: var(--green); }
+  .output-panel-body .out-warn { color: var(--yellow); }
+  .output-panel-body .out-err { color: var(--red); }
+
   /* Notification cards (blue theme — informational, no action needed) */
   .notif-item { background: var(--bg3); border: 1px solid rgba(0, 150, 255, 0.3); border-radius: 6px; padding: 14px; margin-bottom: 10px; }
   .notif-item:last-child { margin-bottom: 0; }
@@ -1328,20 +1619,41 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="header">
   <h1>TAAD <span>The Autonomous Agentic Trading Daemon</span></h1>
-  <div style="display:flex;align-items:center;gap:16px;">
-    <a href="/scanner" class="btn btn-control" style="text-decoration:none;">Option Scanner</a>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <a href="/scanner" class="btn btn-control" style="text-decoration:none;">Scanner</a>
     <a href="/config" class="btn btn-control" style="text-decoration:none;">Settings</a>
     <a href="/guardrails" class="btn btn-control" style="text-decoration:none;">Guardrails</a>
     <a href="/prompts" class="btn btn-control" style="text-decoration:none;">Prompts</a>
-    <div class="controls" id="controls">
-      <button class="btn btn-approve" onclick="apiCall('/api/start')" id="btn-start">Start Daemon</button>
-      <button class="btn btn-reject" onclick="apiCall('/api/stop')" id="btn-stop">Stop Daemon</button>
-      <button class="btn btn-control" onclick="apiCall('/api/pause')" id="btn-pause">Pause</button>
-      <button class="btn btn-control" onclick="apiCall('/api/resume')" id="btn-resume">Resume</button>
-      <button class="btn btn-control" onclick="triggerAutoScan()" id="btn-auto-scan" title="Run market scan + auto-select pipeline">Auto-Scan</button>
-      <button class="btn btn-approve" onclick="forceScan()" id="btn-force-scan" title="Override MONITOR_ONLY: scan + stage + trigger Claude reasoning" style="display:none;">Force Scan</button>
+    <div class="dropdown">
+      <button class="btn btn-control dropdown-toggle" onclick="toggleMenu()">Actions</button>
+      <div class="dropdown-menu" id="actions-menu">
+        <button class="menu-item success" onclick="apiCall('/api/start');closeMenu()" id="menu-start">Start Daemon</button>
+        <button class="menu-item danger" onclick="apiCall('/api/stop');closeMenu()" id="menu-stop">Stop Daemon</button>
+        <button class="menu-item" onclick="apiCall('/api/pause');closeMenu()" id="menu-pause">Pause</button>
+        <button class="menu-item" onclick="apiCall('/api/resume');closeMenu()" id="menu-resume">Resume</button>
+        <div class="menu-divider"></div>
+        <button class="menu-item" onclick="triggerAutoScan();closeMenu()" id="menu-auto-scan">Auto-Scan</button>
+        <button class="menu-item" onclick="forceScan();closeMenu()" id="menu-force-scan">Force Scan</button>
+        <div class="menu-divider"></div>
+        <button class="menu-item" onclick="runSyncOrders();closeMenu()" id="menu-sync">Sync Orders</button>
+        <button class="menu-item" onclick="runReconcile();closeMenu()" id="menu-reconcile">Reconcile Positions</button>
+        <div class="menu-divider"></div>
+        <button class="menu-item" onclick="restartDaemon();closeMenu()" id="menu-restart-daemon">Restart Daemon</button>
+        <button class="menu-item" onclick="restartDashboard();closeMenu()" id="menu-restart-dashboard">Restart Dashboard</button>
+      </div>
     </div>
     <div class="refresh-badge" style="text-align:right;"><div><span class="dot" id="status-dot"></span><span id="status-label">Checking...</span> <span id="et-time"></span></div><div id="market-countdown" style="font-size:10px;"></div></div>
+  </div>
+</div>
+
+<!-- Output panel overlay (sync/reconcile results) -->
+<div class="output-overlay" id="output-overlay" onclick="if(event.target===this)closeOutput()">
+  <div class="output-panel">
+    <div class="output-panel-header">
+      <h3 id="output-title">Output</h3>
+      <button class="output-panel-close" onclick="closeOutput()">&times;</button>
+    </div>
+    <div class="output-panel-body" id="output-body"></div>
   </div>
 </div>
 
@@ -1473,6 +1785,33 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="toast" id="toast"></div>
 
 <script>
+// --- Auth token handling ---
+// Token is injected by server; falls back to sessionStorage for sub-pages
+const _injected = '__AUTH_TOKEN__';
+const _authToken = (_injected && !_injected.includes('AUTH_TOKEN')) ? _injected : '';
+if (_authToken) sessionStorage.setItem('taad_token', _authToken);
+const _storedToken = _authToken || sessionStorage.getItem('taad_token') || '';
+
+// Override fetch to inject Authorization header on all /api calls
+const _origFetch = window.fetch;
+window.fetch = function(url, opts) {
+  if (_storedToken && typeof url === 'string' && url.startsWith('/api')) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    opts.headers['Authorization'] = 'Bearer ' + _storedToken;
+  }
+  return _origFetch.call(this, url, opts);
+};
+
+// Append ?token= to nav links so auth persists across pages
+if (_storedToken) {
+  document.querySelectorAll('a[href^="/"]').forEach(a => {
+    const u = new URL(a.href);
+    u.searchParams.set('token', _storedToken);
+    a.href = u.toString();
+  });
+}
+
 function actionTag(action) {
   const map = {
     'EXECUTE_TRADES': 'tag-exec', 'STAGE_CANDIDATES': 'tag-exec',
@@ -1602,12 +1941,22 @@ async function unstageAll() {
   await apiCall('/api/unstage-all');
 }
 
+// --- Dropdown menu ---
+function toggleMenu() {
+  document.getElementById('actions-menu').classList.toggle('open');
+}
+function closeMenu() {
+  document.getElementById('actions-menu').classList.remove('open');
+}
+// Close dropdown when clicking outside
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.dropdown')) closeMenu();
+});
+
 async function triggerAutoScan() {
-  const btn = document.getElementById('btn-auto-scan');
   const override = confirm('Run auto-scan now?\\n\\nIf market is closed, stale data will be used.');
   if (!override) return;
-  btn.disabled = true;
-  btn.textContent = 'Scanning...';
+  showToast('Scanning...');
   try {
     const r = await fetch('/api/auto-scan/trigger', {
       method: 'POST',
@@ -1624,15 +1973,11 @@ async function triggerAutoScan() {
   } catch(e) {
     showToast('Error: ' + e.message);
   }
-  btn.disabled = false;
-  btn.textContent = 'Auto-Scan';
 }
 
 async function forceScan() {
-  const btn = document.getElementById('btn-force-scan');
-  if (!confirm('Override MONITOR_ONLY and scan for new trades?\\n\\nThis will run the full pipeline (scan → select → stage) and trigger Claude reasoning on the results.')) return;
-  btn.disabled = true;
-  btn.textContent = 'Scanning...';
+  if (!confirm('Override MONITOR_ONLY and scan for new trades?\\n\\nThis will run the full pipeline (scan \\u2192 select \\u2192 stage) and trigger Claude reasoning on the results.')) return;
+  showToast('Force scanning...');
   try {
     const r = await fetch('/api/force-scan', {
       method: 'POST',
@@ -1649,9 +1994,90 @@ async function forceScan() {
   } catch(e) {
     showToast('Error: ' + e.message);
   }
-  btn.disabled = false;
-  btn.textContent = 'Force Scan';
 }
+
+async function restartDaemon() {
+  if (!confirm('Restart the daemon?\\n\\nThis will stop the current daemon process and start a new one.')) return;
+  showToast('Restarting daemon...');
+  try {
+    const r = await fetch('/api/restart-daemon', { method: 'POST' });
+    const d = await r.json();
+    if (d.status === 'restarted') {
+      showToast('Daemon restarted (pid=' + d.pid + ')');
+      setTimeout(fetchData, 2000);
+    } else {
+      showToast('Restart failed: ' + JSON.stringify(d));
+    }
+  } catch(e) {
+    showToast('Error: ' + e.message);
+  }
+}
+
+async function restartDashboard() {
+  if (!confirm('Restart the dashboard?\\n\\nThe page will briefly disconnect and then reconnect.')) return;
+  showToast('Restarting dashboard...');
+  try {
+    await fetch('/api/restart-dashboard', { method: 'POST' });
+  } catch(e) { /* expected — server is restarting */ }
+  // Poll until dashboard comes back
+  setTimeout(function poll() {
+    fetch('/api/status').then(() => location.reload()).catch(() => setTimeout(poll, 1000));
+  }, 2000);
+}
+
+// --- Output panel (sync/reconcile) ---
+function openOutput(title) {
+  document.getElementById('output-title').textContent = title;
+  const body = document.getElementById('output-body');
+  body.textContent = 'Running...';
+  body.className = 'output-panel-body loading';
+  document.getElementById('output-overlay').classList.add('open');
+}
+function closeOutput() {
+  document.getElementById('output-overlay').classList.remove('open');
+}
+function showOutput(lines, isError) {
+  const body = document.getElementById('output-body');
+  body.className = 'output-panel-body';
+  body.innerHTML = lines.map(line => {
+    if (/^-{4,}/.test(line)) return '<span style="color:var(--border)">' + esc(line) + '</span>';
+    if (/error/i.test(line)) return '<span class="out-err">' + esc(line) + '</span>';
+    if (/discrepanc|mismatch|orphan|ghost|assignment|missing/i.test(line))
+      return '<span class="out-warn">' + esc(line) + '</span>';
+    if (/in sync|no discrep|reconciled|complete|imported/i.test(line))
+      return '<span class="out-ok">' + esc(line) + '</span>';
+    return esc(line);
+  }).join('\\n');
+  if (isError) body.innerHTML = '<span class="out-err">' + body.innerHTML + '</span>';
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+async function runSyncOrders() {
+  openOutput('Sync Orders');
+  try {
+    const r = await fetch('/api/sync-orders', { method: 'POST' });
+    const d = await r.json();
+    showOutput(d.lines || ['No output'], d.status === 'error');
+  } catch(e) {
+    showOutput(['Request failed: ' + e.message], true);
+  }
+}
+
+async function runReconcile() {
+  openOutput('Reconcile Positions');
+  try {
+    const r = await fetch('/api/reconcile-positions', { method: 'POST' });
+    const d = await r.json();
+    showOutput(d.lines || ['No output'], d.status === 'error');
+  } catch(e) {
+    showOutput(['Request failed: ' + e.message], true);
+  }
+}
+
+// Close output panel with Escape
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeOutput();
+});
 
 async function fetchData() {
   try {
@@ -1675,11 +2101,13 @@ async function fetchData() {
     }
 
     // Show/hide buttons based on state
-    document.getElementById('btn-start').style.display = alive ? 'none' : '';
-    document.getElementById('btn-stop').style.display = alive ? '' : 'none';
-    document.getElementById('btn-pause').style.display = alive && status.status === 'running' ? '' : 'none';
-    document.getElementById('btn-resume').style.display = alive && status.status === 'paused' ? '' : 'none';
-    document.getElementById('btn-force-scan').style.display = alive && status.status === 'running' ? '' : 'none';
+    // Update menu item visibility based on daemon state
+    document.getElementById('menu-start').style.display = alive ? 'none' : '';
+    document.getElementById('menu-stop').style.display = alive ? '' : 'none';
+    document.getElementById('menu-pause').style.display = alive && status.status === 'running' ? '' : 'none';
+    document.getElementById('menu-resume').style.display = alive && status.status === 'paused' ? '' : 'none';
+    document.getElementById('menu-force-scan').style.display = alive && status.status === 'running' ? '' : 'none';
+    document.getElementById('menu-restart-daemon').style.display = alive ? '' : 'none';
 
     // Watchdog indicator
     const wd = status.watchdog || {};
@@ -2086,9 +2514,10 @@ function fmtReasoning(s) {
   return t.replace(/^(<br>)+/, '').trim();
 }
 
-const dismissedRejections = new Set();
+const dismissedRejections = new Set(JSON.parse(sessionStorage.getItem('taad_dismissed_rej') || '[]'));
 function dismissRejection(id) {
   dismissedRejections.add(id);
+  sessionStorage.setItem('taad_dismissed_rej', JSON.stringify([...dismissedRejections]));
   fetchData();
 }
 
@@ -2258,6 +2687,28 @@ _DECISION_DETAIL_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
+// Auth token (injected by server or from sessionStorage)
+const _injected = '__AUTH_TOKEN__';
+const _authToken = (_injected && !_injected.includes('AUTH_TOKEN')) ? _injected : '';
+if (_authToken) sessionStorage.setItem('taad_token', _authToken);
+const _storedToken = _authToken || sessionStorage.getItem('taad_token') || '';
+const _origFetch = window.fetch;
+window.fetch = function(url, opts) {
+  if (_storedToken && typeof url === 'string' && url.startsWith('/api')) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    opts.headers['Authorization'] = 'Bearer ' + _storedToken;
+  }
+  return _origFetch.call(this, url, opts);
+};
+if (_storedToken) {
+  document.querySelectorAll('a[href^="/"]').forEach(a => {
+    const u = new URL(a.href);
+    u.searchParams.set('token', _storedToken);
+    a.href = u.toString();
+  });
+}
+
 const DECISION_ID = __DECISION_ID__;
 
 let _tz = localStorage.getItem('taad_tz') || 'ET';

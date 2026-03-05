@@ -168,6 +168,9 @@ def refresh_greeks(ibkr_client, db_session: Session) -> dict[str, Any]:
     today = us_trading_date()
     refreshed = 0
 
+    # Fetch VIX/SPY once for all positions
+    market_ctx = service._fetch_market_context()
+
     for trade in open_trades:
         try:
             # Check for existing snapshot today
@@ -185,7 +188,7 @@ def refresh_greeks(ibkr_client, db_session: Session) -> dict[str, Any]:
                 db_session.delete(existing)
                 db_session.flush()
 
-            snapshot = service._capture_single_position(trade, today)
+            snapshot = service._capture_single_position(trade, today, market_ctx)
             if snapshot:
                 db_session.add(snapshot)
                 refreshed += 1

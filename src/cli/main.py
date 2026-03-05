@@ -436,12 +436,17 @@ def dashboard(
 
     cfg = load_phase5_config(config)
     auth_token = cfg.dashboard.auth_token
+    # Use config values as defaults (CLI flags override)
+    host = host if host != "127.0.0.1" else cfg.dashboard.host
+    port = port if port != 8080 else cfg.dashboard.port
 
     dash_app = create_dashboard_app(auth_token=auth_token)
 
     console.print("[bold blue]🌐 Starting TAAD Dashboard[/bold blue]")
     console.print(f"[dim]Server: http://{host}:{port}[/dim]\n")
-    if not auth_token:
+    if auth_token:
+        console.print(f"[dim]Auth: token required (?token=...)[/dim]")
+    else:
         console.print("[yellow]No auth token configured — dashboard is unauthenticated[/yellow]")
     console.print("Press CTRL+C to stop the server\n")
 
@@ -5178,6 +5183,9 @@ def reconcile_positions(
     dry_run: bool = typer.Option(
         True, "--dry-run/--live", help="Dry run (preview) or live mode (apply fixes)"
     ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip confirmation prompt (for unattended/cron use)"
+    ),
 ):
     """Reconcile and sync positions between database and IBKR.
 
@@ -5213,7 +5221,7 @@ def reconcile_positions(
         console.print("[yellow]   - Close positions not in IBKR[/yellow]")
         console.print("[yellow]   - Update quantity mismatches[/yellow]\n")
 
-        if not typer.confirm("Are you sure you want to proceed?"):
+        if not yes and not typer.confirm("Are you sure you want to proceed?"):
             console.print("Cancelled.")
             raise typer.Exit(0)
 

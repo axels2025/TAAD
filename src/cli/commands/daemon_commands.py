@@ -545,14 +545,17 @@ def daemon_dashboard(
     init_database()
 
     cfg = load_phase5_config(config)
-    host = host or cfg.dashboard.host
-    port = port or cfg.dashboard.port
+    # Use config values as defaults (CLI flags override)
+    host = host if host != "127.0.0.1" else cfg.dashboard.host
+    port = port if port != 8080 else cfg.dashboard.port
     auth_token = cfg.dashboard.auth_token
 
     app = create_dashboard_app(auth_token=auth_token)
 
     console.print(f"[bold blue]Starting TAAD dashboard at http://{host}:{port}[/bold blue]")
-    if not auth_token:
+    if auth_token:
+        console.print(f"[dim]Auth: token required (?token=...)[/dim]")
+    else:
         console.print("[yellow]No auth token configured — dashboard is unauthenticated[/yellow]")
 
     uvicorn.run(app, host=host, port=port, log_level="warning")

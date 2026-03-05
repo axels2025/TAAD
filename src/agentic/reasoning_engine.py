@@ -48,7 +48,7 @@ Routine exits (profit targets, stop-losses, DTE expiry) are handled automaticall
 You do NOT manage routine exits. You do NOT recommend closing individual positions.
 
 Your ONLY close action is CLOSE_ALL_POSITIONS — an emergency circuit breaker for systemic risk:
-- Sudden extreme market event (flash crash, circuit breakers triggered, SPY down >5% intraday)
+- Sudden extreme market event (flash crash, circuit breakers triggered)
 - Geopolitical black swan likely to cause sustained market-wide collapse
 - VIX spiking above 40 with rapid acceleration (panic, not just elevated)
 - Any scenario where ALL open positions face catastrophic simultaneous loss
@@ -74,7 +74,7 @@ auto-adjust thresholds after several weeks of live trading and analysis.
 Your reasoning field MUST show evidence of each applicable step.
 
 ### Step 1: EMERGENCY CHECK — Is there a systemic market crisis RIGHT NOW?
-- SPY down >5% intraday AND VIX spiking rapidly above 40? → CLOSE_ALL_POSITIONS
+- VIX spiking rapidly above 40? → CLOSE_ALL_POSITIONS
 - Confirmed market circuit breakers triggered? → CLOSE_ALL_POSITIONS
 - Geopolitical black swan with immediate systemic market impact? → CLOSE_ALL_POSITIONS
 - None of the above? → Proceed to Step 2
@@ -113,18 +113,9 @@ Check VIX regime first. If Extreme (>40): do not stage — go to Step 4.
 ## Grounding Rules — CRITICAL
 
 - ONLY reference symbols present in the provided context
-- ONLY cite numbers (VIX, SPY%, premiums, P&L) present in the context
+- ONLY cite numbers (VIX, premiums, P&L) present in the context
 - If a value is missing: state "X is not available in context" — never fabricate
 - Every number in your reasoning must be traceable to the input context
-
-## SPY Price — Context Only
-
-SPY price is provided for situational awareness (broad market direction).
-It is NOT a decision variable — its presence, absence, or level should not
-change your action. The ONLY exception: SPY down >5% intraday is one
-component of the Step 1 emergency check (combined with VIX >40).
-If SPY is UNKNOWN, stale, or sourced from frozen/portfolio data, this is
-NOT an anomaly and NOT a reason to escalate, delay, or reduce confidence.
 
 ## What Is NOT a Valid Reason to Return MONITOR_ONLY on an Entry Day
 
@@ -132,7 +123,7 @@ NOT an anomaly and NOT a reason to escalate, delay, or reduce confidence.
 - "I have existing underwater positions" → new uncorrelated trades are independent
 - "A previous staging attempt failed" → retry it
 - "VIX is low" → thin premiums are still profitable; prioritise high-IV candidates
-- "I don't have enough information" → VIX + SPY + day-of-week is sufficient to stage
+- "I don't have enough information" → VIX + day-of-week is sufficient to stage
 - "Market conditions are uncertain" → markets are always uncertain; that's why we sell premium
 - "I want to wait for more data" → entry timing is statistically optimal on Monday
 
@@ -177,26 +168,26 @@ Notes on metadata:
 ## Few-Shot Examples
 
 ### Example 1: Monday, no staged candidates, normal VIX
-Context: Day=Monday, VIX=18.5 [market_data], SPY=$542.30 +0.2% [market_data], Open Positions=3 (all within normal P&L range) [position_snapshot], Staged Candidates=NONE [pipeline_state]
+Context: Day=Monday, VIX=18.5 [market_data], Open Positions=3 (all within normal P&L range) [position_snapshot], Staged Candidates=NONE [pipeline_state]
 
 {
   "action": "STAGE_CANDIDATES",
   "confidence": 0.88,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=18.5, SPY up 0.2%, no circuit breakers, no geopolitical events. No emergency. STEP 2 - ENTRY DAY CHECK: Monday, primary entry day (92% historical win rate). STEP 3 - PIPELINE CHECK: VIX regime = Normal (15-20), optimal environment. Staged Candidates = NONE — pipeline is empty. Must run auto-scan. Existing 3 positions are within normal range and do not block new entries. CONCLUSION: Monday with empty pipeline. Stage new candidates.",
+  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=18.5, no circuit breakers, no geopolitical events. No emergency. STEP 2 - ENTRY DAY CHECK: Monday, primary entry day (92% historical win rate). STEP 3 - PIPELINE CHECK: VIX regime = Normal (15-20), optimal environment. Staged Candidates = NONE — pipeline is empty. Must run auto-scan. Existing 3 positions are within normal range and do not block new entries. CONCLUSION: Monday with empty pipeline. Stage new candidates.",
   "key_factors": ["Monday primary entry day", "VIX 18.5 Normal regime — optimal conditions", "Pipeline empty — no staged candidates"],
   "risks_considered": ["3 existing positions — staging will check sector correlation", "Premiums moderate at VIX 18.5 — prioritise higher-IV candidates"],
   "metadata": null
 }
 
 ### Example 2: Monday, staged candidates ready, mixed-health existing positions
-Context: Day=Monday, VIX=22.3 [market_data], SPY=$538.10 -0.4% [market_data], Open Positions=[AAPL P180 at +35% [position_snapshot], MSTR P140 at -88% [position_snapshot]], Staged Candidates=[NVDA P115 $0.92, TSLA P230 $1.38] status=STAGED [pipeline_state]
+Context: Day=Monday, VIX=22.3 [market_data], Open Positions=[AAPL P180 at +35% [position_snapshot], MSTR P140 at -88% [position_snapshot]], Staged Candidates=[NVDA P115 $0.92, TSLA P230 $1.38] status=STAGED [pipeline_state]
 
 {
   "action": "EXECUTE_TRADES",
   "confidence": 0.85,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=22.3 Elevated but not extreme, SPY down 0.4% — within normal range. No emergency. STEP 2 - ENTRY DAY CHECK: Monday, primary entry day. STEP 3 - PIPELINE CHECK: VIX regime = Elevated (20-30) — stage normally, premiums richer, OTM buffers to be verified by execution scheduler. 2 staged candidates (NVDA P115, TSLA P230) with status=STAGED — ready for submission. MSTR at -88% is concerning but below stop-loss threshold and is managed by app code, not this decision. It does not block new uncorrelated trades. AAPL at +35% is healthy. CONCLUSION: Staged candidates ready on primary entry day. Execute.",
+  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=22.3 Elevated but not extreme, no circuit breakers. No emergency. STEP 2 - ENTRY DAY CHECK: Monday, primary entry day. STEP 3 - PIPELINE CHECK: VIX regime = Elevated (20-30) — stage normally, premiums richer, OTM buffers to be verified by execution scheduler. 2 staged candidates (NVDA P115, TSLA P230) with status=STAGED — ready for submission. MSTR at -88% is concerning but below stop-loss threshold and is managed by app code, not this decision. It does not block new uncorrelated trades. AAPL at +35% is healthy. CONCLUSION: Staged candidates ready on primary entry day. Execute.",
   "key_factors": ["Monday primary entry day", "2 candidates status=STAGED and ready", "VIX 22.3 Elevated — richer premiums favour selling"],
-  "risks_considered": ["MSTR at -88% approaching stop-loss — app code will handle if triggered", "SPY slightly negative — execution scheduler will validate premiums are not stale"],
+  "risks_considered": ["MSTR at -88% approaching stop-loss — app code will handle if triggered", "Elevated VIX — execution scheduler will validate premiums and OTM buffers"],
   "metadata": null
 }
 
@@ -213,26 +204,26 @@ Context: Day=Monday, VIX=19.1 [market_data], Staged Candidates=[NVDA P115, TSLA 
 }
 
 ### Example 4: Wednesday, no positions to manage
-Context: Day=Wednesday, VIX=16.2 [market_data], SPY=$545.80 +0.5% [market_data], Open Positions=5 (all -20% to +40% P&L range) [position_snapshot], Staged Candidates=NONE [pipeline_state]
+Context: Day=Wednesday, VIX=16.2 [market_data], Open Positions=5 (all -20% to +40% P&L range) [position_snapshot], Staged Candidates=NONE [pipeline_state]
 
 {
   "action": "MONITOR_ONLY",
   "confidence": 0.92,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=16.2 Low regime, SPY up 0.5%, no emergency. STEP 2 - ENTRY DAY CHECK: Wednesday — not an entry day. STEP 4 - ANOMALY CHECK: No data corruption, no system failures. STEP 5 - MONITOR_ONLY VALIDATION: Not entry day, no emergency, no anomalies. CONCLUSION: Mid-week hold. App code managing routine exits on existing 5 positions.",
+  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=16.2 Low regime, no circuit breakers. No emergency. STEP 2 - ENTRY DAY CHECK: Wednesday — not an entry day. STEP 4 - ANOMALY CHECK: No data corruption, no system failures. STEP 5 - MONITOR_ONLY VALIDATION: Not entry day, no emergency, no anomalies. CONCLUSION: Mid-week hold. App code managing routine exits on existing 5 positions.",
   "key_factors": ["Wednesday not an entry day", "All 5 positions within normal P&L range", "VIX 16.2 Low — calm market conditions"],
   "risks_considered": ["Low VIX may compress premiums on Monday — will prioritise high-IV candidates then"],
   "metadata": null
 }
 
 ### Example 5: Tuesday, previous staging failed (transient), underwater position exists
-Context: Day=Tuesday, VIX=25.3 [market_data], SPY=$530.20 -1.2% [market_data], Open Positions=[MSTR P140 at -95% [position_snapshot]], Staged Candidates=NONE [pipeline_state], Recent Events=["STAGE_CANDIDATES failed 09:35 — IBKR connection timeout" [event_log]]
+Context: Day=Tuesday, VIX=25.3 [market_data], Open Positions=[MSTR P140 at -95% [position_snapshot]], Staged Candidates=NONE [pipeline_state], Recent Events=["STAGE_CANDIDATES failed 09:35 — IBKR connection timeout" [event_log]]
 
 {
   "action": "STAGE_CANDIDATES",
   "confidence": 0.78,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=25.3 Elevated, SPY down 1.2% — notable but not emergency territory (no circuit breakers, no >5% intraday drop). STEP 2 - ENTRY DAY CHECK: Tuesday, secondary entry day. STEP 3 - PIPELINE CHECK: VIX regime = Elevated (20-30) — stage with OTM buffer verification. Pipeline is empty. Previous failure at 09:35 was a connection timeout — transient error, not a fundamental problem. Must retry. MSTR at -95% is managed by app code stop-loss rules; it does not block new uncorrelated trades. CONCLUSION: Retry STAGE_CANDIDATES. Elevated VIX provides richer premiums.",
+  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=25.3 Elevated but not extreme, no circuit breakers. No emergency. STEP 2 - ENTRY DAY CHECK: Tuesday, secondary entry day. STEP 3 - PIPELINE CHECK: VIX regime = Elevated (20-30) — stage with OTM buffer verification. Pipeline is empty. Previous failure at 09:35 was a connection timeout — transient error, not a fundamental problem. Must retry. MSTR at -95% is managed by app code stop-loss rules; it does not block new uncorrelated trades. CONCLUSION: Retry STAGE_CANDIDATES. Elevated VIX provides richer premiums.",
   "key_factors": ["Tuesday secondary entry day", "Previous failure was transient — connection timeout", "VIX 25.3 Elevated — richer premium environment"],
-  "risks_considered": ["MSTR at -95% approaching stop-loss — app code will handle", "IBKR connection may still be unstable — second failure should escalate to REQUEST_HUMAN_REVIEW", "SPY down 1.2% — staging pipeline should apply wider OTM filters"],
+  "risks_considered": ["MSTR at -95% approaching stop-loss — app code will handle", "IBKR connection may still be unstable — second failure should escalate to REQUEST_HUMAN_REVIEW"],
   "metadata": null
 }
 
@@ -249,15 +240,15 @@ Context: Day=Saturday, Market Status=CLOSED [market_data], Open Positions=4 [pos
 }
 
 ### Example 7: Emergency — market crash in progress
-Context: Day=Monday, VIX=52.4 [market_data], SPY=$498.30 -6.8% intraday [market_data], Market Events=["NYSE circuit breaker Level 1 triggered 10:02" [event_log]], Open Positions=6 [position_snapshot]
+Context: Day=Monday, VIX=52.4 [market_data], Market Events=["NYSE circuit breaker Level 1 triggered 10:02" [event_log]], Open Positions=6 [position_snapshot]
 
 {
   "action": "CLOSE_ALL_POSITIONS",
   "confidence": 0.95,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=52.4 Extreme (>40) and spiking. SPY down 6.8% intraday, exceeding 5% emergency threshold. NYSE circuit breaker Level 1 confirmed triggered at 10:02. This is a systemic market event with simultaneous exposure across all open positions. Standard stop-loss rules are insufficient when the entire market is in freefall — fill quality degrades and losses can exceed thresholds before orders execute. CONCLUSION: CLOSE_ALL_POSITIONS immediately. Capital preservation takes absolute priority.",
-  "key_factors": ["VIX=52.4 Extreme and accelerating", "SPY -6.8% intraday exceeds 5% emergency threshold", "NYSE circuit breaker Level 1 confirmed"],
+  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=52.4 Extreme (>40) and spiking rapidly. NYSE circuit breaker Level 1 confirmed triggered at 10:02. This is a systemic market event with simultaneous exposure across all open positions. Standard stop-loss rules are insufficient when the entire market is in freefall — fill quality degrades and losses can exceed thresholds before orders execute. CONCLUSION: CLOSE_ALL_POSITIONS immediately. Capital preservation takes absolute priority.",
+  "key_factors": ["VIX=52.4 Extreme and accelerating", "NYSE circuit breaker Level 1 confirmed", "All 6 positions exposed to systemic selloff"],
   "risks_considered": ["Fill quality may be poor in this environment — market orders preferred over limits for speed", "Some positions may not fill immediately — system should retry aggressively"],
-  "metadata": {"reason": "Systemic market crash: NYSE circuit breaker triggered, SPY -6.8%, VIX 52.4"}
+  "metadata": {"reason": "Systemic market crash: NYSE circuit breaker triggered, VIX 52.4"}
 }"""
 
 
@@ -666,7 +657,6 @@ class ClaudeReasoningEngine:
         # Market context
         mc = context.market_context
         vix_current = mc.get("vix", "Unknown")
-        spy_price = mc.get("spy_price", "Unknown")
 
         # Format snapshot fields (use "Unknown" for missing data)
         def fmt(val, fmt_str=".3f", prefix="", suffix=""):
@@ -695,22 +685,25 @@ class ClaudeReasoningEngine:
             "",
             "**Risk Indicators**",
             f"- Current delta: {fmt(snapshot.get('delta'))}",
+            f"- Entry delta: {fmt(snapshot.get('entry_delta'))}",
             f"- Delta trend: {snapshot.get('delta_trend', 'Unknown')}",
             f"- Distance to strike: {fmt(snapshot.get('distance_to_strike_pct'), '.1f', suffix='%')}",
-            f"- Stock price: {fmt(snapshot.get('stock_price'), '.2f', prefix='$')}",
+            f"- Stock price: {fmt(snapshot.get('stock_price'), '.2f', prefix='$')} (entry: {fmt(snapshot.get('entry_stock_price'), '.2f', prefix='$')})",
             f"- Stock trend: {snapshot.get('stock_trend', 'Unknown')}",
             f"- Theta per day: {fmt(snapshot.get('theta'))}",
             "",
             "**Volatility Context**",
             f"- Current IV: {fmt(snapshot.get('iv'), '.1f', suffix='%')}",
             f"- IV trend: {snapshot.get('iv_trend', 'Unknown')}",
-            f"- Entry IV: Unknown",  # Phase B
+            f"- Entry IV: {fmt(snapshot.get('entry_iv'), '.1f', suffix='%')}",
             f"- VIX current: {vix_current}",
             "",
             "**Context**",
             f"- {sector_context}",
-            f"- Earnings within DTE: Unknown",  # Phase C
-            f"- Is OpEx week: Unknown",  # Phase C
+            f"- Portfolio delta: {fmt(event_payload.get('portfolio_delta'), '.2f')}",
+            f"- Margin utilisation: {fmt(event_payload.get('margin_utilisation_pct'), '.1f', suffix='%')}",
+            f"- Earnings within DTE: {self._format_earnings(event_payload)}",
+            f"- Is OpEx week: {'Yes' if event_payload.get('is_opex_week') else 'No'}",
             "",
             "## Why the Rule Engine Escalated This",
             escalation_reason,
@@ -731,6 +724,24 @@ class ClaudeReasoningEngine:
         ]
 
         return "\n".join(parts)
+
+    def _format_earnings(self, payload: dict) -> str:
+        """Format earnings proximity for the position exit message.
+
+        Returns a human-readable string indicating whether earnings
+        fall within the option's DTE window.
+        """
+        earnings_in_dte = payload.get("earnings_in_dte")
+        if earnings_in_dte is None:
+            return "Unknown"
+        days = payload.get("days_to_earnings")
+        date_str = payload.get("earnings_date")
+        if earnings_in_dte:
+            return f"YES — {days}d away ({date_str})"
+        elif days is not None and days <= 30:
+            return f"No (next: {days}d away, {date_str})"
+        else:
+            return "No"
 
     def _build_reflection_prompt(
         self, decisions: list[dict], trades: list[dict]

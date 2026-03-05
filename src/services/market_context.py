@@ -16,6 +16,37 @@ from loguru import logger
 from src.utils.timezone import us_trading_date
 
 
+def is_opex_week(today: Optional[date] = None) -> bool:
+    """Check if given date falls in options expiration week (week of 3rd Friday).
+
+    Args:
+        today: Date to check. Defaults to current US trading date.
+
+    Returns:
+        True if the date is within the Mon–Fri week containing the 3rd Friday.
+    """
+    if today is None:
+        today = us_trading_date()
+
+    cal = calendar.Calendar(firstweekday=calendar.SUNDAY)
+    fridays = [
+        d
+        for d in cal.itermonthdates(today.year, today.month)
+        if d.weekday() == 4 and d.month == today.month
+    ]
+
+    if len(fridays) < 3:
+        return False
+
+    third_friday = fridays[2]
+
+    # Week of 3rd Friday: Monday through Friday
+    week_start = third_friday - timedelta(days=third_friday.weekday())
+    week_end = week_start + timedelta(days=4)
+
+    return week_start <= today <= week_end
+
+
 @dataclass
 class MarketContext:
     """Broad market context at trade time.
@@ -302,31 +333,9 @@ class MarketContextService:
     def _is_opex_week(self, today: date) -> bool:
         """Check if current week is options expiration week (3rd Friday).
 
-        Args:
-            today: Current date
-
-        Returns:
-            True if in OpEx week, False otherwise
+        Delegates to the module-level is_opex_week() function.
         """
-        # Find 3rd Friday of the month
-        cal = calendar.Calendar(firstweekday=calendar.SUNDAY)
-        fridays = [
-            d
-            for d in cal.itermonthdates(today.year, today.month)
-            if d.weekday() == 4 and d.month == today.month
-        ]
-
-        if len(fridays) < 3:
-            return False
-
-        third_friday = fridays[2]
-
-        # Check if today is within the week of 3rd Friday (Mon-Fri)
-        # Week starts on Monday before 3rd Friday
-        week_start = third_friday - timedelta(days=(third_friday.weekday()))
-        week_end = week_start + timedelta(days=4)  # Friday
-
-        return week_start <= today <= week_end
+        return is_opex_week(today)
 
     def _days_to_next_fomc(self, today: date) -> int:
         """Calculate days until next FOMC meeting.

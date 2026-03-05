@@ -40,9 +40,9 @@ alerts:
   webhook_high_and_above: true
 dashboard:
   enabled: true
-  host: 127.0.0.1
+  host: 0.0.0.0
   port: 8080
-  auth_token: ''
+  auth_token: '3nklKbPELgWAs5x0hN0Wj4P4vRBTU2x214i3lzNRFHg'
 learning:
   eod_reflection_time: '16:30'
   min_trades_for_experiment: 10

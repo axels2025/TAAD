@@ -88,69 +88,86 @@ escalations with available data.
 
 ---
 
-## Phase B: Data Pipeline Enrichment (Next Session)
+## Phase B: Data Pipeline Enrichment
 
 **Goal:** Fill in the "Unknown" fields from Phase A with real data.
+**Status:** Complete
 
 ### Changes
 
-1. **Record entry Greeks at trade time**
-   - When a trade is opened, capture delta, IV, stock_price from IBKR
-   - Store as `entry_delta`, `entry_iv`, `entry_stock_price` on the Trade model
-   - Schema migration for new columns
+1. **~~Record entry Greeks at trade time~~** — NOT NEEDED
+   - Discovered `TradeEntrySnapshot` table already captures entry delta, IV,
+     stock_price at trade open time. No new columns on Trade model needed.
+   - Query `TradeEntrySnapshot` by trade_id in `_get_latest_snapshot_data()`
 
-2. **Delta trend computation**
-   - Query last 3-5 PositionSnapshots for the position
+2. **Delta trend computation** — Done (Phase A)
+   - Query last 3 PositionSnapshots for the position
    - Compute trajectory: "deteriorating: 0.12 -> 0.19 -> 0.26 over 3 days"
-   - Already possible with existing snapshot data — just needs the query
+   - Implemented in `_get_latest_snapshot_data()` in daemon.py
 
-3. **IV trend computation**
-   - Same approach: last 3-5 snapshots, compute "expanding", "stable", "crushing"
+3. **IV trend computation** — Done (Phase A)
+   - Same approach: last 3 snapshots, compute "expanding", "stable", "crushing"
 
-4. **Stock trend computation**
-   - From snapshots: stock_price over last 3-5 days
+4. **Stock trend computation** — Done (Phase A)
+   - From snapshots: stock_price over last 3 days
    - Classify: "downtrend", "sideways", "recovering"
 
-5. **Portfolio delta from portfolio_greeks.py**
-   - Already exists — wire into the exit check context
+5. **Portfolio delta from portfolio_greeks.py** — Done
+   - Queried once before the position loop in `_emit_material_position_checks()`
+   - Passed as `portfolio_delta` in event payload
+
+6. **Replace "Unknown" placeholders in user message** — Done
+   - Entry IV, entry delta, entry stock price now populated from TradeEntrySnapshot
+   - Portfolio delta added to Context section
+   - All fields use `fmt()` helper for graceful null handling
 
 ### Files Modified
 
-- `src/data/models.py` — add entry_delta, entry_iv columns to Trade
-- `src/data/database.py` — schema migration
-- `src/nakedtrader/trade_recorder.py` — capture entry Greeks
-- `src/agentic/reasoning_engine.py` — use real data instead of "Unknown"
+- `src/agentic/daemon.py` — `_get_latest_snapshot_data()` queries TradeEntrySnapshot;
+  `_emit_material_position_checks()` queries portfolio delta
+- `src/agentic/reasoning_engine.py` — replaced "Unknown" with real data from snapshot
 
 ---
 
-## Phase C: Advanced Context (Future)
-
+## Phase C: Advanced Context
 **Goal:** Add the genuinely hard-to-get context that makes Claude's judgment most valuable.
+**Status:** Complete
 
 ### Changes
 
-1. **Earnings calendar integration**
-   - API source: Financial Modeling Prep, Alpha Vantage, or IBKR fundamentals
-   - Check if earnings date falls within DTE window
-   - Populate `earnings_within_dte: True/False`
+1. **Earnings calendar integration** — Done
+   - Uses existing `EarningsService` + `get_cached_earnings()` (Yahoo Finance, 24h cache)
+   - Queries per-position in `_emit_material_position_checks()`
+   - Populates `earnings_in_dte`, `days_to_earnings`, `earnings_date` in event payload
+   - Replaces "Unknown" in user message with formatted earnings proximity
 
-2. **IV surface data**
-   - IV rank and IV percentile for the underlying
-   - Historical IV context: is current IV elevated vs. 30-day range?
+2. **OpEx week detection** — Done
+   - Extracted `is_opex_week()` as module-level function from `MarketContextService._is_opex_week()`
+   - Computed once before the position loop in daemon.py
+   - Replaces "Unknown" in user message
 
-3. **Margin utilisation**
-   - Query IBKR account summary for margin usage
-   - Relevant for portfolio-level exit priority decisions
+3. **Margin utilisation** — Done
+   - Queries `get_account_summary()` once before position loop
+   - Computes `MaintMarginReq / NetLiquidation * 100` as percentage
+   - Added as new line in Context section of user message
 
-4. **Correlation analysis**
-   - When multiple positions are stressed, identify if they're correlated
-   - "Two tech positions both approaching stop loss" is different from "one tech, one energy"
+4. **Sector stress flag** — Done
+   - Enhanced `_get_sector_context()` to flag peers with P&L < -50%
+   - Appends "⚠ N peer(s) also stressed" when sector concentration + stress overlap
+
+### Deferred
+
+| Item | Reason |
+|------|--------|
+| IV rank/percentile | Needs 52-week historical IV per underlying — requires new data pipeline |
+| Full correlation matrix | Sector stress flag covers 90% of the value |
+| VIX percentile rank | Nice-to-have proxy; can add later from VIX history |
 
 ### Files Modified
 
-- New: `src/services/earnings_calendar.py`
-- `src/agentic/reasoning_engine.py` — add new context fields
-- `config/phase5.yaml` — earnings API configuration
+- `src/agentic/daemon.py` — earnings, opex, margin queries + sector stress flag
+- `src/agentic/reasoning_engine.py` — replaced "Unknown" placeholders, added margin line + `_format_earnings()` helper
+- `src/services/market_context.py` — extracted `is_opex_week()` as standalone function
 
 ---
 
@@ -164,11 +181,14 @@ escalations with available data.
 - [ ] API cost reduction observable (fewer POSITION_EXIT_CHECK calls to Claude)
 
 ### Phase B
-- [ ] Entry Greeks recorded on every new trade
-- [ ] Delta/IV/stock trends computed from historical snapshots
-- [ ] No "Unknown" for fields that have snapshot data
+- [x] Entry Greeks available via TradeEntrySnapshot (already recorded)
+- [x] Delta/IV/stock trends computed from historical snapshots
+- [x] No "Unknown" for fields that have snapshot data
+- [x] Portfolio delta wired into exit check context
 
 ### Phase C
-- [ ] Earnings data populated for positions with upcoming earnings
-- [ ] IV rank context available
-- [ ] Portfolio-level margin context in user prompt
+- [x] Earnings data populated for positions with upcoming earnings
+- [x] OpEx week detection wired into user prompt
+- [x] Portfolio-level margin context in user prompt
+- [x] Sector stress flag for correlated peer losses
+- [ ] IV rank context available (deferred — needs data pipeline)

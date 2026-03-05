@@ -132,8 +132,13 @@ class ReasoningContext:
 
         if self.market_context:
             sections.append("\n## Market Context [source: IBKR live data]")
+            # spy_price is collected for the learning system but excluded
+            # from Claude's prompt — it's not a decision variable and
+            # generates noise ("UNKNOWN") outside market hours.
+            prompt_exclude = {"spy_price"}
             for key, val in self.market_context.items():
-                sections.append(f"  - {key}: {val}")
+                if key not in prompt_exclude:
+                    sections.append(f"  - {key}: {val}")
 
         if self.active_patterns:
             sections.append(f"\n## Active Patterns ({len(self.active_patterns)}) [source: pattern detector]")

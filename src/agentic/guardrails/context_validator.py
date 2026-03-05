@@ -206,7 +206,7 @@ class ContextValidator:
         limitations = []
         market = context.market_context or {}
 
-        critical_market_fields = ["vix", "spy_price", "conditions_favorable"]
+        critical_market_fields = ["vix", "conditions_favorable"]
         for field_name in critical_market_fields:
             if market.get(field_name) is None:
                 limitations.append(f"{field_name} is unavailable")

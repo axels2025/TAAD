@@ -326,6 +326,29 @@ _PROMPT_HTML = """<!DOCTYPE html>
   .toast.show { opacity: 1; }
   .toast.error { border-color: var(--red); color: var(--red); }
 
+  /* Fullscreen modal overlay */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; z-index: 200;
+    background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(4px);
+  }
+  .modal-overlay.open { display: flex; flex-direction: column; }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 24px; background: var(--bg2); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .modal-header h2 { font-size: 14px; color: var(--accent); font-weight: 600; }
+  .modal-header .modal-meta { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 12px; }
+  .modal-body { flex: 1; padding: 16px 24px; overflow: hidden; display: flex; flex-direction: column; }
+  .modal-body textarea {
+    flex: 1; width: 100%; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 16px; border-radius: 6px; font-family: inherit;
+    font-size: 13px; line-height: 1.7; resize: none; tab-size: 2;
+  }
+  .modal-body textarea:focus { border-color: var(--accent); outline: none; }
+  .btn-expand { background: transparent; color: var(--text-dim); border: 1px solid var(--border); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 11px; transition: all 0.15s; }
+  .btn-expand:hover { border-color: var(--accent); color: var(--accent); }
+
   /* Tab panels */
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
@@ -357,6 +380,22 @@ _PROMPT_HTML = """<!DOCTYPE html>
 </div>
 
 <div class="toast" id="toast"></div>
+
+<div class="modal-overlay" id="prompt-modal">
+  <div class="modal-header">
+    <h2 id="modal-title">Prompt Builder</h2>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div class="modal-meta">
+        <span id="modal-charcount">0 chars</span>
+        <span id="modal-badge" class="badge badge-default">Built-in Default</span>
+      </div>
+      <button class="btn btn-outline" onclick="closeModal()" title="Esc to close">Close</button>
+    </div>
+  </div>
+  <div class="modal-body">
+    <textarea id="modal-editor" oninput="onModalInput()"></textarea>
+  </div>
+</div>
 
 <script>
 const PROMPT_KEYS = [
@@ -455,7 +494,10 @@ function renderAll() {
     panelHtml += '<span class="badge ' + (isCustom ? 'badge-custom' : 'badge-default') + '" id="badge-' + key + '">' + (isCustom ? 'Custom' : 'Built-in Default') + '</span>';
     panelHtml += '<span id="charcount-' + key + '">' + (p.active || '').length.toLocaleString() + ' chars</span>';
     panelHtml += '</div>';
+    panelHtml += `<div style="display:flex;gap:6px;">`;
+    panelHtml += `<button class="btn-expand" onclick="openModal('${key}')" title="Open full-screen editor">Expand</button>`;
     panelHtml += `<button class="btn btn-red" onclick="resetPrompt('${key}')">Reset to Default</button>`;
+    panelHtml += `</div>`;
     panelHtml += '</div>';
     panelHtml += `<textarea class="prompt-editor" id="editor-${key}" oninput="markDirty(); updateCharCount('${key}'); updateBadge('${key}')">${esc(p.active)}</textarea>`;
 
@@ -553,6 +595,71 @@ async function savePrompts() {
   btn.innerHTML = 'Save Changes';
   btn.disabled = false;
 }
+
+// ---------- Fullscreen Modal ----------
+
+let _modalKey = null;
+
+function openModal(key) {
+  _modalKey = key;
+  const p = _prompts[key];
+  const ta = document.getElementById('editor-' + key);
+  const modal = document.getElementById('prompt-modal');
+  const editor = document.getElementById('modal-editor');
+
+  document.getElementById('modal-title').textContent = (p?.label || key) + ' — Prompt Builder';
+  editor.value = ta ? ta.value : (p?.active || '');
+  updateModalMeta();
+  modal.classList.add('open');
+  editor.focus();
+}
+
+function closeModal() {
+  const modal = document.getElementById('prompt-modal');
+  if (!_modalKey) { modal.classList.remove('open'); return; }
+
+  // Sync modal content back to the tab editor
+  const editor = document.getElementById('modal-editor');
+  const ta = document.getElementById('editor-' + _modalKey);
+  if (ta && editor.value !== ta.value) {
+    ta.value = editor.value;
+    markDirty();
+    updateCharCount(_modalKey);
+    updateBadge(_modalKey);
+  }
+
+  _modalKey = null;
+  modal.classList.remove('open');
+}
+
+function onModalInput() {
+  updateModalMeta();
+  // Live-sync to tab editor so save picks up changes
+  if (_modalKey) {
+    const ta = document.getElementById('editor-' + _modalKey);
+    const editor = document.getElementById('modal-editor');
+    if (ta) ta.value = editor.value;
+    markDirty();
+    updateCharCount(_modalKey);
+    updateBadge(_modalKey);
+  }
+}
+
+function updateModalMeta() {
+  const editor = document.getElementById('modal-editor');
+  document.getElementById('modal-charcount').textContent = editor.value.length.toLocaleString() + ' chars';
+  if (_modalKey && _prompts[_modalKey]) {
+    const isCustom = editor.value.trim() !== '' && editor.value.trim() !== (_prompts[_modalKey].builtin_default || '').trim();
+    const badge = document.getElementById('modal-badge');
+    badge.className = 'badge ' + (isCustom ? 'badge-custom' : 'badge-default');
+    badge.textContent = isCustom ? 'Custom' : 'Built-in Default';
+  }
+}
+
+// Close modal on Escape key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && _modalKey) closeModal();
+});
 
 // Warn on unsaved changes
 window.addEventListener('beforeunload', (e) => {

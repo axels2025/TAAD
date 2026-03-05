@@ -182,7 +182,7 @@ def test_spy_out_of_range_blocks(validator, config):
 
 
 def test_spy_zero_treated_as_unavailable(validator, config):
-    """SPY price 0.0 (IBKR failure) should be treated as unavailable, not block."""
+    """SPY price 0.0 (IBKR failure) should be nulled by consistency check, not block."""
     context = FakeContext(market_context={"vix": 15.0, "spy_price": 0.0})
 
     results = validator.validate(context, config)
@@ -191,9 +191,10 @@ def test_spy_zero_treated_as_unavailable(validator, config):
     # Should NOT produce a block — 0.0 is unavailable, not implausible
     blocked = [r for r in consistency if not r.passed and r.severity == "block"]
     assert len(blocked) == 0
-    # Consistency nulls the field; null_sanitization then replaces with "UNKNOWN"
-    assert context.market_context["spy_price"] == "UNKNOWN"
-    assert any("spy_price" in lim for lim in context.data_limitations)
+    # Consistency nulls the field (spy_price is NOT a critical field for
+    # null_sanitization — it's excluded from Claude's prompt, so no "UNKNOWN"
+    # replacement and no data_limitations entry)
+    assert context.market_context["spy_price"] is None
 
 
 def test_vix_zero_treated_as_unavailable(validator, config):
@@ -223,20 +224,24 @@ def test_valid_values_pass(validator, config):
 
 
 def test_null_fields_replaced_and_listed_in_limitations(validator, config):
-    """None values in critical fields should be replaced and tracked."""
+    """None values in critical fields should be replaced and tracked.
+
+    spy_price is NOT a critical field (excluded from Claude's prompt),
+    so only vix and conditions_favorable are sanitized.
+    """
     context = FakeContext(market_context={"vix": None, "spy_price": None})
 
     results = validator.validate(context, config)
     null_results = [r for r in results if r.guard_name == "null_sanitization"]
 
     assert len(null_results) >= 1
-    # Fields should be replaced with "UNKNOWN"
+    # vix is critical — should be replaced with "UNKNOWN"
     assert context.market_context["vix"] == "UNKNOWN"
-    assert context.market_context["spy_price"] == "UNKNOWN"
-    # Data limitations should be populated
-    assert len(context.data_limitations) >= 2
+    # spy_price is NOT critical — stays None (learning system only)
+    assert context.market_context["spy_price"] is None
+    # Only vix should be in data limitations
+    assert len(context.data_limitations) >= 1
     assert any("vix" in lim for lim in context.data_limitations)
-    assert any("spy_price" in lim for lim in context.data_limitations)
 
 
 def test_no_nulls_no_limitations(validator, config):
@@ -253,17 +258,22 @@ def test_no_nulls_no_limitations(validator, config):
 
 
 def test_partial_nulls_tracked(validator, config):
-    """Only null fields should be tracked in limitations."""
+    """Only null critical fields should be tracked in limitations.
+
+    spy_price is NOT a critical field, so a None spy_price alone
+    should produce zero data limitations.
+    """
     context = FakeContext(
         market_context={"vix": 20.0, "spy_price": None, "conditions_favorable": True}
     )
 
     results = validator.validate(context, config)
 
-    assert context.market_context["spy_price"] == "UNKNOWN"
+    # spy_price stays None — not a critical field
+    assert context.market_context["spy_price"] is None
     assert context.market_context["vix"] == 20.0  # Unchanged
-    assert len(context.data_limitations) == 1
-    assert "spy_price" in context.data_limitations[0]
+    # No critical fields are null → no limitations
+    assert len(context.data_limitations) == 0
 
 
 # ---------- Disabled Guards ----------

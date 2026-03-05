@@ -1703,6 +1703,33 @@ class TAADDaemon:
         # Check for positions that are suppressed (pending approval or rejected today)
         suppressed_tids = self._get_suppressed_close_trade_ids(db)
 
+        # Portfolio-level Greeks (queried once for all positions)
+        portfolio_delta = None
+        try:
+            from src.services.portfolio_greeks import get_portfolio_greeks
+
+            pg = get_portfolio_greeks(db)
+            portfolio_delta = pg.get("portfolio", {}).get("total_delta")
+        except Exception as e:
+            logger.debug(f"Portfolio Greeks query failed: {e}")
+
+        # OpEx week (pure date calculation — queried once)
+        from src.services.market_context import is_opex_week
+
+        opex_week = is_opex_week()
+
+        # Margin utilisation (queried once for all positions)
+        margin_util = None
+        try:
+            if self.ibkr_client and self.ibkr_client.is_connected():
+                acct = self.ibkr_client.get_account_summary()
+                nlv = acct.get("NetLiquidation", 0)
+                maint = acct.get("MaintMarginReq", 0)
+                if nlv and nlv > 0:
+                    margin_util = round(maint / nlv * 100, 1)
+        except Exception as e:
+            logger.debug(f"Margin query failed: {e}")
+
         emitted = 0
         for trade in open_trades:
             if trade.trade_id in exited_pids:
@@ -1733,6 +1760,25 @@ class TAADDaemon:
             # Find same-sector positions
             sector_context = self._get_sector_context(trade, open_trades, db)
 
+            # Earnings proximity (24h-cached per symbol)
+            earnings_in_dte = None
+            days_to_earnings = None
+            earnings_date_str = None
+            try:
+                from src.services.earnings_service import get_cached_earnings
+
+                earnings_info = get_cached_earnings(
+                    trade.symbol,
+                    option_expiration=trade.expiration,
+                )
+                earnings_in_dte = earnings_info.earnings_in_dte
+                days_to_earnings = earnings_info.days_to_earnings
+                earnings_date_str = (
+                    str(earnings_info.earnings_date) if earnings_info.earnings_date else None
+                )
+            except Exception as e:
+                logger.debug(f"Earnings query failed for {trade.symbol}: {e}")
+
             self.event_bus.emit(
                 EventType.POSITION_EXIT_CHECK,
                 payload={
@@ -1745,6 +1791,12 @@ class TAADDaemon:
                     "escalation_reason": escalation,
                     "snapshot": snapshot_data,
                     "sector_context": sector_context,
+                    "portfolio_delta": portfolio_delta,
+                    "is_opex_week": opex_week,
+                    "margin_utilisation_pct": margin_util,
+                    "earnings_in_dte": earnings_in_dte,
+                    "days_to_earnings": days_to_earnings,
+                    "earnings_date": earnings_date_str,
                 },
             )
             emitted += 1
@@ -1817,13 +1869,32 @@ class TAADDaemon:
     def _get_latest_snapshot_data(self, trade: Trade, db: Session) -> dict:
         """Get latest position snapshot data for enriched context.
 
-        Queries the most recent PositionSnapshot and last 3 snapshots for
-        trend computation.
+        Queries:
+        1. TradeEntrySnapshot for entry Greeks (delta, IV, stock_price at entry)
+        2. Most recent PositionSnapshot for current Greeks
+        3. Last 3 PositionSnapshots for trend computation
 
         Returns:
-            Dict with delta, theta, iv, stock_price, trends, etc.
+            Dict with current + entry delta, theta, iv, stock_price, trends, etc.
         """
         result: dict = {}
+
+        # Entry Greeks from TradeEntrySnapshot (captured at trade open)
+        try:
+            from src.data.models import TradeEntrySnapshot
+
+            entry_snap = (
+                db.query(TradeEntrySnapshot)
+                .filter(TradeEntrySnapshot.trade_id == trade.id)
+                .first()
+            )
+            if entry_snap:
+                result["entry_delta"] = entry_snap.delta
+                result["entry_iv"] = entry_snap.iv
+                result["entry_stock_price"] = entry_snap.stock_price
+        except Exception as e:
+            logger.debug(f"Entry snapshot query failed for {trade.symbol}: {e}")
+
         try:
             from src.data.models import PositionSnapshot
 
@@ -1909,11 +1980,13 @@ class TAADDaemon:
                 return "Unknown sector"
 
             peers = []
+            peer_pnls = []
             for t in all_trades:
                 if t.trade_id == trade.trade_id:
                     continue
                 if get_sector(t.symbol) == target_sector:
                     pnl = self._get_position_pnl_pct(t, db)
+                    peer_pnls.append(pnl)
                     pnl_str = f"{pnl:+.0f}%" if pnl is not None else "?"
                     from src.utils.timezone import trading_date
 
@@ -1924,7 +1997,16 @@ class TAADDaemon:
             if not peers:
                 return f"Sector: {target_sector} — no other positions"
 
-            return f"Sector: {target_sector} — also holding: {', '.join(peers)}"
+            result = f"Sector: {target_sector} — also holding: {', '.join(peers)}"
+
+            # Flag if same-sector peers are also stressed (P&L < -50%)
+            stressed_count = sum(
+                1 for p in peer_pnls if p is not None and p < -50
+            )
+            if stressed_count:
+                result += f" \u26a0 {stressed_count} peer(s) also stressed"
+
+            return result
         except Exception as e:
             logger.debug(f"Sector context failed: {e}")
             return "Unknown"
@@ -2734,24 +2816,37 @@ class TAADDaemon:
         Used to skip redundant Claude calls on SCHEDULED_CHECK when
         nothing actionable has changed since the last check.
 
-        Fingerprinted fields (chosen because they represent actionable state):
-        - open_positions: count + symbols (new trade opened/closed)
-        - P&L buckets: ±10% ranges (crosses a threshold)
-        - staged_candidates: count + symbols + states (user staged/unstaged)
-        - conditions_favorable: market regime flipped
-        - VIX bucket: rounded to nearest 1.0
-        - autonomy_level: level changed
-        - anomalies count: new anomaly recorded
+        Buckets are deliberately wide — aligned with actual decision
+        thresholds so only regime-level changes trigger a new Claude call:
+        - P&L: 25% buckets (profit zone 0-25-50-75, loss zone 0/-25/-50/...)
+        - VIX: regime boundaries (15/20/30/40) not unit increments
+        - Positions: count + symbols (new trade opened/closed)
+        - Staged candidates: presence + state changes
         """
-        # Bucket P&L to ±10% ranges so minor tick changes don't trigger
+        # P&L bucketed to 25% ranges — aligned with exit thresholds.
+        # A position moving from +55% to +68% stays in the same bucket;
+        # only a cross into +75% (next bucket) triggers a new check.
         pnl_buckets = []
         for p in context.open_positions:
             pnl_pct = p.get("pnl_pct", "0")
             try:
                 val = float(str(pnl_pct).replace("%", "").replace("+", ""))
-                pnl_buckets.append(int(val / 10))  # bucket to 10% ranges
+                pnl_buckets.append(int(val / 25))
             except (ValueError, TypeError):
                 pnl_buckets.append(0)
+
+        # VIX regime bucket — matches the VIX Regime Table thresholds
+        vix = float(context.market_context.get("vix") or 0)
+        if vix < 15:
+            vix_regime = "low"
+        elif vix < 20:
+            vix_regime = "normal"
+        elif vix < 30:
+            vix_regime = "elevated"
+        elif vix < 40:
+            vix_regime = "high"
+        else:
+            vix_regime = "extreme"
 
         essential = {
             "autonomy": context.autonomy_level,
@@ -2761,7 +2856,7 @@ class TAADDaemon:
                 f"{c['symbol']}:{c['state']}" for c in context.staged_candidates
             ),
             "favorable": context.market_context.get("conditions_favorable"),
-            "vix_bucket": round(float(context.market_context.get("vix") or 0)),
+            "vix_regime": vix_regime,
             "anomaly_count": len(context.anomalies),
         }
 
@@ -2844,8 +2939,9 @@ class TAADDaemon:
 
             ctx.market_context["vix"] = conditions.vix
             ctx.market_context["session_open_vix"] = session_open_vix
-            # Store None when SPY is unavailable (e.g. ASX market) so Claude
-            # sees "UNKNOWN" rather than the misleading value $0.00
+            # SPY is stored for the learning system but excluded from Claude's
+            # prompt (not a decision variable — just noise).  Store None when
+            # unavailable so the learning system can distinguish missing vs zero.
             ctx.market_context["spy_price"] = (
                 conditions.spy_price if conditions.spy_price > 0 else None
             )
