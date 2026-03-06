@@ -1873,14 +1873,17 @@ function timeAgo(ts) {
   return Math.floor(s/86400) + 'd ago';
 }
 
-// Timezone state: 'ET' (US Eastern, UTC-5/UTC-4 DST) or 'AEDT' (Australian Eastern Daylight, UTC+11)
-let _tz = localStorage.getItem('taad_tz') || 'ET';
+// Timezone state: 3-way cycle UTC → ET → AEDT
+const _TZ_CYCLE = ['UTC', 'ET', 'AEDT'];
+let _tz = localStorage.getItem('taad_tz') || 'UTC';
+if (!_TZ_CYCLE.includes(_tz)) _tz = 'UTC';
 function initTzButton() {
   const btn = document.getElementById('tz-toggle');
   if (btn) btn.textContent = _tz;
 }
 function toggleTimezone() {
-  _tz = _tz === 'ET' ? 'AEDT' : 'ET';
+  const idx = _TZ_CYCLE.indexOf(_tz);
+  _tz = _TZ_CYCLE[(idx + 1) % _TZ_CYCLE.length];
   localStorage.setItem('taad_tz', _tz);
   const btn = document.getElementById('tz-toggle');
   if (btn) btn.textContent = _tz;
@@ -1889,10 +1892,13 @@ function toggleTimezone() {
 
 function fmtTime(ts) {
   if (!ts || ts === 'None') return '--';
-  let iso = ts.replace(' ', 'T');
+  // Strip trailing tz abbreviation (e.g. " EST", " AEDT") from _market_timestamp() format
+  let cleaned = ts.replace(/\s+[A-Z]{2,5}$/, '');
+  let iso = cleaned.replace(' ', 'T');
   if (!iso.endsWith('Z') && !iso.includes('+')) iso += 'Z';
   const d = new Date(iso);
   if (isNaN(d)) return '--';
+  if (_tz === 'UTC') return d.toISOString().substring(11, 19);
   const tz = _tz === 'AEDT' ? 'Australia/Sydney' : 'America/New_York';
   return d.toLocaleTimeString('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
@@ -2721,13 +2727,16 @@ if (_storedToken) {
 
 const DECISION_ID = __DECISION_ID__;
 
-let _tz = localStorage.getItem('taad_tz') || 'ET';
+const _TZ_CYCLE = ['UTC', 'ET', 'AEDT'];
+let _tz = localStorage.getItem('taad_tz') || 'UTC';
+if (!_TZ_CYCLE.includes(_tz)) _tz = 'UTC';
 function initTzButton() {
   const btn = document.getElementById('tz-toggle');
   if (btn) btn.textContent = _tz;
 }
 function toggleTimezone() {
-  _tz = _tz === 'ET' ? 'AEDT' : 'ET';
+  const idx = _TZ_CYCLE.indexOf(_tz);
+  _tz = _TZ_CYCLE[(idx + 1) % _TZ_CYCLE.length];
   localStorage.setItem('taad_tz', _tz);
   const btn = document.getElementById('tz-toggle');
   if (btn) btn.textContent = _tz;
@@ -2735,10 +2744,13 @@ function toggleTimezone() {
 }
 function fmtTime(ts) {
   if (!ts || ts === 'None') return '--';
-  let iso = ts.replace(' ', 'T');
+  // Strip trailing tz abbreviation (e.g. " EST", " AEDT") from _market_timestamp() format
+  let cleaned = ts.replace(/\s+[A-Z]{2,5}$/, '');
+  let iso = cleaned.replace(' ', 'T');
   if (!iso.endsWith('Z') && !iso.includes('+')) iso += 'Z';
   const d = new Date(iso);
   if (isNaN(d)) return '--';
+  if (_tz === 'UTC') return d.toISOString().substring(0, 19).replace('T', ' ');
   const tz = _tz === 'AEDT' ? 'Australia/Sydney' : 'America/New_York';
   return d.toLocaleString('en-US', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }

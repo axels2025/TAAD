@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from src.data.models import LearningHistory
 from src.learning.models import ConfigChange, DetectedPattern, ParameterProposal
+from src.utils.timezone import utc_now
 
 
 class ParameterOptimizer:
@@ -322,7 +323,7 @@ class ParameterOptimizer:
         """
         # Record the change
         change = ConfigChange(
-            timestamp=datetime.now(),
+            timestamp=utc_now(),
             parameter=proposal.parameter,
             old_value=proposal.current_value,
             new_value=proposal.proposed_value,
@@ -404,7 +405,7 @@ class ParameterOptimizer:
 
                 # Log rollback
                 rollback_change = ConfigChange(
-                    timestamp=datetime.now(),
+                    timestamp=utc_now(),
                     parameter=parameter,
                     old_value=change.new_value,
                     new_value=change.old_value,

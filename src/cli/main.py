@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from src.utils.timezone import utc_now
+
 # Load .env file into environment variables
 from dotenv import load_dotenv
 
@@ -730,7 +732,7 @@ def scan(
                     barchart_results.append(result)
 
                 scan_results = BarchartScanOutput(
-                    scan_timestamp=datetime.now(),
+                    scan_timestamp=utc_now(),
                     config_used={"source": "csv_import", "file": str(csv_path)},
                     total_results=len(barchart_results),
                     results=barchart_results,
@@ -1237,7 +1239,7 @@ def execute(
                             strike=opportunity.strike,
                             expiration=exp_date,
                             option_type=opportunity.option_type,
-                            entry_date=datetime.now(),
+                            entry_date=utc_now(),
                             entry_premium=opportunity.premium,
                             contracts=opportunity.contracts,
                             otm_pct=opportunity.otm_pct if hasattr(opportunity, "otm_pct") else None,

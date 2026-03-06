@@ -11,6 +11,8 @@ from typing import Any, Optional
 from loguru import logger
 from sqlalchemy.orm import Session
 
+from src.utils.timezone import utc_now
+
 from src.data.models import ScanOpportunity
 from src.data.opportunity_state import (
     OpportunityState,
@@ -102,7 +104,7 @@ class OpportunityLifecycleManager:
         transition = StateTransition(
             from_state=current_state,
             to_state=new_state,
-            timestamp=datetime.now(),
+            timestamp=utc_now(),
             reason=reason,
             actor=actor,
             metadata=metadata or {},
@@ -119,7 +121,7 @@ class OpportunityLifecycleManager:
         # Update opportunity
         opportunity.state = new_state.name
         opportunity.state_history = json.dumps(state_history)
-        opportunity.updated_at = datetime.now()
+        opportunity.updated_at = utc_now()
 
         # Sync the indexed `executed` flag and `trade_id` on terminal execution
         if new_state == OpportunityState.EXECUTED:
@@ -184,7 +186,7 @@ class OpportunityLifecycleManager:
 
         # Add timestamp to snapshot
         snapshot_data = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "data": data,
         }
 
@@ -196,7 +198,7 @@ class OpportunityLifecycleManager:
         elif snapshot_type == "execution":
             opportunity.execution_snapshot = json.dumps(snapshot_data)
 
-        opportunity.updated_at = datetime.now()
+        opportunity.updated_at = utc_now()
 
         try:
             self.session.commit()
@@ -254,7 +256,7 @@ class OpportunityLifecycleManager:
 
         # Create rejection record
         rejection = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "check_name": check_name,
             "current_value": current_value,
             "limit_value": limit_value,
@@ -266,7 +268,7 @@ class OpportunityLifecycleManager:
 
         # Update opportunity
         opportunity.rejection_reasons = json.dumps(rejection_reasons)
-        opportunity.updated_at = datetime.now()
+        opportunity.updated_at = utc_now()
 
         try:
             self.session.commit()
@@ -404,8 +406,8 @@ class OpportunityLifecycleManager:
         if not opportunity:
             raise ValueError(f"Opportunity {opportunity_id} not found")
 
-        opportunity.expires_at = datetime.now() + timedelta(hours=ttl_hours)
-        opportunity.updated_at = datetime.now()
+        opportunity.expires_at = utc_now() + timedelta(hours=ttl_hours)
+        opportunity.updated_at = utc_now()
 
         try:
             self.session.commit()
@@ -430,7 +432,7 @@ class OpportunityLifecycleManager:
         Returns:
             List of opportunity IDs that have expired
         """
-        now = datetime.now()
+        now = utc_now()
         expired_opportunities = (
             self.session.query(ScanOpportunity.id)
             .filter(

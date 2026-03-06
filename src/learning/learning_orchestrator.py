@@ -12,6 +12,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from src.data.models import LearningHistory, Pattern as PatternModel, Trade
+from src.utils.timezone import utc_now
 from src.learning.experiment_engine import ExperimentEngine
 from src.learning.models import LearningReport
 from src.learning.parameter_optimizer import ParameterOptimizer
@@ -159,7 +160,7 @@ class LearningOrchestrator:
                     p_value=result.p_value or 0.0,
                     effect_size=result.effect_size or 0.0,
                     confidence=0.95,  # High confidence for adopted experiments
-                    date_detected=datetime.now(),
+                    date_detected=utc_now(),
                 )
 
                 proposal = ParameterProposal(
@@ -282,7 +283,7 @@ class LearningOrchestrator:
             existing.avg_roi = pattern.avg_roi
             existing.confidence = pattern.confidence
             existing.p_value = pattern.p_value
-            existing.date_last_validated = datetime.now()
+            existing.date_last_validated = utc_now()
         else:
             # Create new pattern
             pattern_model = PatternModel(
@@ -296,7 +297,7 @@ class LearningOrchestrator:
                 p_value=pattern.p_value,
                 market_regime=pattern.market_regime,
                 date_detected=pattern.date_detected,
-                date_last_validated=datetime.now(),
+                date_last_validated=utc_now(),
                 status="active",
             )
 
@@ -305,7 +306,7 @@ class LearningOrchestrator:
         # Log learning event
         learning_event = LearningHistory(
             event_type="pattern_detected",
-            event_date=datetime.now(),
+            event_date=utc_now(),
             pattern_name=pattern.pattern_name,
             confidence=pattern.confidence,
             sample_size=pattern.sample_size,

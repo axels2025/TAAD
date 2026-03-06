@@ -368,7 +368,8 @@ class TestOpportunityLifecycleManager:
 
         # Verify
         assert sample_opportunity.expires_at is not None
-        time_diff = sample_opportunity.expires_at - datetime.now()
+        from src.utils.timezone import utc_now
+        time_diff = sample_opportunity.expires_at - utc_now()
         assert 47 < time_diff.total_seconds() / 3600 < 49  # Roughly 48 hours
 
         mock_session.commit.assert_called_once()

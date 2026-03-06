@@ -18,6 +18,8 @@ from typing import Protocol
 
 from loguru import logger
 
+from src.utils.timezone import utc_now
+
 from src.services.strike_finder import StrikeCandidate
 
 
@@ -177,7 +179,7 @@ class PortfolioPlan:
     total_premium_expected: float
     sector_distribution: dict[str, int]
     warnings: list[str]
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=utc_now)
     ibkr_connected: bool = True
 
     @property

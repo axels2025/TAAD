@@ -10,6 +10,7 @@ from typing import Optional
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
+from src.utils.timezone import utc_now
 from src.data.models import (
     AuditLog,
     Experiment,
@@ -879,7 +880,7 @@ class ScanRepository:
 
         # Update timestamp
         if opportunity.updated_at:
-            opportunity.updated_at = datetime.now()
+            opportunity.updated_at = utc_now()
 
         self.session.flush()
 

@@ -171,6 +171,17 @@ def init_database(database_url: str | None = None) -> Engine:
             pool_pre_ping=True,
             echo=False,
         )
+
+        # Force UTC on every connection so func.now() / CURRENT_TIMESTAMP
+        # always returns UTC regardless of the server's global timezone
+        # setting (e.g. Australia/Melbourne).  Without this, all
+        # server_default=func.now() columns silently store AEDT.
+        @event.listens_for(_engine, "connect")
+        def set_pg_timezone(dbapi_conn, connection_record) -> None:
+            cursor = dbapi_conn.cursor()
+            cursor.execute("SET timezone = 'UTC'")
+            cursor.close()
+
         # Create TAAD schemas (idempotent)
         _create_schemas(_engine)
 

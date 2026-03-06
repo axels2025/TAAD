@@ -15,6 +15,8 @@ import numpy as np
 from loguru import logger
 from sqlalchemy.orm import Session
 
+from src.utils.timezone import utc_now
+
 from src.data.models import PositionSnapshot, Trade, TradeEntrySnapshot, TradeExitSnapshot
 from src.learning.models import DetectedPattern
 
@@ -264,7 +266,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -328,7 +330,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -389,7 +391,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -461,7 +463,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -507,7 +509,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -572,7 +574,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -637,7 +639,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -703,7 +705,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -773,7 +775,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)
@@ -839,7 +841,7 @@ class PatternCombiner:
                 p_value=1.0,
                 effect_size=0.0,
                 confidence=min(len(combo_trades) / self.min_samples, 1.0),
-                date_detected=datetime.now(),
+                date_detected=utc_now(),
             )
 
             patterns.append(pattern)

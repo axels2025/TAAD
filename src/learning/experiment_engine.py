@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from src.data.models import Experiment, Trade
 from src.learning.models import ExperimentResult
+from src.utils.timezone import utc_now
 
 
 class ExperimentEngine:
@@ -88,7 +89,7 @@ class ExperimentEngine:
             control_value=str(control_value),
             test_value=str(test_value),
             status="active",
-            start_date=datetime.now(),
+            start_date=utc_now(),
             end_date=None,
             control_trades=0,
             test_trades=0,
@@ -242,7 +243,7 @@ class ExperimentEngine:
 
             # Update experiment status
             exp.status = "adopted"
-            exp.end_date = datetime.now()
+            exp.end_date = utc_now()
 
         elif p_value < 0.05 and effect_size < -0.005:  # 0.5% worse
             decision = "REJECT"
@@ -251,7 +252,7 @@ class ExperimentEngine:
 
             # Update experiment status
             exp.status = "rejected"
-            exp.end_date = datetime.now()
+            exp.end_date = utc_now()
 
         else:
             # No significant difference or effect too small
@@ -260,7 +261,7 @@ class ExperimentEngine:
             reason = "No significant improvement detected"
 
             exp.status = "rejected"
-            exp.end_date = datetime.now()
+            exp.end_date = utc_now()
 
         # Save updated experiment
         exp.p_value = p_value
@@ -439,7 +440,7 @@ class ExperimentEngine:
             return False
 
         exp.status = "stopped"
-        exp.end_date = datetime.now()
+        exp.end_date = utc_now()
         exp.decision = reason
 
         self.db.commit()

@@ -11,7 +11,7 @@ autonomy:
   demotion_loss_streak: 3
   max_level: 4
   disabled_triggers: []
-  execute_confidence_threshold: 0.80
+  execute_confidence_threshold: 0.8
 claude:
   reasoning_model: claude-sonnet-4-5-20250929
   reflection_model: claude-sonnet-4-5-20250929
@@ -21,6 +21,7 @@ claude:
   daily_cost_cap_usd: 10.0
   max_retries: 3
   reasoning_system_prompt: ''
+  position_exit_system_prompt: ''
 daemon:
   client_id: 10
   heartbeat_interval_seconds: 60
@@ -42,7 +43,7 @@ dashboard:
   enabled: true
   host: 0.0.0.0
   port: 8080
-  auth_token: '3nklKbPELgWAs5x0hN0Wj4P4vRBTU2x214i3lzNRFHg'
+  auth_token: 3nklKbPELgWAs5x0hN0Wj4P4vRBTU2x214i3lzNRFHg
 learning:
   eod_reflection_time: '16:30'
   min_trades_for_experiment: 10
