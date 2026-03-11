@@ -83,6 +83,15 @@ class LearningLoopConfig(BaseModel):
     max_concurrent_experiments: int = Field(default=3, ge=1)
 
 
+class StrategyConfig(BaseModel):
+    """Strategy-level configuration."""
+
+    entry_days: list[str] = Field(
+        default_factory=lambda: ["Monday", "Tuesday"],
+        description="Days of the week when new trades can be staged/executed",
+    )
+
+
 class AutoScanConfig(BaseModel):
     """Market-open auto-scan configuration."""
 
@@ -123,6 +132,7 @@ class Phase5Config(BaseModel):
     learning: LearningLoopConfig = Field(default_factory=LearningLoopConfig)
     auto_scan: AutoScanConfig = Field(default_factory=AutoScanConfig)
     exit_rules: ExitRulesConfig = Field(default_factory=ExitRulesConfig)
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     guardrails: "GuardrailConfig" = Field(default_factory=lambda: _default_guardrail_config())
 
 

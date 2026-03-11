@@ -412,17 +412,22 @@ class ClaudeReasoningEngine:
         self,
         db_session: Session,
         config: Optional[ClaudeConfig] = None,
+        entry_days: Optional[list[str]] = None,
     ):
         """Initialize reasoning engine.
 
         Args:
             db_session: SQLAlchemy session for cost tracking
             config: Claude configuration (uses defaults if None)
+            entry_days: Configurable entry days (default Monday, Tuesday)
         """
         self.db = db_session
         self.config = config or ClaudeConfig()
         self.cost_tracker = CostTracker(db_session, self.config.daily_cost_cap_usd)
-        self.system_prompt = self.config.reasoning_system_prompt or REASONING_SYSTEM_PROMPT
+        base_prompt = self.config.reasoning_system_prompt or REASONING_SYSTEM_PROMPT
+        self.system_prompt = self._inject_entry_days(
+            base_prompt, entry_days or ["Monday", "Tuesday"]
+        )
 
         # Initialize agents for different purposes
         self._reasoning_agent = BaseAgent(
@@ -433,6 +438,57 @@ class ClaudeReasoningEngine:
             model=self.config.reflection_model,
             max_retries=self.config.max_retries,
         )
+
+    @staticmethod
+    def _inject_entry_days(prompt: str, entry_days: list[str]) -> str:
+        """Replace hardcoded entry-day logic in the system prompt.
+
+        Rewrites Step 2 (ENTRY DAY CHECK) and the Role & Bias section
+        to reflect the configured entry days instead of hardcoded Mon/Tue.
+        """
+        all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        non_entry = [d for d in all_days if d not in entry_days]
+
+        # Build Step 2 replacement lines
+        step2_lines = []
+        for day in entry_days:
+            label = "PRIMARY" if day == entry_days[0] else "SECONDARY"
+            step2_lines.append(f"- {day} = {label} entry day → proceed to Step 3")
+        if non_entry:
+            step2_lines.append(
+                f"- {', '.join(non_entry)} = NOT entry days → skip to Step 4"
+            )
+        step2_lines.append(
+            "- Weekend / market closed = NOT entry days → skip to Step 4"
+        )
+        step2_block = "\n".join(step2_lines)
+
+        # Replace Step 2 block
+        old_step2 = (
+            "- Monday = PRIMARY entry day → proceed to Step 3\n"
+            "- Tuesday = SECONDARY entry day → proceed to Step 3\n"
+            "- Wednesday–Friday = NOT entry days → skip to Step 4\n"
+            "- Weekend / market closed = NOT entry days → skip to Step 4"
+        )
+        prompt = prompt.replace(old_step2, step2_block)
+
+        # Replace Role & Bias entry-day references
+        entry_str = " and ".join(entry_days) if len(entry_days) <= 2 else ", ".join(entry_days)
+        prompt = prompt.replace(
+            "Monday is the PRIMARY entry day (92% historical win rate, Friday expiry).\n"
+            "Tuesday is the SECONDARY entry day (still profitable, slightly lower edge).",
+            f"Configured entry days: {entry_str}.\n"
+            f"On entry days: find reasons TO trade. Only hold back on specific, concrete, articulable risk.",
+        )
+
+        # Remove duplicate "On entry days" line if it now appears twice
+        prompt = prompt.replace(
+            "On entry days: find reasons TO trade. Only hold back on specific, concrete, articulable risk.\n"
+            "On entry days: find reasons TO trade. Only hold back on specific, concrete, articulable risk.",
+            "On entry days: find reasons TO trade. Only hold back on specific, concrete, articulable risk.",
+        )
+
+        return prompt
 
     def reason(
         self,

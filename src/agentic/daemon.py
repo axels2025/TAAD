@@ -116,7 +116,9 @@ class TAADDaemon:
         self.event_bus = EventBus(db)
         self.memory = WorkingMemory(db)
         self.governor = AutonomyGovernor(db, self.config.autonomy)
-        self.reasoning = ClaudeReasoningEngine(db, self.config.claude)
+        self.reasoning = ClaudeReasoningEngine(
+            db, self.config.claude, entry_days=self.config.strategy.entry_days
+        )
         self.health = HealthMonitor(
             db,
             pid_file=self.config.daemon.pid_file,
@@ -250,6 +252,7 @@ class TAADDaemon:
             # until the next MARKET_OPEN event (which may be hours away).
             await self._close_expired_positions(db)
             self._auto_unstage_eod(db)
+            self._recover_stuck_executing(db)
             if self.ibkr_client is not None:
                 await self._run_startup_reconcile(db)
 
@@ -655,7 +658,11 @@ class TAADDaemon:
                 # awaiting human approval, don't create another queue entry.
                 # Without this, every 15-min SCHEDULED_CHECK creates a new
                 # pending EXECUTE_TRADES row (3x in ~1 hour on March 9).
-                if decision.action in ("EXECUTE_TRADES", "STAGE_CANDIDATES"):
+                if decision.action in (
+                    "EXECUTE_TRADES",
+                    "STAGE_CANDIDATES",
+                    "REQUEST_HUMAN_REVIEW",
+                ):
                     existing_pending = (
                         db.query(DecisionAudit)
                         .filter(
@@ -1523,7 +1530,7 @@ class TAADDaemon:
         from src.data.opportunity_state import OpportunityState
         from src.execution.opportunity_lifecycle import OpportunityLifecycleManager
 
-        pre_exec_states = ["STAGED", "VALIDATING", "READY", "ADJUSTING", "CONFIRMED"]
+        pre_exec_states = ["STAGED", "VALIDATING", "READY", "ADJUSTING", "CONFIRMED", "EXECUTING"]
         stale = (
             db.query(ScanOpportunity)
             .filter(
@@ -1545,6 +1552,45 @@ class TAADDaemon:
             )
         db.commit()
         logger.info(f"EOD auto-unstage: expired {len(stale)} remaining staged candidates")
+
+    def _recover_stuck_executing(self, db: Session) -> None:
+        """Recover opportunities stuck in EXECUTING state.
+
+        When the daemon crashes or order placement fails mid-execution,
+        opportunities can get stuck in EXECUTING with no order actually
+        placed.  On startup, expire these so they don't occupy invisible
+        slots indefinitely (dashboard and unstage buttons couldn't see them).
+
+        Args:
+            db: Database session
+        """
+        from src.data.opportunity_state import OpportunityState
+        from src.execution.opportunity_lifecycle import OpportunityLifecycleManager
+
+        stuck = (
+            db.query(ScanOpportunity)
+            .filter(
+                ScanOpportunity.state == "EXECUTING",
+                ScanOpportunity.executed == False,  # noqa: E712
+            )
+            .all()
+        )
+        if not stuck:
+            return
+
+        lifecycle = OpportunityLifecycleManager(db)
+        for opp in stuck:
+            lifecycle.transition(
+                opp.id,
+                OpportunityState.EXPIRED,
+                reason="Stuck in EXECUTING at daemon startup — no order was filled",
+                actor="system",
+            )
+        db.commit()
+        logger.warning(
+            f"Startup recovery: expired {len(stuck)} stuck EXECUTING "
+            f"opportunities: {[o.symbol for o in stuck]}"
+        )
 
     def _auto_reject_stale_guardrail_blocks(self, db: Session) -> None:
         """Auto-reject guardrail escalations from prior days that were never reviewed.

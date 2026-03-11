@@ -317,7 +317,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 db.query(ScanOpportunity)
                 .filter(
                     ScanOpportunity.state.in_(
-                        ["STAGED", "VALIDATING", "READY", "CONFIRMED"]
+                        ["STAGED", "VALIDATING", "READY", "CONFIRMED", "EXECUTING"]
                     ),
                     ScanOpportunity.executed == False,  # noqa: E712
                 )
@@ -567,6 +567,22 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 "id": notification_id,
                 "action_key": request.action_key,
             }
+
+    @app.post("/api/notifications/{notification_id}/dismiss")
+    def dismiss_notification(
+        notification_id: int,
+        token: None = Depends(verify_token),
+    ):
+        """Dismiss (resolve) a notification without choosing an action."""
+        with get_db_session() as db:
+            notif = db.query(DaemonNotification).get(notification_id)
+            if not notif:
+                raise HTTPException(status_code=404, detail="Notification not found")
+            notif.status = "resolved"
+            notif.resolved_at = utc_now()
+            db.commit()
+            logger.info(f"Notification dismissed: '{notif.notification_key}' (id={notification_id})")
+            return {"status": "dismissed", "id": notification_id}
 
     class ApprovalRequest(BaseModel):
         decision: str = "approved"
@@ -1138,8 +1154,8 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 "recent_findings": recent_findings[-10:],
             }
 
-    # Pre-execution states that can be unstaged
-    _PRE_EXEC_STATES = ["STAGED", "VALIDATING", "READY", "ADJUSTING", "CONFIRMED"]
+    # Pre-execution states that can be unstaged (includes EXECUTING for stuck rows)
+    _PRE_EXEC_STATES = ["STAGED", "VALIDATING", "READY", "ADJUSTING", "CONFIRMED", "EXECUTING"]
 
     @app.post("/api/unstage/{opportunity_id}")
     def unstage_opportunity(
@@ -1618,6 +1634,30 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .conf-bar { display: inline-block; width: 50px; height: 6px; background: var(--bg3); border: 1px solid var(--border); border-radius: 3px; vertical-align: middle; margin-right: 6px; overflow: hidden; }
   .conf-bar .fill { display: block; height: 100%; border-radius: 2px; }
 
+  /* Scanning banner */
+  .scan-banner {
+    display: none;
+    background: linear-gradient(90deg, rgba(0,150,255,0.12), rgba(0,230,118,0.08));
+    border-bottom: 1px solid rgba(0,150,255,0.3);
+    padding: 10px 20px;
+    text-align: center;
+    font-size: 13px;
+    color: #4da6ff;
+  }
+  .scan-banner.active { display: block; }
+  .scan-banner-content { display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .scan-spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid rgba(77,166,255,0.3);
+    border-top-color: #4da6ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .scan-elapsed { color: var(--text-dim); font-size: 11px; }
+  .scan-banner.done { background: linear-gradient(90deg, rgba(0,230,118,0.12), rgba(0,230,118,0.05)); border-color: rgba(0,230,118,0.3); color: var(--green); }
+  .scan-banner.error { background: linear-gradient(90deg, rgba(255,82,82,0.12), rgba(255,82,82,0.05)); border-color: rgba(255,82,82,0.3); color: var(--red); }
+
   /* Toast */
   .toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--green); color: var(--green); padding: 12px 20px; border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; }
@@ -1652,6 +1692,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="refresh-badge" style="text-align:right;"><div><span class="dot" id="status-dot"></span><span id="status-label">Checking...</span> <span id="et-time"></span></div><div id="market-countdown" style="font-size:10px;"></div></div>
+  </div>
+</div>
+
+<!-- Scanning progress banner -->
+<div class="scan-banner" id="scan-banner">
+  <div class="scan-banner-content">
+    <span class="scan-spinner"></span>
+    <span id="scan-banner-text">Scanning in progress...</span>
+    <span class="scan-elapsed" id="scan-elapsed"></span>
   </div>
 </div>
 
@@ -1933,6 +1982,15 @@ async function chooseNotifAction(id, actionKey) {
   } catch(e) { showToast('Error: ' + e.message); }
 }
 
+async function dismissNotif(id) {
+  try {
+    const r = await fetch('/api/notifications/' + id + '/dismiss', {method: 'POST'});
+    if (!r.ok) throw new Error('Failed');
+    showToast('Notification dismissed');
+    fetchData();
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
 async function approveDecision(id) {
   await apiCall('/api/approve/' + id);
 }
@@ -1968,10 +2026,40 @@ document.addEventListener('click', function(e) {
   if (!e.target.closest('.dropdown')) closeMenu();
 });
 
+// --- Scan banner helpers ---
+let _scanStartTime = null;
+let _scanTimer = null;
+
+function showScanBanner(label) {
+  const banner = document.getElementById('scan-banner');
+  const text = document.getElementById('scan-banner-text');
+  const elapsed = document.getElementById('scan-elapsed');
+  banner.className = 'scan-banner active';
+  text.textContent = label;
+  _scanStartTime = Date.now();
+  elapsed.textContent = '';
+  _scanTimer = setInterval(() => {
+    const secs = Math.floor((Date.now() - _scanStartTime) / 1000);
+    elapsed.textContent = secs + 's';
+  }, 1000);
+}
+
+function hideScanBanner(result, isError) {
+  clearInterval(_scanTimer);
+  const banner = document.getElementById('scan-banner');
+  const text = document.getElementById('scan-banner-text');
+  const elapsed = document.getElementById('scan-elapsed');
+  const secs = _scanStartTime ? Math.floor((Date.now() - _scanStartTime) / 1000) : 0;
+  elapsed.textContent = secs + 's';
+  banner.className = 'scan-banner active ' + (isError ? 'error' : 'done');
+  text.textContent = result;
+  setTimeout(() => { banner.className = 'scan-banner'; }, 5000);
+}
+
 async function triggerAutoScan() {
   const override = confirm('Run auto-scan now?\\n\\nIf market is closed, stale data will be used.');
   if (!override) return;
-  showToast('Scanning...');
+  showScanBanner('Auto-scan in progress \u2014 loading option chains from IBKR...');
   try {
     const r = await fetch('/api/auto-scan/trigger', {
       method: 'POST',
@@ -1980,19 +2068,19 @@ async function triggerAutoScan() {
     });
     const d = await r.json();
     if (d.error) {
-      showToast('Scan failed: ' + d.error);
+      hideScanBanner('Scan failed: ' + d.error, true);
     } else {
-      showToast('Scan complete: ' + (d.staged || 0) + ' staged');
+      hideScanBanner('Scan complete: ' + (d.staged || 0) + ' staged, ' + (d.symbols_scanned || 0) + ' symbols scanned', false);
       fetchData();
     }
   } catch(e) {
-    showToast('Error: ' + e.message);
+    hideScanBanner('Error: ' + e.message, true);
   }
 }
 
 async function forceScan() {
-  if (!confirm('Override MONITOR_ONLY and scan for new trades?\\n\\nThis will run the full pipeline (scan \\u2192 select \\u2192 stage) and trigger Claude reasoning on the results.')) return;
-  showToast('Force scanning...');
+  if (!confirm('Override MONITOR_ONLY and scan for new trades?\\n\\nThis will run the full pipeline (scan \u2192 select \u2192 stage) and trigger Claude reasoning on the results.')) return;
+  showScanBanner('Force scan in progress \u2014 loading option chains from IBKR...');
   try {
     const r = await fetch('/api/force-scan', {
       method: 'POST',
@@ -2001,13 +2089,13 @@ async function forceScan() {
     });
     const d = await r.json();
     if (d.error) {
-      showToast('Force scan failed: ' + d.error);
+      hideScanBanner('Force scan failed: ' + d.error, true);
     } else {
-      showToast('Force scan: ' + (d.staged || 0) + ' staged, Claude will re-evaluate');
+      hideScanBanner('Force scan: ' + (d.staged || 0) + ' staged, ' + (d.symbols_scanned || 0) + ' scanned \u2014 Claude will re-evaluate', false);
       fetchData();
     }
   } catch(e) {
-    showToast('Error: ' + e.message);
+    hideScanBanner('Error: ' + e.message, true);
   }
 }
 
@@ -2173,8 +2261,9 @@ async function fetchData() {
             const chosenLabel = (n.action_choices || []).find(a => a.key === n.chosen_action);
             actionsHtml = `<div class="notif-actions"><span class="tag tag-yes">Action: ${esc(chosenLabel ? chosenLabel.label : n.chosen_action)}</span></div>`;
           }
+          const dismissBtn = `<button class="btn btn-control" onclick="dismissNotif(${n.id})" style="padding:2px 8px;font-size:10px;float:right;">Dismiss</button>`;
           return `<div class="notif-item">
-            <div class="notif-title">${esc(n.title)}</div>
+            <div class="notif-title">${esc(n.title)} ${dismissBtn}</div>
             <div class="notif-meta">Since ${fmtTime(n.first_seen)} | Updated ${fmtTime(n.updated_at)} | ${n.occurrence_count} occurrence${n.occurrence_count !== 1 ? 's' : ''}</div>
             <div class="notif-message">${esc(n.message)}</div>
             ${actionsHtml}

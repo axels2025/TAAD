@@ -9,8 +9,12 @@ autonomy:
   promotion_min_win_rate: 0.6
   demotion_loss_streak: 3
   max_level: 4
-  disabled_triggers: []
-  auto_execute_actions: []
+  disabled_triggers:
+  - first_trade_of_day
+  - new_symbol
+  auto_execute_actions:
+  - EXECUTE_TRADES
+  - STAGE_CANDIDATES
   execute_confidence_threshold: 0.8
 claude:
   reasoning_model: claude-sonnet-4-5-20250929
@@ -61,6 +65,12 @@ exit_rules:
   stop_loss: -3.0
   time_exit_dte: 1
   let_expire_premium: 0.05
+strategy:
+  entry_days:
+  - Monday
+  - Tuesday
+  - Wednesday
+  - Thursday
 guardrails:
   enabled: true
   action_plausibility_enabled: true

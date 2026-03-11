@@ -338,6 +338,20 @@ const SECTIONS = {
       auth_token: {desc: 'Bearer token (empty = no auth)', type: 'text'},
     }
   },
+  strategy: {
+    label: 'Strategy',
+    desc: 'Entry day and strategy-level settings. Controls which days Claude will stage/execute trades.',
+    fields: {
+      entry_days: {desc: 'Days when new trades can be staged and executed', type: 'triggers',
+        options: [
+          {value: 'Monday', label: 'Monday (primary)'},
+          {value: 'Tuesday', label: 'Tuesday (secondary)'},
+          {value: 'Wednesday', label: 'Wednesday'},
+          {value: 'Thursday', label: 'Thursday'},
+          {value: 'Friday', label: 'Friday'},
+        ]},
+    }
+  },
   exit_rules: {
     label: 'Exit Rules',
     desc: 'When to close positions. profit_target: 0.50 = exit at 50% of max profit. stop_loss: -2.00 = stop at 2x premium. time_exit_dte: days before expiry to close (-1 = let expire).',
@@ -486,15 +500,18 @@ function collectConfig() {
     config[section] = {};
     for (const [key, fieldMeta] of Object.entries(meta.fields)) {
       const id = `${section}.${key}`;
-      const el = document.getElementById(id);
-      if (!el) continue;
 
       if (fieldMeta.type === 'triggers') {
         const groupId = `${section}.${key}`;
         const cbs = document.querySelectorAll(`input[data-trigger-group="${groupId}"]`);
         config[section][key] = Array.from(cbs).filter(cb => cb.checked).map(cb => cb.value);
         continue;
-      } else if (fieldMeta.type === 'bool') {
+      }
+
+      const el = document.getElementById(id);
+      if (!el) continue;
+
+      if (fieldMeta.type === 'bool') {
         config[section][key] = el.checked;
       } else if (fieldMeta.type === 'number') {
         config[section][key] = parseFloat(el.value) || 0;
