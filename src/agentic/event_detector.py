@@ -2,11 +2,14 @@
 
 Runs as an independent async background task (5-minute poll cycle).
 Emits events to the EventBus when thresholds are breached:
-- VIX spike: >15% change from session open
+- VIX spike: >15% *increase* from session open (drops are not risk events)
 - Critical position alerts: approaching stop loss
 
 Separate from the 15-minute SCHEDULED_CHECK — catches intraday
 volatility events between Claude reasoning cycles.
+
+VIX checks only run during market hours to avoid false spikes from
+stale/default data when IBKR returns no quote outside trading hours.
 """
 
 import asyncio
@@ -15,6 +18,11 @@ from typing import Optional
 from loguru import logger
 
 from src.agentic.event_bus import EventBus, EventType
+
+
+# Default VIX returned by MarketConditionMonitor when quote fails.
+# We must reject this value in spike calculations — it's synthetic.
+_VIX_DEFAULT_FALLBACK = 20.0
 
 
 class EventDetector:
@@ -30,6 +38,7 @@ class EventDetector:
         position_monitor: Optional[object] = None,
         ibkr_client: Optional[object] = None,
         vix_spike_threshold_pct: float = 15.0,
+        market_calendar: Optional[object] = None,
     ):
         """Initialize event detector.
 
@@ -38,11 +47,13 @@ class EventDetector:
             position_monitor: PositionMonitor instance (optional)
             ibkr_client: IBKR client for VIX data (optional)
             vix_spike_threshold_pct: VIX change threshold (default 15%)
+            market_calendar: MarketCalendar for market-hours gating (optional)
         """
         self.event_bus = event_bus
         self.position_monitor = position_monitor
         self.ibkr_client = ibkr_client
         self.vix_spike_threshold_pct = vix_spike_threshold_pct
+        self.calendar = market_calendar
 
         # Session-relative VIX baseline (reset at MARKET_OPEN)
         self._session_open_vix: Optional[float] = None
@@ -76,8 +87,24 @@ class EventDetector:
         logger.info("EventDetector: session reset (VIX baseline cleared)")
 
     async def _check_vix(self) -> None:
-        """Check VIX for intraday spikes relative to session open."""
+        """Check VIX for intraday spikes relative to session open.
+
+        Guards against three sources of false positives:
+        1. Market-hours gating — skip when market is closed (stale data).
+        2. Default rejection — ignore the 20.0 fallback from _get_vix().
+        3. Direction check — only VIX *increases* are risk events;
+           drops mean volatility is easing and should not trigger alerts.
+        """
         try:
+            # Gate: only check VIX during market hours
+            if self.calendar is not None:
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+
+                now_et = datetime.now(ZoneInfo("America/New_York"))
+                if not self.calendar.is_market_open(now_et):
+                    return
+
             from src.services.market_conditions import MarketConditionMonitor
 
             monitor = MarketConditionMonitor(self.ibkr_client)
@@ -87,20 +114,35 @@ class EventDetector:
             if current_vix <= 0:
                 return
 
-            # Set session baseline on first check
+            # Reject the hardcoded default — it's synthetic, not a real quote.
+            # Using it for baseline or change detection causes false spikes
+            # (e.g. baseline=31.5, default=20.0 → fake -36.5% "spike").
+            if current_vix == _VIX_DEFAULT_FALLBACK:
+                logger.debug(
+                    "VIX check: got default fallback (20.0), skipping — "
+                    "quote likely unavailable"
+                )
+                return
+
+            # Set session baseline on first valid check
             if self._session_open_vix is None:
                 self._session_open_vix = current_vix
                 logger.info(f"EventDetector: VIX session baseline set to {current_vix:.1f}")
 
             self._last_vix = current_vix
 
-            # Check for spike relative to session open
+            # Check for spike: only VIX INCREASES are risk events.
+            # A VIX drop (current < baseline) means volatility is easing —
+            # that's good news, not a risk breach.
             if self._session_open_vix > 0 and not self._vix_spike_emitted:
-                change_pct = abs(current_vix - self._session_open_vix) / self._session_open_vix * 100
+                if current_vix <= self._session_open_vix:
+                    return  # VIX flat or falling — no risk event
+
+                change_pct = (current_vix - self._session_open_vix) / self._session_open_vix * 100
                 if change_pct >= self.vix_spike_threshold_pct:
                     logger.warning(
                         f"VIX SPIKE DETECTED: {self._session_open_vix:.1f} -> "
-                        f"{current_vix:.1f} ({change_pct:+.1f}%)"
+                        f"{current_vix:.1f} (+{change_pct:.1f}%)"
                     )
                     self.event_bus.emit(
                         EventType.RISK_LIMIT_BREACH,

@@ -185,6 +185,7 @@ class TAADDaemon:
             event_bus=self.event_bus,
             position_monitor=self.position_monitor,
             ibkr_client=self.ibkr_client,
+            market_calendar=self.calendar,
         )
 
         # Reconnection state
