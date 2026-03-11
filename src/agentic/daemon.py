@@ -651,6 +651,35 @@ class TAADDaemon:
                             key_factors=["duplicate_suppressed"],
                         )
 
+                # Deduplicate pending approvals: if the same action is already
+                # awaiting human approval, don't create another queue entry.
+                # Without this, every 15-min SCHEDULED_CHECK creates a new
+                # pending EXECUTE_TRADES row (3x in ~1 hour on March 9).
+                if decision.action in ("EXECUTE_TRADES", "STAGE_CANDIDATES"):
+                    existing_pending = (
+                        db.query(DecisionAudit)
+                        .filter(
+                            DecisionAudit.action == decision.action,
+                            DecisionAudit.executed == False,  # noqa: E712
+                            DecisionAudit.human_decision.is_(None),
+                        )
+                        .first()
+                    )
+                    if existing_pending:
+                        logger.info(
+                            f"Suppressing {decision.action} — already pending "
+                            f"human approval (audit_id={existing_pending.id})"
+                        )
+                        decision = DecisionOutput(
+                            action="MONITOR_ONLY",
+                            confidence=1.0,
+                            reasoning=(
+                                f"{decision.action} already awaiting human approval "
+                                f"(audit #{existing_pending.id}) — suppressing duplicate"
+                            ),
+                            key_factors=["pending_approval_exists"],
+                        )
+
                 # Feed reasoning to entropy monitor (Phase 6)
                 self.entropy_monitor.record_reasoning(
                     decision.reasoning or "", decision.key_factors or []
