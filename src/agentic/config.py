@@ -21,6 +21,7 @@ class AutonomyConfig(BaseModel):
     demotion_loss_streak: int = Field(default=3, ge=1)
     max_level: int = Field(default=2, ge=1, le=4)  # Safety: cap at L2 for paper trading
     disabled_triggers: list[str] = Field(default_factory=list)
+    auto_execute_actions: list[str] = Field(default_factory=list)
     execute_confidence_threshold: float = Field(default=0.80, ge=0.5, le=1.0)
 
 

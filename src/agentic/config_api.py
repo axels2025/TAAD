@@ -275,6 +275,15 @@ const SECTIONS = {
       promotion_min_trades: {desc: 'Min trades before promotion eligible', type: 'number'},
       promotion_min_win_rate: {desc: 'Min win rate for promotion (0-1)', type: 'number', step: 0.05},
       demotion_loss_streak: {desc: 'Consecutive losses triggering demotion', type: 'number'},
+      auto_execute_actions: {desc: 'Actions that bypass human approval (checked = auto-execute, skips L1/L2 gate)', type: 'triggers',
+        options: [
+          {value: 'EXECUTE_TRADES', label: 'Execute trades (place orders for staged candidates)'},
+          {value: 'STAGE_CANDIDATES', label: 'Stage candidates (scan + select + stage)'},
+          {value: 'CLOSE_POSITION', label: 'Close position (exit a single position)'},
+          {value: 'CLOSE_ALL_POSITIONS', label: 'Close all positions (emergency exit)'},
+          {value: 'RUN_EXPERIMENT', label: 'Run experiment (start A/B test)'},
+          {value: 'ADJUST_PARAMETERS', label: 'Adjust parameters (strategy tuning)'},
+        ]},
       disabled_triggers: {desc: 'Escalation triggers to disable (unchecked = active)', type: 'triggers',
         options: [
           {value: 'first_trade_of_day', label: 'First trade of day'},
@@ -425,7 +434,7 @@ function renderField(id, meta, value) {
         <label for="${esc(cbId)}" style="font-size:11px;">${esc(opt.label)}</label>
       </div>`;
     }
-    html += '</div><div style="font-size:10px;color:var(--text-dim);margin-top:4px;">Checked = disabled (will NOT escalate)</div>';
+    html += '</div>';
     return html;
   }
   if (meta.type === 'bool') {

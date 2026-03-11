@@ -149,6 +149,20 @@ class AutonomyGovernor:
                 escalation_trigger="minimal_footprint",
             )
 
+        # Auto-execute override: if the action is in auto_execute_actions,
+        # bypass level-based gating (mandatory triggers above still apply).
+        # This lets users opt specific actions out of L1/L2 approval delays
+        # via the dashboard settings, solving the "late approval" problem.
+        if action in self.config.auto_execute_actions:
+            logger.info(
+                f"Auto-execute override: {action} (confidence={confidence:.2f})"
+            )
+            return AutonomyDecision(
+                approved=True,
+                level=self._level,
+                reason=f"Auto-execute override for {action}",
+            )
+
         # Level-based gating
         if self._level == AutonomyLevel.L1_RECOMMEND:
             # L1: Nothing executes without human approval

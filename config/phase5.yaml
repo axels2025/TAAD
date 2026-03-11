@@ -2,7 +2,6 @@
 # ========================================================
 # Managed by TAAD Dashboard. Manual edits are preserved on next save.
 
-exchange: US
 autonomy:
   initial_level: 1
   promotion_clean_days: 5
@@ -11,6 +10,7 @@ autonomy:
   demotion_loss_streak: 3
   max_level: 4
   disabled_triggers: []
+  auto_execute_actions: []
   execute_confidence_threshold: 0.8
 claude:
   reasoning_model: claude-sonnet-4-5-20250929
@@ -22,6 +22,8 @@ claude:
   max_retries: 3
   reasoning_system_prompt: ''
   position_exit_system_prompt: ''
+  reflection_system_prompt: ''
+  performance_analysis_system_prompt: ''
 daemon:
   client_id: 10
   heartbeat_interval_seconds: 60
@@ -30,9 +32,9 @@ daemon:
   pid_file: run/taad.pid
   graceful_shutdown_timeout_seconds: 30
   reconnect_interval_seconds: 30
-  reconnect_alert_audio_path: Voices/Jamie - start tws reminder.mp3
-  reconnect_disconnect_audio_path: Voices/Jamie - lost connection.mp3
-  reconnect_success_audio_path: Voices/Jamie - connection reestablished.mp3
+  reconnect_alert_audio_path: ''
+  reconnect_disconnect_audio_path: ''
+  reconnect_success_audio_path: ''
   reconnect_alert_cooldown_seconds: 300
   premarket_alert_minutes: 15
 alerts:
@@ -49,7 +51,7 @@ learning:
   min_trades_for_experiment: 10
   max_concurrent_experiments: 3
 auto_scan:
-  enabled: true
+  enabled: false
   delay_minutes: 5
   scanner_preset: naked-put
   auto_stage: true
@@ -65,6 +67,7 @@ guardrails:
   symbol_crossref_enabled: true
   reasoning_coherence_enabled: true
   data_freshness_enabled: true
+  data_freshness_max_age_seconds: 300
   consistency_check_enabled: true
   null_sanitization_enabled: true
   numerical_grounding_enabled: true
