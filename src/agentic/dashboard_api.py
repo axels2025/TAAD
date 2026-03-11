@@ -287,7 +287,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         from src.tools.ibkr_client import IBKRClient
 
         config = IBKRConfig()
-        config.client_id = 10  # Avoid conflict with daemon (client_id=1)
+        config.client_id = 11  # Dashboard uses 11; daemon uses 10
         client = IBKRClient(config, suppress_errors=True)
         try:
             connected = client.connect()
@@ -873,7 +873,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         from src.tools.ibkr_client import IBKRClient
 
         config = IBKRConfig()
-        config.client_id = 10
+        config.client_id = 11  # Dashboard uses 11; daemon uses 10
         client = IBKRClient(config, suppress_errors=True)
         lines = []
         try:
@@ -946,7 +946,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         from src.tools.ibkr_client import IBKRClient
 
         config = IBKRConfig()
-        config.client_id = 10
+        config.client_id = 11  # Dashboard uses 11; daemon uses 10
         client = IBKRClient(config, suppress_errors=True)
         lines = []
         try:

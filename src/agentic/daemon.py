@@ -241,6 +241,17 @@ class TAADDaemon:
             self.health.start()
             self._running = True
 
+            # --- Startup reconciliation ---
+            # Close expired positions and unstage stale rows BEFORE the
+            # event loop and EventDetector start.  Without this, the
+            # EventDetector's 5-minute poll sees expired positions in the
+            # DB and fires CRITICAL assignment_risk alerts every cycle
+            # until the next MARKET_OPEN event (which may be hours away).
+            await self._close_expired_positions(db)
+            self._auto_unstage_eod(db)
+            if self.ibkr_client is not None:
+                await self._run_startup_reconcile(db)
+
             # Startup alert: if IBKR connection failed, alert immediately
             if self.ibkr_client is None:
                 logger.warning(
@@ -1266,6 +1277,47 @@ class TAADDaemon:
             logger.error(f"Human approval execution failed: {e}", exc_info=True)
             self.event_bus.mark_failed(event, str(e))
             self.health.record_error()
+
+    async def _run_startup_reconcile(self, db: Session) -> None:
+        """Reconcile DB with IBKR on daemon startup.
+
+        Runs the same position reconciliation as EOD sync, but before
+        the event loop starts.  This prevents ghost positions (in DB
+        but closed/expired in IBKR) from triggering CRITICAL alerts
+        every 5 minutes via EventDetector until the next MARKET_OPEN.
+
+        Only called when IBKR is connected.  _close_expired_positions
+        runs separately (before this) and handles the no-IBKR case.
+        """
+        logger.info("Startup reconcile: syncing positions with IBKR...")
+        try:
+            from src.data.repositories import TradeRepository
+            from src.services.order_reconciliation import OrderReconciliation
+
+            trade_repo = TradeRepository(db)
+            reconciler = OrderReconciliation(self.ibkr_client, trade_repo)
+
+            pos_report = await reconciler.reconcile_positions()
+
+            if pos_report.has_discrepancies:
+                logger.warning(
+                    f"  Startup discrepancies: "
+                    f"{len(pos_report.quantity_mismatches)} qty mismatches, "
+                    f"{len(pos_report.in_ibkr_not_db)} in IBKR only, "
+                    f"{len(pos_report.in_db_not_ibkr)} in DB only"
+                )
+                if pos_report.in_ibkr_not_db:
+                    imported = await reconciler.import_orphan_positions(dry_run=False)
+                    logger.info(f"  Imported {imported} orphan positions")
+                if pos_report.assignments:
+                    logger.warning(
+                        f"  Detected {len(pos_report.assignments)} possible assignments"
+                    )
+                    self._process_assignments(pos_report.assignments, db)
+            else:
+                logger.info("  Positions in sync — no discrepancies")
+        except Exception as e:
+            logger.error(f"Startup reconcile failed: {e}", exc_info=True)
 
     async def _run_eod_sync(self, db: Session) -> None:
         """Run end-of-day sync and reconcile.
