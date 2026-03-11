@@ -129,6 +129,17 @@ class ExitManager:
         # position_id -> (order_id, exit_reason)
         self._exit_orders_placed: dict[str, tuple[int, str]] = {}
 
+        # Track consecutive stale-data checks per position.
+        # Incremented each time _evaluate_position sees stale data;
+        # reset to 0 when a valid quote arrives.
+        self._stale_check_count: dict[str, int] = {}
+
+        # After this many consecutive stale checks, _evaluate_position
+        # returns should_exit=True with reason="stale_emergency" to force
+        # a market-order close.  At 15-minute SCHEDULED_CHECK intervals
+        # the default of 6 means ~90 minutes of blindness before forced exit.
+        self.stale_emergency_threshold: int = 6
+
         # Reconcile any pending exits left over from a previous session
         if not dry_run:
             self._reconcile_pending_exits_on_startup()
@@ -908,8 +919,17 @@ class ExitManager:
         # Without live prices, P&L is $0 — profit target and stop loss
         # checks would be meaningless.  Time exit is allowed through
         # since it depends only on DTE (calendar), not on quotes.
+        #
+        # However, blindness is itself a risk.  Track consecutive stale
+        # checks and escalate to forced close after stale_emergency_threshold
+        # cycles (~90 min at default settings).
         if position.market_data_stale:
+            pid = position.position_id
+            self._stale_check_count[pid] = self._stale_check_count.get(pid, 0) + 1
+            stale_count = self._stale_check_count[pid]
+
             if self._should_exit_time(position):
+                self._stale_check_count.pop(pid, None)
                 return ExitDecision(
                     should_exit=True,
                     reason="time_exit",
@@ -917,19 +937,44 @@ class ExitManager:
                     urgency="high",
                     message=f"{position.symbol}: Time exit ({position.dte} DTE)",
                 )
+
+            # Emergency escalation: if stale for too long, force close.
+            # A position with no stop-loss protection for ~90 min is
+            # unacceptable risk — better to close and re-enter later.
+            if stale_count >= self.stale_emergency_threshold:
+                logger.critical(
+                    f"STALE EMERGENCY: {position.symbol} ${position.strike:.0f} — "
+                    f"no market data for {stale_count} consecutive checks "
+                    f"(~{stale_count * 15} min). Forcing market-order close."
+                )
+                return ExitDecision(
+                    should_exit=True,
+                    reason="stale_emergency",
+                    exit_type="market",
+                    urgency="critical",
+                    message=(
+                        f"{position.symbol}: FORCED CLOSE — stop-loss blind for "
+                        f"{stale_count} checks (~{stale_count * 15} min), "
+                        f"closing to limit unmonitored risk"
+                    ),
+                )
+
             logger.warning(
                 f"STALE DATA: {position.symbol} ${position.strike:.0f} — "
-                f"no live market data, skipping price-based exit evaluation "
-                f"(profit target / stop loss NOT active for this position)"
+                f"no live market data (check {stale_count}/{self.stale_emergency_threshold}), "
+                f"stop-loss INACTIVE"
             )
             return ExitDecision(
                 should_exit=False,
                 reason="stale_data",
                 message=(
                     f"{position.symbol}: NO LIVE DATA — price-based exit evaluation "
-                    f"skipped (profit target / stop loss inactive)"
+                    f"skipped (stop-loss inactive, check {stale_count}/{self.stale_emergency_threshold})"
                 ),
             )
+
+        # Live data received — reset stale counter for this position
+        self._stale_check_count.pop(position.position_id, None)
 
         # Check profit target first (highest priority)
         if self._should_exit_profit_target(position):
