@@ -287,6 +287,9 @@ class IBKRClient:
 
         # Track suppressed errors for debugging
         self._suppressed_error_count = 0
+        # Rate-limit state for high-frequency IBKR errors (10197, 2103, 2105)
+        self._rate_limit_last_logged: dict[int, float] = {}
+        self._rate_limit_counts: dict[str, int] = {}
 
     def _error_filter(self, reqId, errorCode, errorString, contract):
         """Filter out expected errors during contract qualification.
@@ -309,9 +312,32 @@ class IBKRClient:
             10349,  # Order TIF was set to DAY (informational, IBKR auto-corrects)
         }
 
+        # High-frequency errors that should be rate-limited (log once per 5 min).
+        # Error 10197 fires for EVERY market data request when a competing
+        # session exists — can produce 5,000+ entries per session.
+        rate_limited_codes = {
+            10197,  # Competing live session
+            2103,   # Market data farm connection is broken
+            2105,   # HMDS data farm connection is broken
+        }
+
         if errorCode in informational_codes:
             # Silently count but don't log informational messages
             self._suppressed_error_count += 1
+        elif errorCode in rate_limited_codes:
+            self._suppressed_error_count += 1
+            now = time.monotonic()
+            last = self._rate_limit_last_logged.get(errorCode, 0.0)
+            count_key = f"_rl_{errorCode}"
+            self._rate_limit_counts[count_key] = self._rate_limit_counts.get(count_key, 0) + 1
+            if now - last >= 300:  # Log at most once per 5 minutes
+                total = self._rate_limit_counts[count_key]
+                logger.warning(
+                    f"IBKR Error {errorCode}: {errorString} "
+                    f"({total} occurrences since last log)"
+                )
+                self._rate_limit_last_logged[errorCode] = now
+                self._rate_limit_counts[count_key] = 0
         else:
             # Log other errors normally
             logger.warning(
