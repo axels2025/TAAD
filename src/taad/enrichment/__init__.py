@@ -44,16 +44,6 @@ from src.taad.enrichment.providers import (
     IBKRHistoricalProvider,
     FallbackChainProvider,
 )
-from src.taad.enrichment.barchart_scraper import (
-    BarchartScraperProvider,
-    BarchartHistoricalCache,
-    BARCHART_EARLIEST_DATE,
-)
-from src.taad.enrichment.barchart_playwright import (
-    PlaywrightBarchartProvider,
-    PLAYWRIGHT_EARLIEST_DATE,
-)
-
 __all__ = [
     # B-S IV Solver
     "BSResult",
@@ -90,11 +80,4 @@ __all__ = [
     "YFinanceProvider",
     "IBKRHistoricalProvider",
     "FallbackChainProvider",
-    # Barchart Scraper
-    "BarchartScraperProvider",
-    "BarchartHistoricalCache",
-    "BARCHART_EARLIEST_DATE",
-    # Barchart Playwright Scraper
-    "PlaywrightBarchartProvider",
-    "PLAYWRIGHT_EARLIEST_DATE",
 ]

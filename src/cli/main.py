@@ -47,23 +47,11 @@ from src.tools.ibkr_client import IBKRClient, IBKRConnectionError
 from src.tools.efficient_scanner import EfficientOptionScanner
 from src.tools.options_finder import OptionsFinder
 from src.tools.screener import StockScreener
-from src.tools.barchart_scanner import BarchartScanner
-from src.tools.barchart_csv_parser import parse_barchart_csv
 from src.tools.ibkr_validator import IBKRValidator
 from src.tools.manual_trade_entry import ManualTradeManager, ManualTradeEntry
 from src.tools.manual_trade_importer import ManualTradeImporter
-from src.tools.scan_persistence import ScanPersistence
-from src.config.naked_put_options_config import get_naked_put_config
 from src.data.repositories import ScanRepository
-from src.scoring.scorer import NakedPutScorer, ScoredCandidate
 from src.utils.calc import calc_pnl, calc_pnl_pct, fmt_pct
-
-# Phase 4: Sunday-Monday Workflow
-from src.cli.commands.sunday_session import (
-    run_sunday_session,
-    SundaySessionConfig,
-    format_session_id,
-)
 from src.cli.commands.execution_commands import (
     run_show_staged,
 )
@@ -74,7 +62,6 @@ from src.cli.commands.validation_commands import (
 )
 from src.services.premarket_validator import PremarketValidator, ValidationConfig
 from src.services.portfolio_builder import PortfolioBuilder, PortfolioConfig
-from src.services.strike_finder import StrikeFinder, StrikePreferences
 from src.services.limit_price_calculator import LimitPriceCalculator
 from src.data.opportunity_state import OpportunityState
 from src.execution.opportunity_lifecycle import OpportunityLifecycleManager
@@ -474,608 +461,6 @@ def version() -> None:
 # ============================================================================
 
 
-@app.command(name="scan")
-def scan(
-    max_results: int = typer.Option(20, help="Maximum opportunities to show"),
-    validate: bool = typer.Option(
-        True, help="Validate with IBKR (slower but accurate)"
-    ),
-    save_file: str = typer.Option("", help="Save raw Barchart results to file"),
-    save_db: bool = typer.Option(True, help="Save scan results to database"),
-    from_csv: str = typer.Option("", help="Import candidates from Barchart CSV export"),
-    top: int = typer.Option(
-        0, help="Show top N ranked candidates (CSV import only, 0=use max_results)"
-    ),
-    no_diversify: bool = typer.Option(
-        False, help="Skip diversification rules (CSV import only)"
-    ),
-    show_rejected: bool = typer.Option(
-        False, help="Show table of rejected candidates with rejection reasons"
-    ),
-    save_validation_report: str = typer.Option(
-        "", help="Save detailed validation report to CSV file"
-    ),
-) -> None:
-    """Scan for naked put options using Barchart API (fast) + IBKR validation (accurate).
-
-    This command uses a revolutionary two-step workflow:
-    1. Barchart API scans entire US market (fast, single API call)
-    2. IBKR validates top candidates (accurate, real-time quotes)
-
-    This is 10-20x faster than the old IBKR-only approach!
-
-    Alternatively, import pre-screened candidates from a Barchart CSV export using
-    --from-csv. This is useful when you've manually filtered candidates on Barchart.com
-    and want to validate/analyze them through the system.
-
-    Configuration is loaded from .env file (see BARCHART_* parameters).
-
-    Scan results are automatically saved to the database for historical tracking
-    and analysis. Use --no-save-db to disable database saving.
-
-    Examples:
-        # Full scan with validation (default, saves to DB)
-        nakedtrader scan
-
-        # Quick scan without IBKR validation
-        nakedtrader scan --no-validate
-
-        # Import from Barchart CSV export
-        nakedtrader scan --from-csv naked-put-screener.csv
-
-        # Import CSV and validate with IBKR
-        nakedtrader scan --from-csv naked-put-screener.csv --validate
-
-        # Show validation diagnostics with rejected candidates
-        nakedtrader scan --from-csv file.csv --show-rejected
-
-        # Save detailed validation report to CSV
-        nakedtrader scan --save-validation-report validation_report.csv
-
-        # Scan without saving to database
-        nakedtrader scan --no-save-db
-
-        # Scan and save raw results to file
-        nakedtrader scan --save-file data/scans/my_scan.json
-
-        # Show only top 10
-        nakedtrader scan --max-results 10
-    """
-    try:
-        console.print("[bold blue]Naked Put Options Scanner[/bold blue]")
-        if from_csv:
-            console.print(f"[dim]Importing from CSV: {from_csv}[/dim]\n")
-        else:
-            console.print("[dim]Using Barchart API + IBKR Validation[/dim]\n")
-
-        # Initialize logging
-        log_level = os.getenv("LOG_LEVEL", "WARNING")
-        log_file = os.getenv("LOG_FILE", "logs/app.log")
-        setup_logging(log_level=log_level, log_file=log_file)
-
-        # Load configuration
-        # Required for: Barchart API scan, or CSV import with validation
-        naked_put_config = None
-        if not from_csv:
-            # Barchart API scan - need full config with API key
-            try:
-                naked_put_config = get_naked_put_config()
-            except (ValueError, ValidationError) as e:
-                # Extract clean error message from pydantic ValidationError
-                if isinstance(e, ValidationError):
-                    # Get the first error's message (usually the most relevant)
-                    error_msg = e.errors()[0]["msg"] if e.errors() else str(e)
-                else:
-                    error_msg = str(e)
-
-                console.print(f"[bold red]✗ Configuration error[/bold red]\n")
-                console.print(f"[yellow]{error_msg}[/yellow]\n")
-                console.print("[cyan]Setup Instructions:[/cyan]")
-                console.print(
-                    "1. Get a Barchart API key from: https://www.barchart.com/ondemand"
-                )
-                console.print(
-                    "2. Add to your .env file: BARCHART_API_KEY=your_key_here"
-                )
-                console.print(
-                    "3. See docs/BARCHART_API_GUIDE.md for detailed setup guide"
-                )
-                raise typer.Exit(1)
-        elif from_csv and validate:
-            # CSV import with IBKR validation - only need validation settings
-            try:
-                from src.config.naked_put_options_config import (
-                    get_validation_only_config,
-                )
-
-                naked_put_config = get_validation_only_config()
-            except (ValueError, ValidationError) as e:
-                # Extract clean error message from pydantic ValidationError
-                if isinstance(e, ValidationError):
-                    error_msg = e.errors()[0]["msg"] if e.errors() else str(e)
-                else:
-                    error_msg = str(e)
-
-                console.print(f"[bold red]✗ Configuration error[/bold red]\n")
-                console.print(f"[yellow]{error_msg}[/yellow]\n")
-                raise typer.Exit(1)
-
-            # Display configuration summary (only for Barchart API scans)
-            if not from_csv:
-                config_summary = naked_put_config.display_summary()
-                table = Table(
-                    title="Scan Parameters (from .env)", show_header=False, box=None
-                )
-                table.add_column("Parameter", style="cyan", width=20)
-                table.add_column("Value", style="yellow")
-
-                for key, value in config_summary.items():
-                    table.add_row(key, str(value))
-
-                console.print(table)
-                console.print()
-
-        # Check if importing from CSV
-        if from_csv:
-            # Step 1: Import from CSV
-            console.print("[bold cyan]Step 1: Import from Barchart CSV[/bold cyan]")
-            console.print(f"[dim]Reading candidates from {from_csv}...[/dim]\n")
-
-            # Track execution time for database
-            scan_start_time = time.time()
-
-            try:
-                # Parse CSV file
-                csv_path = Path(from_csv)
-                if not csv_path.exists():
-                    console.print(
-                        f"[bold red]✗ CSV file not found: {from_csv}[/bold red]\n"
-                    )
-                    raise typer.Exit(1)
-
-                candidates = parse_barchart_csv(csv_path)
-                console.print(f"✓ Parsed {len(candidates)} candidates from CSV\n")
-
-                # Display summary statistics
-                symbols_count = len(set(c.symbol for c in candidates))
-                dte_range = (
-                    min(c.dte for c in candidates),
-                    max(c.dte for c in candidates),
-                )
-
-                summary_table = Table(show_header=False, box=None)
-                summary_table.add_column("Metric", style="cyan")
-                summary_table.add_column("Value", style="yellow")
-
-                summary_table.add_row("Total candidates", str(len(candidates)))
-                summary_table.add_row("Unique symbols", str(symbols_count))
-                summary_table.add_row(
-                    "DTE range", f"{dte_range[0]}-{dte_range[1]} days"
-                )
-
-                # Count by DTE bucket
-                dte_buckets = {
-                    "0-7 days": len([c for c in candidates if c.dte <= 7]),
-                    "8-14 days": len([c for c in candidates if 8 <= c.dte <= 14]),
-                    "15-30 days": len([c for c in candidates if 15 <= c.dte <= 30]),
-                    "30+ days": len([c for c in candidates if c.dte > 30]),
-                }
-                for bucket, count in dte_buckets.items():
-                    if count > 0:
-                        summary_table.add_row(bucket, str(count))
-
-                console.print(summary_table)
-                console.print()
-
-                # NEW: Score and rank candidates
-                console.print("[bold cyan]Step 2: Score & Rank Candidates[/bold cyan]")
-                console.print("[dim]Applying research-backed scoring rules...[/dim]\n")
-
-                scorer = NakedPutScorer()
-                scored_candidates = scorer.score_all(candidates)
-
-                # Apply diversification (unless disabled)
-                if not no_diversify:
-                    scored_candidates = scorer.apply_diversification(scored_candidates)
-                    console.print(f"✓ Diversification applied (max 3 per symbol)\n")
-                else:
-                    console.print("✓ Diversification skipped (--no-diversify)\n")
-
-                # Determine how many to display
-                display_count = top if top > 0 else max_results
-                display_candidates = scored_candidates[:display_count]
-
-                # Display ranked table
-                _display_ranked_candidates(display_candidates, console)
-
-                # If not validating, we're done
-                if not validate:
-                    console.print(
-                        f"\n[bold green]✓ Scoring complete - showing top {len(display_candidates)} candidates[/bold green]"
-                    )
-                    console.print(
-                        "[dim]Run with --validate to verify with IBKR real-time data[/dim]"
-                    )
-                    return
-
-                # Convert scored candidates to format expected by validation
-                # We'll create a scan_results object compatible with IBKR validation
-                console.print(f"\n[bold cyan]Step 3: IBKR Validation[/bold cyan]")
-                console.print(
-                    f"[dim]Validating top {len(display_candidates)} candidates with real-time data...[/dim]\n"
-                )
-
-                from src.tools.barchart_scanner import (
-                    BarchartScanResult,
-                    BarchartScanOutput,
-                )
-
-                # Convert top-ranked candidates to BarchartScanResult format for validation
-                barchart_results = []
-                for scored in display_candidates:
-                    candidate = scored.candidate
-                    result = BarchartScanResult(
-                        underlying_symbol=candidate.symbol,
-                        instrument_type="stock",  # Not available from CSV, assume stock
-                        option_type=candidate.option_type.lower(),  # Convert to lowercase
-                        strike=candidate.strike,
-                        expiration_date=candidate.expiration.isoformat(),
-                        last_price=candidate.underlying_price,
-                        option_price=candidate.bid,  # Use bid as last price
-                        bid=candidate.bid,
-                        ask=None,  # Not available from CSV
-                        delta=abs(candidate.delta),  # Convert back to positive
-                        volume=candidate.volume,
-                        open_interest=candidate.open_interest,
-                        volatility=candidate.iv_rank,  # IV rank as volatility proxy
-                    )
-                    barchart_results.append(result)
-
-                scan_results = BarchartScanOutput(
-                    scan_timestamp=utc_now(),
-                    config_used={"source": "csv_import", "file": str(csv_path)},
-                    total_results=len(barchart_results),
-                    results=barchart_results,
-                    api_status_code=200,
-                    api_message="CSV import successful",
-                )
-
-            except Exception as e:
-                console.print(f"[bold red]✗ Failed to parse CSV: {e}[/bold red]\n")
-                raise typer.Exit(1)
-
-        else:
-            # Step 1: Barchart Scan
-            console.print("[bold cyan]Step 1: Barchart Market Scan[/bold cyan]")
-            console.print("[dim]Scanning entire US options market...[/dim]\n")
-
-            scanner = BarchartScanner(naked_put_config)
-
-            # Track execution time for database
-            scan_start_time = time.time()
-
-            try:
-                with console.status("[bold yellow]Fetching from Barchart API..."):
-                    scan_results = scanner.scan()
-            except ValueError as e:
-                console.print(f"[bold red]✗ Barchart API error: {e}[/bold red]\n")
-
-                if "API key" in str(e).lower() or "authentication" in str(e).lower():
-                    console.print("[yellow]API Key Issue:[/yellow]")
-                    console.print(
-                        "• Check that BARCHART_API_KEY is set correctly in .env"
-                    )
-                    console.print(
-                        "• Verify your key at: https://www.barchart.com/ondemand"
-                    )
-                elif "rate limit" in str(e).lower():
-                    console.print("[yellow]Rate Limit Issue:[/yellow]")
-                    console.print("• You've hit your daily query limit")
-                    console.print("• Wait until tomorrow or upgrade your plan")
-                    console.print("• See docs/BARCHART_API_GUIDE.md for plan options")
-                else:
-                    console.print("[yellow]Troubleshooting:[/yellow]")
-                    console.print("• Check your internet connection")
-                    console.print("• Verify Barchart API is operational")
-                    console.print("• See docs/BARCHART_API_GUIDE.md for help")
-
-                console.print(
-                    "\n[bold red]✗ Scan aborted - cannot proceed without Barchart API[/bold red]"
-                )
-                raise typer.Exit(1)
-
-            console.print(
-                f"✓ Found {scan_results.total_results} candidates from Barchart\n"
-            )
-
-        # Calculate execution time
-        scan_execution_time = time.time() - scan_start_time
-
-        # Save to database if requested
-        scan_id = None
-        if save_db and scan_results.results:
-            try:
-                with get_db_session() as session:
-                    persistence = ScanPersistence(session)
-
-                    # Save Barchart scan results (will be updated with validation later)
-                    saved_scan = persistence.save_barchart_scan(
-                        scan_output=scan_results,
-                        execution_time=scan_execution_time,
-                        validated_results=None,  # Will update after IBKR validation
-                    )
-                    scan_id = saved_scan.id
-
-                    console.print(
-                        f"✓ Saved scan results to database (scan_id: {scan_id})\n"
-                    )
-
-            except Exception as e:
-                console.print(f"[yellow]⚠ Failed to save to database: {e}[/yellow]\n")
-
-        # Save raw results if requested
-        if save_file and not from_csv:
-            save_path = Path(save_file)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            scanner.scan_and_save(str(save_path))
-            console.print(f"✓ Saved raw results to {save_path}\n")
-
-        if not scan_results.results:
-            console.print("[yellow]No options matched criteria[/yellow]\n")
-            console.print("[dim]Tips:[/dim]")
-            console.print("  • Widen your DTE range (edit BARCHART_DTE_MAX in .env)")
-            console.print(
-                "  • Adjust delta range (edit BARCHART_DELTA_MIN/MAX in .env)"
-            )
-            console.print(
-                "  • Lower minimum bid price (edit BARCHART_BID_PRICE_MIN in .env)"
-            )
-            console.print("  • See docs/BARCHART_API_GUIDE.md for configuration help")
-            return
-
-        # Just display Barchart results if no validation requested
-        if not validate:
-            _display_barchart_results(scan_results.results[:max_results])
-            console.print(
-                f"\n[bold green]✓ Scan complete ({scan_results.total_results} results)[/bold green]"
-            )
-            console.print(
-                "[dim]Run with --validate to verify with IBKR real-time data[/dim]"
-            )
-            return
-
-        # Step 2: IBKR Validation
-        console.print("[bold cyan]Step 2: IBKR Real-Time Validation[/bold cyan]")
-        console.print(
-            "[dim]Validating candidates with real-time quotes and margin calculations...[/dim]\n"
-        )
-
-        app_config = get_config()
-
-        try:
-            client = connect_to_ibkr_with_error_handling(app_config, console)
-            console.print("✓ Connected to IBKR\n")
-        except typer.Exit:
-            # Connection failed - show unvalidated results instead
-            console.print(
-                "\n[yellow]⚠ Displaying unvalidated Barchart results only[/yellow]\n"
-            )
-            _display_barchart_results(scan_results.results[:max_results])
-            raise
-
-        validator = IBKRValidator(client, naked_put_config)
-
-        with console.status("[bold yellow]Validating with real-time data..."):
-            validated, validation_report = validator.validate_scan_results_with_report(
-                scan_results,
-                max_candidates=min(50, len(scan_results.results)),
-            )
-
-        console.print(f"✓ Validated {len(validated)} options\n")
-
-        # Check for IBKR errors that might explain validation failures
-        from src.tools.ibkr_client import IBKRErrorConsolidator
-        suppressed_counts = IBKRErrorConsolidator.get_suppressed_counts()
-        if suppressed_counts:
-            console.print("[yellow]⚠ IBKR Errors Detected:[/yellow]")
-            for error_code, count in suppressed_counts.items():
-                if error_code == 354 or error_code == 10090:
-                    console.print(
-                        f"  • Error {error_code}: {count} market data subscription errors"
-                    )
-                    console.print(
-                        f"     [dim]→ You may not have market data subscription for options in IBKR[/dim]"
-                    )
-                elif error_code == 200:
-                    console.print(
-                        f"  • Error {error_code}: {count} contract not found errors"
-                    )
-                else:
-                    console.print(f"  • Error {error_code}: {count} occurrences")
-            console.print()
-
-        # Display validation report
-        validation_report.display_summary(console)
-
-        # Show rejected candidates table if requested
-        if show_rejected and validation_report.rejected_candidates:
-            validation_report.display_rejected_table(console)
-
-        # Save validation report to CSV if requested
-        if save_validation_report:
-            report_path = Path(save_validation_report)
-            validation_report.save_to_csv(report_path)
-            console.print(
-                f"\n[green]✓ Validation report saved to {report_path}[/green]\n"
-            )
-
-        # Update database with validated results if we saved earlier
-        if save_db and scan_id and validated:
-            try:
-                with get_db_session() as session:
-                    persistence = ScanPersistence(session)
-
-                    # Update opportunities with IBKR validation data
-                    persistence._update_validated_opportunities(scan_id, validated)
-
-                    console.print(
-                        f"✓ Updated {len(validated)} opportunities with IBKR validation\n"
-                    )
-
-            except Exception as e:
-                console.print(
-                    f"[yellow]⚠ Failed to update database with validation: {e}[/yellow]\n"
-                )
-
-        client.disconnect()
-
-        if not validated:
-            # Detailed report already shown above, just return
-            return
-
-        # Display results
-        _display_validated_results(validated[:max_results])
-
-        console.print(
-            f"\n[bold green]✓ Found {len(validated)} validated trading opportunities[/bold green]"
-        )
-
-    except typer.Exit:
-        raise
-    except Exception as e:
-        console.print(f"[bold red]✗ Scan failed: {e}[/bold red]")
-        import traceback
-
-        console.print(traceback.format_exc())
-        raise typer.Exit(1)
-
-
-def _display_barchart_results(results: list) -> None:
-    """Display Barchart scan results (unvalidated)."""
-    table = Table(title="Barchart Scan Results (Unvalidated)")
-    table.add_column("#", style="dim")
-    table.add_column("Symbol", style="cyan bold")
-    table.add_column("Strike", justify="right")
-    table.add_column("Expiry")
-    table.add_column("Bid", justify="right")
-    table.add_column("Delta", justify="right")
-    table.add_column("IV", justify="right")
-    table.add_column("Volume", justify="right")
-
-    for i, r in enumerate(results, 1):
-        table.add_row(
-            str(i),
-            r.underlying_symbol,
-            f"${r.strike:.2f}",
-            r.expiration_date,
-            f"${r.bid:.2f}" if r.bid else "N/A",
-            f"{r.delta:.2f}" if r.delta else "N/A",
-            f"{r.volatility:.0%}" if r.volatility else "N/A",
-            str(r.volume) if r.volume else "N/A",
-        )
-
-    console.print(table)
-
-
-def _display_ranked_candidates(
-    scored_candidates: list[ScoredCandidate], console: Console
-) -> None:
-    """Display ranked candidates with scores and grades.
-
-    Args:
-        scored_candidates: List of ScoredCandidate objects (already ranked)
-        console: Rich console for output
-    """
-    table = Table(title="Ranked Naked Put Candidates (Scored & Diversified)")
-
-    table.add_column("Rank", justify="right", style="cyan")
-    table.add_column("Symbol", style="green bold")
-    table.add_column("Strike", justify="right")
-    table.add_column("Exp", justify="center")
-    table.add_column("DTE", justify="right")
-    table.add_column("Bid", justify="right", style="green")
-    table.add_column("Score", justify="right", style="bold yellow")
-    table.add_column("Grade", justify="center")
-    table.add_column("Ret", justify="right")  # Return score
-    table.add_column("Prob", justify="right")  # Probability score
-    table.add_column("IV", justify="right")  # IV Rank score
-    table.add_column("Liq", justify="right")  # Liquidity score
-
-    for s in scored_candidates:
-        # Determine grade style
-        grade_style = {
-            "A+": "bold green",
-            "A": "green",
-            "B": "yellow",
-            "C": "orange1",
-            "D": "red",
-            "F": "bold red",
-        }.get(s.grade, "white")
-
-        # Use diversified rank if available, otherwise regular rank
-        rank_display = s.diversified_rank or s.rank or "N/A"
-
-        table.add_row(
-            str(rank_display),
-            s.symbol,
-            f"${s.strike:.2f}",
-            s.expiration.strftime("%m/%d"),
-            str(s.dte),
-            f"${s.bid:.2f}",
-            f"{s.composite_score:.1f}",
-            f"[{grade_style}]{s.grade}[/{grade_style}]",
-            f"{s.return_score:.0f}",
-            f"{s.probability_score:.0f}",
-            f"{s.iv_rank_score:.0f}",
-            f"{s.liquidity_score:.0f}",
-        )
-
-    console.print(table)
-
-
-def _display_validated_results(validated: list) -> None:
-    """Display validated trading opportunities."""
-    table = Table(title="Validated Trading Opportunities")
-    table.add_column("#", style="dim")
-    table.add_column("Symbol", style="cyan bold")
-    table.add_column("Strike", justify="right", style="green")
-    table.add_column("Expiry")
-    table.add_column("Premium", justify="right", style="green")
-    table.add_column("Spread%", justify="right")
-    table.add_column("OTM%", justify="right")
-    table.add_column("DTE", justify="right")
-    table.add_column("Trend", justify="center")
-    table.add_column("Margin Req", justify="right", style="magenta")
-    table.add_column("Margin Eff", justify="right", style="yellow")
-
-    for i, v in enumerate(validated, 1):
-        trend_icon = (
-            "↑"
-            if v.trend == "uptrend"
-            else "→"
-            if v.trend == "sideways"
-            else "↓"
-            if v.trend == "downtrend"
-            else "?"
-        )
-
-        table.add_row(
-            str(i),
-            v.symbol,
-            f"${v.strike:.2f}",
-            v.expiration,
-            f"${v.premium:.2f}",
-            f"{v.spread_pct:.1%}",
-            fmt_pct(v.otm_pct),
-            str(v.dte),
-            trend_icon,
-            f"${v.margin_required:.2f}",
-            f"{v.margin_efficiency:.2%}",
-        )
-
-    console.print(table)
-
-
 @app.command(name="execute-one")
 def execute(
     symbol: str = typer.Argument(..., help="Stock symbol (e.g., AAPL)"),
@@ -1330,88 +715,38 @@ def trade(
         "--dry-run/--live",
         help="Dry run mode (no real orders) or live execution",
     ),
-    # OPPORTUNITY SOURCES (mutually exclusive - choose ONE)
-    from_csv: str = typer.Option("", help="Import opportunities from Barchart CSV file"),
-    use_api: bool = typer.Option(False, help="Scan for opportunities using Barchart API"),
     manual_only: bool = typer.Option(False, help="Use only manual trades from database"),
     # VALIDATION OPTIONS
     validate: bool = typer.Option(True, "--validate/--no-validate", help="Validate opportunities with IBKR before executing (default: validate)"),
-    # CSV-SPECIFIC OPTIONS
-    top: int = typer.Option(0, help="Take top N opportunities from CSV (0=use max_trades)"),
 ) -> None:
-    """Run autonomous trading cycle with opportunities from CSV, API, or manual entries.
+    """Run autonomous trading cycle with manual trade entries.
 
     This command executes the full autonomous trading workflow:
-    1. Load opportunities from ONE source (CSV file, Barchart API, or manual database)
+    1. Load opportunities from manual trades in the database
     2. Validate opportunities with IBKR real-time data
     3. Execute best opportunities within risk limits
     4. Capture entry snapshots for learning
 
-    OPPORTUNITY SOURCES (choose ONE):
-      --from-csv FILE    Import opportunities from Barchart CSV export
-      --use-api          Scan for opportunities using Barchart API (requires API key)
-      --manual-only      Use only manual trades entered in database
-
     Examples:
-        # Import from CSV and execute top 5
-        nakedtrader trade --from-csv opportunities.csv --max-trades 5
-
-        # Use Barchart API scan (requires BARCHART_API_KEY in .env)
-        nakedtrader trade --use-api --max-trades 5
-
         # Use manual trades only
         nakedtrader trade --manual-only
 
-        # Autonomous mode: CSV import, auto-execute
-        nakedtrader trade --from-csv opportunities.csv --auto
-
         # Dry run (test without placing orders)
-        nakedtrader trade --from-csv opportunities.csv --dry-run
+        nakedtrader trade --manual-only --dry-run
 
         # Skip IBKR validation (not recommended)
-        nakedtrader trade --from-csv opportunities.csv --no-validate
+        nakedtrader trade --manual-only --no-validate
     """
     try:
         console.print("[bold blue]Autonomous Trading Cycle[/bold blue]\n")
 
-        # STEP 1: Validate input - exactly ONE opportunity source must be specified
-        sources_count = sum([
-            bool(from_csv),      # CSV file provided
-            use_api,              # API scan requested
-            manual_only           # Manual trades only
-        ])
-
-        if sources_count == 0:
+        if not manual_only:
             console.print("[bold red]✗ Error: No opportunity source specified[/bold red]\n")
-            console.print("[yellow]You must specify ONE of:[/yellow]")
-            console.print("  • --from-csv FILE  (import from Barchart CSV)")
-            console.print("  • --use-api        (scan using Barchart API)")
+            console.print("[yellow]You must specify:[/yellow]")
             console.print("  • --manual-only    (use manual trades from database)")
-            console.print("\n[cyan]Examples:[/cyan]")
-            console.print("  nakedtrader trade --from-csv opportunities.csv")
-            console.print("  nakedtrader trade --use-api")
+            console.print("\n[cyan]Example:[/cyan]")
             console.print("  nakedtrader trade --manual-only")
             raise typer.Exit(1)
-
-        if sources_count > 1:
-            console.print("[bold red]✗ Error: Multiple opportunity sources specified[/bold red]\n")
-            console.print("[yellow]You can only use ONE source at a time:[/yellow]")
-            if from_csv:
-                console.print("  ✓ CSV file: {from_csv}")
-            if use_api:
-                console.print("  ✓ Barchart API")
-            if manual_only:
-                console.print("  ✓ Manual trades")
-            console.print("\n[dim]Remove all but one source and try again.[/dim]")
-            raise typer.Exit(1)
-
-        # Validate CSV file exists if specified
-        if from_csv:
-            csv_path = Path(from_csv)
-            if not csv_path.exists():
-                console.print(f"[bold red]✗ CSV file not found: {from_csv}[/bold red]\n")
-                console.print("[yellow]Please check the file path and try again.[/yellow]")
-                raise typer.Exit(1)
 
         if dry_run:
             console.print(
@@ -1431,16 +766,7 @@ def trade(
         console.print("✓ Connected to IBKR\n")
 
         # Display mode information
-        if from_csv:
-            console.print(f"[bold]Mode:[/bold] CSV Import from {Path(from_csv).name}")
-            if validate:
-                console.print("[dim]Will validate with IBKR real-time data[/dim]\n")
-            else:
-                console.print("[dim]Will execute without IBKR validation (not recommended)[/dim]\n")
-        elif use_api:
-            console.print("[bold]Mode:[/bold] Barchart API Scan")
-            console.print("[dim]Will scan market and validate with IBKR[/dim]\n")
-        elif manual_only:
+        if manual_only:
             console.print("[bold]Mode:[/bold] Manual Trades Only")
             if validate:
                 console.print("[dim]Will validate manual trades with IBKR[/dim]\n")
@@ -1467,196 +793,16 @@ def trade(
         exit_manager = ExitManager(client, position_monitor, strategy_config)
         entry_snapshot_service = EntrySnapshotService(client, timeout=10)
 
-        # STEP 2: Load configuration and create validator based on source
-        from src.tools.ibkr_validator import IBKRValidator
-
-        naked_put_config = None
-        ibkr_validator = None
-
-        # Load appropriate configuration based on source
-        if use_api:
-            # Barchart API requires full config including API key
-            from src.config.naked_put_options_config import get_naked_put_config
-
-            try:
-                naked_put_config = get_naked_put_config()
-                ibkr_validator = IBKRValidator(client, naked_put_config)
-            except (ValueError, ValidationError) as e:
-                error_msg = e.errors()[0]["msg"] if isinstance(e, ValidationError) and e.errors() else str(e)
-                console.print(f"\n[bold red]✗ Configuration error[/bold red]")
-                console.print(f"[yellow]{error_msg}[/yellow]\n")
-                console.print("[cyan]Setup Instructions:[/cyan]")
-                console.print("1. Get a Barchart API key from: https://www.barchart.com/ondemand")
-                console.print("2. Add to your .env file: BARCHART_API_KEY=your_key_here")
-                client.disconnect()
-                raise typer.Exit(1)
-
-        elif from_csv and validate:
-            # CSV with validation requires validation settings only (no API key needed)
-            from src.config.naked_put_options_config import get_validation_only_config
-
-            try:
-                naked_put_config = get_validation_only_config()
-                ibkr_validator = IBKRValidator(client, naked_put_config)
-            except (ValueError, ValidationError) as e:
-                error_msg = e.errors()[0]["msg"] if isinstance(e, ValidationError) and e.errors() else str(e)
-                console.print(f"\n[bold red]✗ Configuration error[/bold red]")
-                console.print(f"[yellow]{error_msg}[/yellow]\n")
-                client.disconnect()
-                raise typer.Exit(1)
-
-        elif manual_only and validate:
-            # Manual trades with validation - create validator without config for basic enrichment
-            ibkr_validator = IBKRValidator(client, config=None)
+        # STEP 2: Create validator for IBKR enrichment
+        ibkr_validator = IBKRValidator(client) if validate else None
 
         # STEP 3: Gather opportunities from specified source
         console.print("[bold cyan]Step 1: Gathering opportunities...[/bold cyan]\n")
 
         all_opportunities = []
 
-        # SOURCE 1: CSV Import
-        if from_csv:
-            try:
-                from src.tools.barchart_csv_parser import parse_barchart_csv
-
-                console.print(f"[cyan]• Parsing CSV file: {Path(from_csv).name}[/cyan]")
-
-                # Parse CSV file
-                csv_candidates = parse_barchart_csv(from_csv)
-
-                if not csv_candidates:
-                    console.print("[yellow]  ⚠ No valid opportunities found in CSV[/yellow]")
-                else:
-                    console.print(f"  [dim]✓ Parsed {len(csv_candidates)} opportunities from CSV[/dim]")
-
-                    # Determine how many to take
-                    take_count = top if top > 0 else max_trades
-                    candidates_to_process = csv_candidates[:take_count] if take_count > 0 else csv_candidates
-
-                    if validate and ibkr_validator:
-                        # Validate with IBKR
-                        console.print(f"[cyan]• Validating {len(candidates_to_process)} opportunities with IBKR...[/cyan]")
-
-                        validated_count = 0
-                        for idx, candidate in enumerate(candidates_to_process, 1):
-                            try:
-                                # Convert BarchartCandidate to dict for enrichment
-                                base_opp = {
-                                    "symbol": candidate.symbol,
-                                    "strike": candidate.strike,
-                                    "expiration": candidate.expiration,
-                                    "option_type": candidate.option_type,
-                                }
-
-                                # Enrich with live IBKR data
-                                enriched = ibkr_validator.enrich_manual_opportunity(base_opp)
-
-                                if enriched:
-                                    enriched["source"] = "csv"
-                                    enriched["confidence"] = 0.80
-                                    enriched["reasoning"] = "CSV import + IBKR validation"
-                                    all_opportunities.append(enriched)
-                                    validated_count += 1
-                                    console.print(
-                                        f"  [green]✓ {idx}/{len(candidates_to_process)} {candidate.symbol} ${candidate.strike:.2f} - validated[/green]"
-                                    )
-                                else:
-                                    console.print(
-                                        f"  [yellow]✗ {idx}/{len(candidates_to_process)} {candidate.symbol} ${candidate.strike:.2f} - failed validation[/yellow]"
-                                    )
-                            except Exception as e:
-                                console.print(
-                                    f"  [red]✗ {idx}/{len(candidates_to_process)} {candidate.symbol} error: {e}[/red]"
-                                )
-
-                        console.print(f"  [green]✓ {validated_count} opportunities validated[/green]")
-                    else:
-                        # Use CSV data without validation (not recommended)
-                        console.print("[yellow]  ⚠ Skipping IBKR validation (not recommended)[/yellow]")
-                        for candidate in candidates_to_process:
-                            # Convert BarchartCandidate to dict
-                            # Note: moneyness_pct is negative for OTM, so we take absolute value
-                            all_opportunities.append({
-                                "symbol": candidate.symbol,
-                                "strike": candidate.strike,
-                                "expiration": candidate.expiration.strftime("%Y-%m-%d"),
-                                "option_type": candidate.option_type,
-                                "premium": candidate.bid,
-                                "otm_pct": abs(candidate.moneyness_pct),  # Convert from negative to positive
-                                "dte": candidate.dte,
-                                "stock_price": candidate.underlying_price,
-                                "trend": "unknown",  # CSV doesn't have trend data
-                                "margin_required": 0.0,  # Will be calculated if needed
-                                "confidence": 0.60,  # Lower confidence without validation
-                                "reasoning": "CSV import (not validated)",
-                                "source": "csv",
-                            })
-
-            except Exception as e:
-                console.print(f"[red]✗ CSV import failed: {e}[/red]")
-                import traceback
-                console.print(f"[dim]{traceback.format_exc()}[/dim]")
-                client.disconnect()
-                raise typer.Exit(1)
-
-        # SOURCE 2: Barchart API Scan
-        elif use_api:
-            try:
-                from src.tools.barchart_scanner import BarchartScanner
-
-                console.print("[cyan]• Running Barchart API scan...[/cyan]")
-
-                barchart_scanner = BarchartScanner(naked_put_config)
-
-                with console.status("[bold yellow]Scanning Barchart API..."):
-                    scan_results = barchart_scanner.scan()
-
-                if not scan_results.results:
-                    console.print("[yellow]  ⚠ No opportunities found via API scan[/yellow]")
-                else:
-                    console.print(f"  [dim]✓ Found {len(scan_results.results)} candidates[/dim]")
-
-                    # Always validate API results with IBKR
-                    console.print(f"[cyan]• Validating with IBKR...[/cyan]")
-
-                    with console.status("[bold yellow]Validating with IBKR..."):
-                        validated = ibkr_validator.validate_scan_results(
-                            scan_results,
-                            max_candidates=min(50, len(scan_results.results)),
-                        )
-
-                    if validated:
-                        console.print(f"  [green]✓ {len(validated)} passed IBKR validation[/green]")
-
-                        # Convert to dict format
-                        for v in validated:
-                            all_opportunities.append({
-                                "symbol": v.symbol,
-                                "strike": v.strike,
-                                "expiration": v.expiration,
-                                "option_type": v.option_type,
-                                "premium": v.premium,
-                                "otm_pct": v.otm_pct,
-                                "dte": v.dte,
-                                "stock_price": v.stock_price,
-                                "trend": v.trend,
-                                "margin_required": v.margin_required,
-                                "confidence": 0.75,
-                                "reasoning": "Barchart API scan + IBKR validation",
-                                "source": "api",
-                            })
-                    else:
-                        console.print("[yellow]  ⚠ No opportunities passed validation[/yellow]")
-
-            except Exception as e:
-                console.print(f"[red]✗ API scan failed: {e}[/red]")
-                import traceback
-                console.print(f"[dim]{traceback.format_exc()}[/dim]")
-                client.disconnect()
-                raise typer.Exit(1)
-
-        # SOURCE 3: Manual Trades Only
-        elif manual_only:
+        # Load manual trades from database
+        if manual_only:
             try:
                 from src.data.manual_trade_importer import ManualTradeImporter
 
@@ -1759,12 +905,7 @@ def trade(
 
         if not all_opportunities:
             console.print("[yellow]No opportunities found[/yellow]")
-            if from_csv:
-                console.print("[dim]Tip: Check CSV file format and content[/dim]")
-            elif use_api:
-                console.print("[dim]Tip: Try different scan parameters or check API key[/dim]")
-            elif manual_only:
-                console.print("[dim]Tip: Add manual trades via 'execute' command[/dim]")
+            console.print("[dim]Tip: Add manual trades via 'execute' command[/dim]")
             client.disconnect()
             return
 
@@ -2937,8 +2078,7 @@ def add_trade(
 ) -> None:
     """Add manual trade opportunities interactively or via command-line arguments.
 
-    This command allows you to manually enter trading opportunities during the
-    early phase before Barchart integration is fully tuned. Trades are saved
+    This command allows you to manually enter trading opportunities. Trades are saved
     to JSON files in data/manual_trades/pending/ and will be automatically
     imported when running the 'trade' command.
 
@@ -3332,7 +2472,7 @@ def show_pending_trades(
                 "  • Execute only these trades: nakedtrader trade --manual-only"
             )
             console.print(
-                "  • Execute with Barchart scan: nakedtrader trade"
+                "  • Execute manual trades: nakedtrader trade --manual-only"
             )
             console.print(
                 "  • Dry run first: nakedtrader trade --manual-only --dry-run"
@@ -3350,7 +2490,7 @@ def show_pending_trades(
 def scan_history(
     days: int = typer.Option(30, help="Number of days to look back"),
     source: Optional[str] = typer.Option(
-        None, help="Filter by source (barchart, manual, manual_web)"
+        None, help="Filter by source (manual, manual_web, ibkr)"
     ),
     symbol: Optional[str] = typer.Option(None, help="Filter by symbol"),
     limit: int = typer.Option(50, help="Maximum number of scans to show"),
@@ -3364,8 +2504,8 @@ def scan_history(
         # Show last 30 days of scans
         nakedtrader history
 
-        # Show only Barchart scans from last 7 days
-        nakedtrader history --days 7 --source barchart
+        # Show only manual scans from last 7 days
+        nakedtrader history --days 7 --source manual
 
         # Show scans containing AAPL opportunities
         nakedtrader history --symbol AAPL
@@ -4512,84 +3652,6 @@ def learning_stats():
 # ============================================================================
 # Phase 4: Sunday-Monday Workflow Commands
 # ============================================================================
-
-
-@app.command(name="stage")
-def sunday_session(
-    csv_file: Optional[Path] = typer.Argument(
-        None,
-        help="Optional Barchart CSV file to import",
-        exists=True,
-    ),
-    skip_confirmations: bool = typer.Option(
-        False,
-        "--yes",
-        "-y",
-        help="Skip confirmation prompts",
-    ),
-) -> None:
-    """Run the complete Sunday session workflow.
-
-    Phase 4.5 - Sunday Session
-
-    This chains together:
-    1. Screen for candidates (CSV import or live scan)
-    2. Score and rank opportunities
-    3. Interactive selection (remove symbols, chart review)
-    4. Build portfolio with margin check
-    5. Stage trades for Monday execution
-
-    Example:
-        nakedtrader stage barchart_export.csv
-        nakedtrader stage --yes  # Skip confirmations
-    """
-    console.print("[bold cyan]SUNDAY SESSION[/bold cyan]")
-    console.print("[dim]Automated trade preparation for Monday execution[/dim]\n")
-
-    try:
-        setup_logging()
-
-        # Load configuration
-        config = SundaySessionConfig.from_env()
-
-        # Connect to IBKR if available (optional for Sunday)
-        ibkr_client = None
-        try:
-            base_config = get_config()
-            ibkr_client = IBKRClient(base_config.ibkr)
-            ibkr_client.connect()
-            console.print("[green]✓[/green] Connected to IBKR\n")
-        except Exception:
-            console.print("[yellow]⚠[/yellow] IBKR not available - will use cached data\n")
-
-        # Run the Sunday session
-        result = run_sunday_session(
-            config=config,
-            ibkr_client=ibkr_client,
-            console=console,
-            skip_confirmations=skip_confirmations,
-            csv_file=str(csv_file) if csv_file else None,
-        )
-
-        if result.trades_staged > 0:
-            console.print(f"\n[bold green]✓ Sunday session complete[/bold green]")
-            console.print(f"[dim]Staged {result.trades_staged} trades for Monday execution[/dim]")
-        else:
-            console.print("\n[yellow]No trades staged[/yellow]")
-
-    except typer.Exit:
-        raise
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Session cancelled by user[/yellow]")
-        raise typer.Exit(0)
-    except Exception as e:
-        console.print(f"[bold red]✗ Error: {e}[/bold red]")
-        import traceback
-        console.print(traceback.format_exc())
-        raise typer.Exit(1)
-    finally:
-        if ibkr_client:
-            ibkr_client.disconnect()
 
 
 @app.command(name="staged")
@@ -6141,21 +5203,6 @@ def taad_promote(
     from src.cli.commands.taad_commands import run_taad_promote
 
     run_taad_promote(account=account, dry_run=dry_run)
-
-
-@app.command(name="taad-barchart-login")
-def taad_barchart_login() -> None:
-    """Open browser for Barchart Premier login and save session cookies.
-
-    Opens a visible Chromium browser pointed at the Barchart login page.
-    After you log in, press Enter in the terminal to save the session.
-    The saved session is reused by --with-scrape for headless scraping.
-
-    Requires: pip install playwright && playwright install chromium
-    """
-    from src.cli.commands.taad_commands import run_taad_barchart_login
-
-    run_taad_barchart_login()
 
 
 # ============================================================================

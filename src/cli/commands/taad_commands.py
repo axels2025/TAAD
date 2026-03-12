@@ -825,10 +825,6 @@ def run_taad_enrich(
         False, "--with-ibkr",
         help="Also use IBKR historical data (requires TWS connection).",
     ),
-    with_scrape: bool = typer.Option(
-        False, "--with-scrape",
-        help="Include Barchart Premier scraping for option data (2023+, slower).",
-    ),
     limit: int = typer.Option(
         0, "--limit", "-n",
         help="Max trades to enrich (0 = all).",
@@ -879,7 +875,6 @@ def run_taad_enrich(
             console.print(f"  Symbol filter:    {symbol}")
         console.print(f"  Force re-enrich:  {'Yes' if force else 'No'}")
         console.print(f"  IBKR data:        {'Yes' if with_ibkr else 'No'}")
-        console.print(f"  Barchart scrape:  {'Yes' if with_scrape else 'No'}")
 
         # Dry run — just show what would be enriched
         if dry_run:
@@ -919,42 +914,6 @@ def run_taad_enrich(
 
         # Build provider chain
         providers = [YFinanceProvider()]
-        if with_scrape:
-            # Try Playwright scraper first (free, wider date range — 2017+)
-            try:
-                from src.taad.enrichment.barchart_playwright import PlaywrightBarchartProvider
-                pw_provider = PlaywrightBarchartProvider()
-                if pw_provider.has_valid_session():
-                    providers.append(pw_provider)
-                    console.print(
-                        f"  [green]Barchart Playwright scraper enabled "
-                        f"(cache: {pw_provider.cache.count()} entries)[/green]"
-                    )
-                else:
-                    console.print(
-                        "  [yellow]Barchart Playwright skipped: no saved session. "
-                        "Run `nakedtrader taad-barchart-login` first.[/yellow]"
-                    )
-            except ImportError:
-                console.print(
-                    "  [yellow]Playwright not installed. "
-                    "Install with: pip install playwright && playwright install chromium[/yellow]"
-                )
-            except Exception as e:
-                console.print(f"  [yellow]Playwright scraper not available: {e}[/yellow]")
-
-            # Also add API scraper as fallback (if API key is set)
-            try:
-                from src.taad.enrichment.barchart_scraper import BarchartScraperProvider
-                barchart = BarchartScraperProvider()
-                if barchart.api_key:
-                    providers.append(barchart)
-                    console.print(
-                        f"  [green]Barchart API scraper enabled "
-                        f"(cache: {barchart.cache.count()} entries)[/green]"
-                    )
-            except Exception as e:
-                console.print(f"  [yellow]Barchart API not available: {e}[/yellow]")
         if with_ibkr:
             try:
                 from src.tools.ibkr_client import IBKRClient
@@ -974,14 +933,6 @@ def run_taad_enrich(
 
         # Commit
         session.commit()
-
-        # Clean up Playwright browser if it was used
-        for p in providers:
-            if hasattr(p, "close"):
-                try:
-                    p.close()
-                except Exception:
-                    pass
 
         # Display results
         console.print(f"\n[bold green]Enrichment Complete[/bold green]")
@@ -1058,36 +1009,3 @@ def run_taad_promote(
         )
 
 
-def run_taad_barchart_login() -> None:
-    """Interactive Barchart login via Playwright.
-
-    Opens a visible browser for the user to log in to Barchart.
-    Saves session cookies for use by the Playwright scraper.
-    """
-    try:
-        from src.taad.enrichment.barchart_playwright import PlaywrightBarchartProvider
-    except ImportError:
-        console.print(
-            "[red]Playwright not installed.[/red]\n"
-            "Install with: pip install playwright && playwright install chromium"
-        )
-        return
-
-    provider = PlaywrightBarchartProvider()
-
-    console.print("\n[bold]Barchart Premier Login[/bold]")
-    console.print("─" * 40)
-    console.print("A browser window will open.")
-    console.print("Log in to your Barchart account with your Premier subscription.")
-    console.print("Press Enter in this terminal when login is complete.\n")
-
-    success = provider.login_interactive()
-    if success:
-        console.print(f"\n[green]Session saved successfully![/green]")
-        console.print(f"  Storage: {provider.storage_state_path}")
-        console.print(
-            "\nYou can now use [bold]--with-scrape[/bold] with "
-            "[bold]nakedtrader taad-enrich[/bold] to scrape option data."
-        )
-    else:
-        console.print("[red]Login failed or was cancelled.[/red]")

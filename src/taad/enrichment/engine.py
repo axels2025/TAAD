@@ -584,7 +584,7 @@ class HistoricalEnrichmentEngine:
         except Exception as e:
             result.errors.append(f"Market context: {e}")
 
-        # 9. Option data — try provider (Barchart) first, fall back to B-S
+        # 9. Option data — try provider first, fall back to B-S
         option_data_populated = False
         try:
             opt_snap = self.provider.get_option_snapshot(
