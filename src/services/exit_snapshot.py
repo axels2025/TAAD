@@ -14,6 +14,20 @@ from sqlalchemy.orm import Session
 
 from src.data.models import Trade, TradeEntrySnapshot, TradeExitSnapshot, PositionSnapshot
 from src.utils.calc import calc_pnl, calc_pnl_pct
+from src.utils.timezone import utc_now
+
+
+def _strip_tz(dt: datetime | None) -> datetime | None:
+    """Strip timezone info from a datetime for safe arithmetic.
+
+    PostgreSQL 'timestamp without time zone' stores naive datetimes.
+    In-memory values may still carry tzinfo from us_eastern_now() if
+    the session hasn't been refreshed.  Stripping before subtraction
+    prevents 'can't subtract offset-naive and offset-aware datetimes'.
+    """
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
 class ExitSnapshotService:
@@ -61,10 +75,10 @@ class ExitSnapshotService:
         # Initialize snapshot
         snapshot = TradeExitSnapshot(
             trade_id=trade.id,
-            exit_date=trade.exit_date or datetime.now(),
+            exit_date=_strip_tz(trade.exit_date) or utc_now(),
             exit_premium=exit_premium,
             exit_reason=exit_reason,
-            captured_at=datetime.now(),
+            captured_at=utc_now(),
         )
 
         # Calculate basic outcome metrics
@@ -115,9 +129,9 @@ class ExitSnapshotService:
             trade: Trade object
             exit_premium: Premium at exit
         """
-        # Days held
+        # Days held — strip tzinfo to avoid naive/aware mismatch
         if trade.exit_date and trade.entry_date:
-            snapshot.days_held = (trade.exit_date - trade.entry_date).days
+            snapshot.days_held = (_strip_tz(trade.exit_date) - _strip_tz(trade.entry_date)).days
 
         # Gross profit (before commissions)
         snapshot.gross_profit = calc_pnl(trade.entry_premium, exit_premium, trade.contracts)
