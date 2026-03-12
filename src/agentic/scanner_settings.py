@@ -59,6 +59,30 @@ class BudgetSettings(BaseModel):
     max_contracts_expensive: int = Field(default=3, ge=1)
     max_contracts_cheap: int = Field(default=5, ge=1)
 
+    # Position sizing risk parameters
+    risk_per_trade_pct: float = Field(
+        default=0.02, ge=0.005, le=0.20,
+        description="Max risk per trade as fraction of NLV (0.02 = 2%)",
+    )
+    loss_assumption_pct: float = Field(
+        default=0.25, ge=0.05, le=0.50,
+        description="Assumed max stock drop for risk calc (0.25 = 25%)",
+    )
+
+    # VIX-based position scaling
+    vix_scale_normal: float = Field(
+        default=0.80, ge=0.1, le=1.0,
+        description="Sizing multiplier when VIX 15-25",
+    )
+    vix_scale_elevated: float = Field(
+        default=0.50, ge=0.1, le=1.0,
+        description="Sizing multiplier when VIX 25-35",
+    )
+    vix_scale_extreme: float = Field(
+        default=0.25, ge=0.0, le=1.0,
+        description="Sizing multiplier when VIX > 35",
+    )
+
 
 class ScannerScanSettings(BaseModel):
     """IBKR scanner parameters (num_rows, etc.)."""

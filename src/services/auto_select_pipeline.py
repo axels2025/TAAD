@@ -635,7 +635,7 @@ def run_auto_select_pipeline(
                 if result.stock_price > budget_cfg.price_threshold
                 else budget_cfg.max_contracts_cheap
             )
-            sizer = PositionSizer(account_equity=nlv)
+            sizer = PositionSizer.from_budget_settings(nlv, budget_cfg)
             result.contracts = max(
                 1, sizer.calculate_contracts(
                     strike=result.strike,

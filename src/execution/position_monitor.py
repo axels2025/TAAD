@@ -648,11 +648,32 @@ class PositionMonitor:
             import math
             quote = asyncio.run(self.ibkr_client.get_quote(qualified_contract, timeout=5.0))
 
-            # Calculate entry premium per contract
-            # avgCost is the per-contract cost basis (negative for short positions)
-            # For short options: avgCost = -(premium × 100)
-            # So entry premium per contract = abs(avgCost) / 100
-            entry_premium = abs(ib_position.avgCost) / 100
+            # Look up actual entry premium from database Trade record.
+            # IBKR's avgCost is mark-to-market (changes daily) — NOT the
+            # actual fill price.  Using it causes wildly wrong P&L values
+            # (e.g. -982% when avgCost drifts to near-zero).
+            entry_premium = None
+            position_id = self._get_position_id(ib_position)
+            if self.trade_repository:
+                try:
+                    from src.execution.exit_manager import ExitManager
+
+                    trade = ExitManager._find_trade_by_position_id(
+                        self.trade_repository.session, position_id
+                    )
+                    if trade and trade.entry_premium and trade.entry_premium > 0:
+                        entry_premium = trade.entry_premium
+                except Exception as e:
+                    logger.debug(f"Trade lookup for entry premium failed: {e}")
+
+            # Fallback to avgCost only if no Trade record found
+            if entry_premium is None:
+                entry_premium = abs(ib_position.avgCost) / 100
+                logger.debug(
+                    f"{contract.symbol} ${contract.strike}: Using avgCost "
+                    f"fallback for entry premium (${entry_premium:.4f}) — "
+                    f"no Trade record found"
+                )
 
             # Get current premium per contract
             # Check for valid data (not None, not NaN, greater than 0)

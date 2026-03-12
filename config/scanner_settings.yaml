@@ -18,8 +18,13 @@ budget:
   max_positions: 25
   max_per_sector: 5
   price_threshold: 90.0
-  max_contracts_expensive: 3
-  max_contracts_cheap: 5
+  max_contracts_expensive: 5
+  max_contracts_cheap: 8
+  risk_per_trade_pct: 0.05
+  loss_assumption_pct: 0.15
+  vix_scale_normal: 1.0
+  vix_scale_elevated: 0.75
+  vix_scale_extreme: 0.25
 earnings:
   enabled: true
   additional_otm_pct: 0.15

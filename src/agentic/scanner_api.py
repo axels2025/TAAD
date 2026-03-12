@@ -267,7 +267,7 @@ def create_scanner_router(verify_token) -> "APIRouter":
                 "price_based_max": price_based_max,
             }
 
-        sizer = PositionSizer(account_equity=nlv)
+        sizer = PositionSizer.from_budget_settings(nlv, budget)
         quantity = sizer.calculate_contracts(
             strike=request.strike,
             price_based_max=price_based_max,
@@ -661,7 +661,7 @@ def create_scanner_router(verify_token) -> "APIRouter":
                     if result.stock_price > budget.price_threshold
                     else budget.max_contracts_cheap
                 )
-                sizer = PositionSizer(account_equity=nlv)
+                sizer = PositionSizer.from_budget_settings(nlv, budget)
                 result.contracts = max(
                     1, sizer.calculate_contracts(
                         strike=result.strike,

@@ -182,6 +182,11 @@ const SECTIONS = [
       { key: 'price_threshold', label: 'Price Threshold', desc: 'Stock price dividing cheap/expensive ($)', type: 'number', min: 0, step: 5 },
       { key: 'max_contracts_expensive', label: 'Max Contracts (Expensive)', desc: 'Max contracts for stocks above threshold', type: 'number', min: 1, max: 20, step: 1 },
       { key: 'max_contracts_cheap', label: 'Max Contracts (Cheap)', desc: 'Max contracts for stocks below threshold', type: 'number', min: 1, max: 20, step: 1 },
+      { key: 'risk_per_trade_pct', label: 'Risk Per Trade %', desc: 'Max risk per trade as fraction of NLV (0.02=2%, 0.05=5%)', type: 'number', min: 0.005, max: 0.20, step: 0.005 },
+      { key: 'loss_assumption_pct', label: 'Loss Assumption %', desc: 'Assumed max stock drop for risk calc (0.25=25% drop, lower=more contracts)', type: 'number', min: 0.05, max: 0.50, step: 0.01 },
+      { key: 'vix_scale_normal', label: 'VIX Scale (15-25)', desc: 'Sizing multiplier in normal VIX (1.0=full, 0.8=20% reduction)', type: 'number', min: 0.1, max: 1.0, step: 0.05 },
+      { key: 'vix_scale_elevated', label: 'VIX Scale (25-35)', desc: 'Sizing multiplier in elevated VIX', type: 'number', min: 0.1, max: 1.0, step: 0.05 },
+      { key: 'vix_scale_extreme', label: 'VIX Scale (>35)', desc: 'Sizing multiplier in extreme VIX', type: 'number', min: 0.0, max: 1.0, step: 0.05 },
     ],
   },
   {
