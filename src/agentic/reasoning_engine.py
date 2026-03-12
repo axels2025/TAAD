@@ -518,6 +518,7 @@ class ClaudeReasoningEngine:
                 confidence=1.0,
                 reasoning="Daily Claude API cost cap exceeded. Monitoring only.",
                 key_factors=["cost_cap_exceeded"],
+                metadata={"decision_source": "fallback_cost_cap"},
             )]
 
         # Select prompt variant based on event type
@@ -588,6 +589,7 @@ class ClaudeReasoningEngine:
             confidence=1.0,
             reasoning="Claude reasoning failed. Falling back to monitoring.",
             key_factors=["reasoning_failure"],
+            metadata={"decision_source": "fallback_api_error"},
         )]
 
     def reflect(self, decisions_today: list[dict], trades_today: list[dict]) -> dict:
@@ -911,6 +913,7 @@ class ClaudeReasoningEngine:
             confidence=1.0,
             reasoning=reason,
             key_factors=["parse_fallback"],
+            metadata={"decision_source": "fallback_parse_error"},
         )
 
     def _parse_reflection(self, content: str) -> dict:

@@ -554,6 +554,7 @@ class TAADDaemon:
                         confidence=1.0,
                         reasoning="No material context changes since last check",
                         key_factors=["no_change_skip"],
+                        metadata={"decision_source": "skip_no_change"},
                     )]
                     skip_claude = True
                 else:
@@ -652,6 +653,7 @@ class TAADDaemon:
                                 f"same action already decided {dominated}s ago"
                             ),
                             key_factors=["duplicate_suppressed"],
+                            metadata={"decision_source": "dedup_recent_action"},
                         )
 
                 # Deduplicate pending approvals: if the same action is already
@@ -685,6 +687,7 @@ class TAADDaemon:
                                 f"(audit #{existing_pending.id}) — suppressing duplicate"
                             ),
                             key_factors=["pending_approval_exists"],
+                            metadata={"decision_source": "dedup_pending_approval"},
                         )
 
                 # Feed reasoning to entropy monitor (Phase 6)
