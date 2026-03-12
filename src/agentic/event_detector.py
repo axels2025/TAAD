@@ -13,11 +13,13 @@ stale/default data when IBKR returns no quote outside trading hours.
 """
 
 import asyncio
+from datetime import datetime, timedelta
 from typing import Optional
 
 from loguru import logger
 
 from src.agentic.event_bus import EventBus, EventType
+from src.data.models import DaemonEvent
 
 
 # Default VIX returned by MarketConditionMonitor when quote fails.
@@ -59,6 +61,10 @@ class EventDetector:
         self._session_open_vix: Optional[float] = None
         self._last_vix: Optional[float] = None
         self._vix_spike_emitted: bool = False
+
+        # Breach dedup: position_id → last emit time (in-memory cooldown)
+        self._breach_emitted: dict[str, datetime] = {}
+        self._breach_cooldown = timedelta(hours=2)
 
     async def run(self, poll_interval: int = 300) -> None:
         """Background loop — check VIX + positions every poll_interval seconds.
@@ -159,7 +165,17 @@ class EventDetector:
             logger.debug(f"VIX check failed: {e}")
 
     async def _check_critical_alerts(self) -> None:
-        """Check positions for critical alerts (approaching stop loss)."""
+        """Check positions for critical alerts (approaching stop loss).
+
+        Includes event-level dedup with 2-hour cooldown: once a
+        RISK_LIMIT_BREACH event is emitted for a position, no new event
+        is emitted for 2 hours.  This prevents the 5-minute poll from
+        generating 17+ duplicate events ($1-2 Claude API cost each).
+
+        Uses two layers:
+        1. In-memory cooldown dict (fast, covers steady-state)
+        2. DB check for recent events (covers daemon restarts)
+        """
         if not self.position_monitor:
             return
 
@@ -169,6 +185,24 @@ class EventDetector:
 
             for alert in critical_alerts:
                 if alert.alert_type in ("stop_loss", "assignment_risk"):
+                    # Dedup layer 1: in-memory cooldown
+                    if self._is_breach_on_cooldown(alert.position_id):
+                        logger.debug(
+                            f"Suppressing RISK_LIMIT_BREACH for "
+                            f"{alert.position_id} (cooldown active)"
+                        )
+                        continue
+
+                    # Dedup layer 2: DB check for recent events (survives restart)
+                    if self._has_recent_breach_event(alert.position_id):
+                        logger.debug(
+                            f"Suppressing RISK_LIMIT_BREACH for "
+                            f"{alert.position_id} (recent event in DB)"
+                        )
+                        # Backfill in-memory cooldown from DB
+                        self._breach_emitted[alert.position_id] = datetime.utcnow()
+                        continue
+
                     logger.warning(f"Critical alert: {alert.message}")
                     self.event_bus.emit(
                         EventType.RISK_LIMIT_BREACH,
@@ -180,6 +214,49 @@ class EventDetector:
                             "threshold": alert.threshold,
                         },
                     )
+                    # Record emission time for cooldown
+                    self._breach_emitted[alert.position_id] = datetime.utcnow()
 
         except Exception as e:
             logger.debug(f"Position alert check failed: {e}")
+
+    def _is_breach_on_cooldown(self, position_id: str) -> bool:
+        """Check in-memory cooldown for a position's breach event.
+
+        Returns True if a breach event was emitted within the cooldown
+        window (default 2 hours).
+        """
+        last_emit = self._breach_emitted.get(position_id)
+        if last_emit is None:
+            return False
+        elapsed = datetime.utcnow() - last_emit
+        return elapsed < self._breach_cooldown
+
+    def _has_recent_breach_event(self, position_id: str) -> bool:
+        """Check DB for recent RISK_LIMIT_BREACH events for this position.
+
+        Used as a fallback after daemon restart when in-memory cooldown
+        is empty.  Queries for events created within the cooldown window.
+
+        Returns:
+            True if a recent breach event exists for this position
+        """
+        try:
+            from src.utils.timezone import utc_now
+            cutoff = utc_now() - self._breach_cooldown
+            recent = (
+                self.event_bus.db.query(DaemonEvent)
+                .filter(
+                    DaemonEvent.event_type == EventType.RISK_LIMIT_BREACH.value,
+                    DaemonEvent.created_at >= cutoff,
+                )
+                .all()
+            )
+            for evt in recent:
+                pid = (evt.payload or {}).get("position_id")
+                if pid == position_id:
+                    return True
+            return False
+        except Exception as e:
+            logger.debug(f"Could not check recent breach events: {e}")
+            return False
