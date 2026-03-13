@@ -493,9 +493,11 @@ class PremarketValidator:
         )
 
         # Calculate what strike would give us acceptable OTM
-        # OTM% = (stock_price - strike) / stock_price
-        # strike = stock_price * (1 - OTM%)
-        target_strike = current_price * (1 - min_otm)
+        # PUTs: strike = stock * (1 - OTM%)   — below stock
+        # CALLs: strike = stock * (1 + OTM%)  — above stock
+        from src.utils.option_math import max_otm_strike
+        option_type = getattr(opp, "option_type", None) or "PUT"
+        target_strike = max_otm_strike(current_price, min_otm, option_type)
 
         # Determine appropriate strike interval
         strike_interval = self._determine_strike_interval(opp.symbol, current_price)
@@ -503,12 +505,17 @@ class PremarketValidator:
         # Round to nearest interval
         new_strike = round(target_strike / strike_interval) * strike_interval
 
-        # Make sure new strike is lower than current price (OTM for puts)
-        if new_strike >= current_price:
-            new_strike = current_price - strike_interval
+        # Make sure new strike is OTM
+        if option_type in ("PUT", "P"):
+            if new_strike >= current_price:
+                new_strike = current_price - strike_interval
+        else:
+            if new_strike <= current_price:
+                new_strike = current_price + strike_interval
 
         # Calculate actual OTM with new strike
-        new_otm_pct = (current_price - new_strike) / current_price
+        from src.utils.option_math import calc_otm_pct
+        new_otm_pct = calc_otm_pct(current_price, new_strike, option_type)
 
         # Verify OTM is acceptable
         if new_otm_pct < min_otm:

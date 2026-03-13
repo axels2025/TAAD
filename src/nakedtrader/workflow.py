@@ -129,7 +129,8 @@ def display_trade_plan(
 
     table.add_row("Symbol", f"{selection.symbol} (via {selection.trading_class})")
     table.add_row("Exchange", profile.code)
-    table.add_row("Action", "SELL PUT")
+    option_type = getattr(selection, "option_type", "PUT") or "PUT"
+    table.add_row("Action", f"SELL {option_type}")
     table.add_row("Strike", f"{cur}{q.strike:.2f}")
     table.add_row("Expiration", f"{q.expiration[:4]}-{q.expiration[4:6]}-{q.expiration[6:]}")
     table.add_row("DTE", str(q.dte))

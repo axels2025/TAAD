@@ -681,7 +681,8 @@ class IBKRScannerService:
 
                 mid = round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else bid or ask
 
-                otm_pct = round((stock_price - strike) / stock_price, 4) if stock_price > 0 else 0.0
+                from src.utils.option_math import calc_otm_pct
+                otm_pct = round(calc_otm_pct(stock_price, strike, "PUT"), 4)
 
                 # Informational flag for the chain viewer UI "REC" badges.
                 # Uses conservative range: delta 0.05-0.15, bid >= $0.30, OTM >= 5%

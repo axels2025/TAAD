@@ -64,7 +64,7 @@ def record_trade(
         symbol=selection.symbol,
         strike=selection.quote.strike,
         expiration=datetime.strptime(selection.quote.expiration, "%Y%m%d").date(),
-        option_type="PUT",
+        option_type=getattr(selection, "option_type", "PUT") or "PUT",
         entry_date=now,
         entry_premium=entry_premium,
         contracts=1,  # Will be updated from config in workflow

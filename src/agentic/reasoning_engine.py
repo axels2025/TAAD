@@ -32,12 +32,12 @@ VALID_ACTIONS = {
     "REQUEST_HUMAN_REVIEW",
 }
 
-REASONING_SYSTEM_PROMPT = """You are the reasoning engine for an autonomous naked put options trading system.
+REASONING_SYSTEM_PROMPT = """You are the reasoning engine for an autonomous options selling trading system.
 Analyse the provided context and return a single JSON decision.
 
 ## Role & Bias
 
-This system generates income by selling naked put options.
+This system generates income by selling short options (primarily naked puts, but also short calls).
 Monday is the PRIMARY entry day (92% historical win rate, Friday expiry).
 Tuesday is the SECONDARY entry day (still profitable, slightly lower edge).
 On entry days: find reasons TO trade. Only hold back on specific, concrete, articulable risk.
@@ -253,7 +253,7 @@ Context: Day=Monday, VIX=52.4 [market_data], Market Events=["NYSE circuit breake
 }"""
 
 
-POSITION_EXIT_SYSTEM_PROMPT = """You are the exit judgment layer in an autonomous naked put options trading system.
+POSITION_EXIT_SYSTEM_PROMPT = """You are the exit judgment layer in an autonomous options selling trading system (short puts and short calls).
 
 You are ONLY called when the rule engine cannot make a clear decision.
 Hard rules (>=+75% profit, <=-300% loss, DTE=0) are handled in code before you are called.

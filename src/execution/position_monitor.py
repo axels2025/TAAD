@@ -492,9 +492,10 @@ class PositionMonitor:
                 and position.underlying_price is not None
                 and position.strike > 0
             ):
-                otm_pct = (position.underlying_price - position.strike) / position.underlying_price
+                from src.utils.option_math import calc_otm_pct, is_itm
+                otm_pct = calc_otm_pct(position.underlying_price, position.strike, position.option_type)
                 if otm_pct < 0.03:  # Less than 3% OTM (or ITM)
-                    itm = position.underlying_price <= position.strike
+                    itm = is_itm(position.underlying_price, position.strike, position.option_type)
                     severity = "critical" if itm or position.dte <= 3 else "warning"
                     alerts.append(
                         PositionAlert(

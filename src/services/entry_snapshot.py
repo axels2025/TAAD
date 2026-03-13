@@ -564,10 +564,11 @@ class EntrySnapshotService:
         Args:
             snapshot: Snapshot object to populate
         """
-        # OTM percentage: (stock_price - strike) / stock_price
+        # OTM percentage — direction-aware for both PUTs and CALLs
         if snapshot.stock_price > 0:
-            snapshot.otm_pct = (snapshot.stock_price - snapshot.strike) / snapshot.stock_price
-            snapshot.otm_dollars = snapshot.stock_price - snapshot.strike
+            from src.utils.option_math import calc_otm_pct, calc_otm_dollars
+            snapshot.otm_pct = calc_otm_pct(snapshot.stock_price, snapshot.strike, snapshot.option_type or "PUT")
+            snapshot.otm_dollars = calc_otm_dollars(snapshot.stock_price, snapshot.strike, snapshot.option_type or "PUT")
 
         # Mid price (if not already set)
         if not snapshot.mid and snapshot.bid and snapshot.ask:

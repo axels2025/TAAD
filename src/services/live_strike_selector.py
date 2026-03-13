@@ -264,7 +264,8 @@ class LiveStrikeSelector:
 
             # Step 3: Filter to candidate strikes
             candidates = self._get_candidate_strikes(
-                chain_strikes, stock_price, original_strike
+                chain_strikes, stock_price, original_strike,
+                option_type=opp.option_type or "PUT",
             )
 
             if not candidates:
@@ -305,7 +306,7 @@ class LiveStrikeSelector:
                     )
 
             # Step 5: Select best strike by delta
-            best = self._select_best_strike(greeks_data, stock_price)
+            best = self._select_best_strike(greeks_data, stock_price, option_type=opp.option_type or "PUT")
 
             if best is None:
                 if self.config.fallback_to_otm:
@@ -337,7 +338,8 @@ class LiveStrikeSelector:
             )
 
             # Step 7: Update the opportunity with new values
-            selected_otm_pct = (stock_price - best_strike) / stock_price
+            from src.utils.option_math import calc_otm_pct
+            selected_otm_pct = calc_otm_pct(stock_price, best_strike, opp.option_type or "PUT")
 
             opp.adjusted_strike = best_strike
             opp.adjusted_limit_price = new_limit
@@ -450,28 +452,29 @@ class LiveStrikeSelector:
         chain_strikes: list[float],
         stock_price: float,
         current_strike: float,
+        option_type: str = "PUT",
     ) -> list[float]:
-        """Filter chain to OTM put strikes in the evaluation range.
+        """Filter chain to OTM strikes in the evaluation range.
 
-        Selects strikes that are:
-        - Below stock price (OTM for puts)
-        - Above minimum OTM% threshold
-        - Centered around the current/adjusted strike
-        - Limited to max_candidates
+        Selects strikes that are sufficiently OTM for the given option type:
+        - PUTs: strikes below stock price by at least min_otm_pct
+        - CALLs: strikes above stock price by at least min_otm_pct
 
         Args:
             chain_strikes: All available strikes from chain
             stock_price: Current stock price
             current_strike: Current strike from staging/adjustment
+            option_type: PUT or CALL
 
         Returns:
             List of candidate strikes to evaluate (max max_candidates)
         """
-        # Filter to OTM puts with minimum OTM%
-        min_strike = 0
-        max_strike = stock_price * (1 - self.config.min_otm_pct)
+        from src.utils.option_math import is_otm_strike
 
-        otm_strikes = [s for s in chain_strikes if min_strike < s <= max_strike]
+        otm_strikes = [
+            s for s in chain_strikes
+            if is_otm_strike(stock_price, s, self.config.min_otm_pct, option_type)
+        ]
 
         if not otm_strikes:
             return []
@@ -633,6 +636,7 @@ class LiveStrikeSelector:
         self,
         candidates: dict[float, dict],
         stock_price: float,
+        option_type: str = "PUT",
     ) -> tuple[float, dict] | None:
         """Select the strike closest to target delta that passes all boundaries.
 
@@ -674,7 +678,8 @@ class LiveStrikeSelector:
                 continue
 
             # Check OTM%
-            otm_pct = (stock_price - strike) / stock_price
+            from src.utils.option_math import calc_otm_pct
+            otm_pct = calc_otm_pct(stock_price, strike, option_type)
             if otm_pct < self.config.min_otm_pct:
                 logger.debug(f"  ${strike}: OTM={otm_pct:.1%} below min {self.config.min_otm_pct:.0%}")
                 continue

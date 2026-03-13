@@ -382,6 +382,53 @@ Support multiple IBKR accounts (live + paper, or multiple strategies)
 
 ---
 
+#### Short Call Assignment Handling
+**Status:** Planned
+**Date Added:** 2026-03-13
+**Effort:** Medium (~6 hours)
+**Value:** Complete call option lifecycle — system can detect and track call assignments
+
+**Problem Solved:**
+- Current `AssignmentDetector` (`src/services/assignment_detector.py`) only handles put assignments (long stock)
+- Short call assignment creates **short stock** positions — fundamentally different tracking
+- Position lifecycle status (`Trade.lifecycle_status`) assumes put → long stock flow
+- Without this, call assignments go undetected and untracked
+
+**Implementation:**
+1. Extend `AssignmentDetector` to search for CALL trades (currently hardcoded `Trade.option_type == "PUT"`)
+2. Flip intrinsic value formula for calls: `max(stock_price - strike, 0)` instead of `max(strike - stock_price, 0)`
+3. Add short stock position tracking (new lifecycle path: `open → assigned → short_stock_held → covered`)
+4. Update assignment alerts and notifications for call-specific messaging
+
+**Prerequisites:**
+- Phase 1-3 of call support (completed 2026-03-13): `option_math` utility, direction-aware OTM/ITM everywhere
+
+---
+
+#### Autonomous Call Scanning & Entry
+**Status:** Planned
+**Date Added:** 2026-03-13
+**Effort:** Medium (~4 hours + ~4 hours testing)
+**Value:** System can autonomously open short call positions, not just monitor manually-opened ones
+
+**Problem Solved:**
+- Currently the system can only *scan for* and *enter* put positions autonomously
+- Call positions must be opened manually and are only monitored/exited by the daemon
+- No call-side strike selection (selecting OTM strikes *above* stock price)
+
+**Implementation:**
+1. Add call-side chain fetching in `IBKRScannerService._fetch_chain()` — currently filters to strikes *below* stock (puts only)
+2. Extend `auto_selector.py` filter logic to handle `option_type=CALL` candidates
+3. Add `option_type` to `ScannerSettings.FilterSettings` so scanner can be configured for puts, calls, or both
+4. Update NakedTrader workflow to accept `option_type` parameter for call selling
+5. Extend Sunday session / auto-scan to optionally include call candidates
+
+**Prerequisites:**
+- Short call assignment handling (above) — must be able to handle the full lifecycle before opening calls autonomously
+- Paper trading validation with manually-opened calls first
+
+---
+
 ## How to Use This Document
 
 1. **Adding Items:** Add to appropriate priority section with full context

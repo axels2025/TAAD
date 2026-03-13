@@ -962,7 +962,7 @@ class RiskGovernor:
     def _check_earnings_risk(self, opportunity: TradeOpportunity) -> RiskLimitCheck:
         """Check if earnings fall within option's DTE window.
 
-        Prevents selling naked puts into earnings events, which carry
+        Prevents selling options into earnings events, which carry
         outsized risk of gap moves and assignment.
 
         Args:
