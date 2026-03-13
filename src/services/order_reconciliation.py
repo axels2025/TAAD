@@ -1255,10 +1255,8 @@ class OrderReconciliation:
 
                         if current_stock_price:
                             # Calculate current OTM% (not entry OTM, but best we can do)
-                            if option_type == "P":
-                                otm_pct = (current_stock_price - strike) / current_stock_price
-                            else:  # CALL
-                                otm_pct = (strike - current_stock_price) / current_stock_price
+                            from src.utils.option_math import calc_otm_pct
+                            otm_pct = calc_otm_pct(current_stock_price, strike, option_type)
                         else:
                             otm_pct = None
                     else:

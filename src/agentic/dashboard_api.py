@@ -1010,6 +1010,19 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                         for key, pos in report.in_ibkr_not_db:
                             qty = pos.position if hasattr(pos, 'position') else '?'
                             lines.append(f"  {key}  qty={qty}")
+
+                        # Auto-import orphan positions into the database
+                        try:
+                            imported = asyncio.get_event_loop().run_until_complete(
+                                reconciler.import_orphan_positions(dry_run=False)
+                            )
+                            if imported:
+                                lines.append(f"  Imported {imported} orphan position(s) into database")
+                            else:
+                                lines.append("  Import returned 0 (positions may already exist by canonical key)")
+                        except Exception as imp_err:
+                            logger.error(f"Orphan import failed: {imp_err}", exc_info=True)
+                            lines.append(f"  Import failed: {imp_err}")
                         lines.append("")
 
                     if report.in_db_not_ibkr:
