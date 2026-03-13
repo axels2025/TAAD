@@ -311,10 +311,17 @@ const SECTIONS = {
     }
   },
   learning: {
-    label: 'Learning Loop',
-    desc: 'End-of-day reflection and experiment parameters.',
+    label: 'Learning & Self-Improvement',
+    desc: 'Controls the self-improvement cycle: EOD reflection, weekly learning, hypothesis generation, and experiment parameters. <a href="/learning" style="color:var(--accent);">View Learning Results</a>',
     fields: {
-      eod_reflection_time: {desc: 'EOD reflection time (ET)', type: 'text'},
+      eod_reflection_enabled: {desc: 'Enable daily EOD reflection via Claude', type: 'bool'},
+      eod_reflection_frequency: {desc: 'Reflection frequency: daily or weekly', type: 'text'},
+      eod_reflection_time: {desc: 'EOD reflection time (ET, HH:MM)', type: 'text'},
+      weekly_learning_day: {desc: 'Day of week for weekly learning cycle', type: 'text'},
+      weekly_learning_hour: {desc: 'Hour (ET, 0-23) for weekly learning trigger', type: 'number'},
+      auto_apply_threshold: {desc: 'Confidence threshold to auto-apply changes (0.50-1.0)', type: 'number', step: 0.05},
+      hypothesis_generation_enabled: {desc: 'Enable Claude-generated hypotheses in weekly cycle', type: 'bool'},
+      hypothesis_model: {desc: 'Model for hypothesis generation', type: 'model'},
       min_trades_for_experiment: {desc: 'Min trades to start an experiment', type: 'number'},
       max_concurrent_experiments: {desc: 'Max simultaneous experiments', type: 'number'},
     }

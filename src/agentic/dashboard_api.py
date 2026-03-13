@@ -206,6 +206,16 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         """HTML scanner settings page."""
         return _inject_auth(get_scanner_settings_html())
 
+    # Include learning router
+    from src.agentic.learning_api import create_learning_router, get_learning_html
+
+    app.include_router(create_learning_router(verify_token))
+
+    @app.get("/learning", response_class=HTMLResponse)
+    def learning_page():
+        """HTML learning & self-improvement page."""
+        return _inject_auth(get_learning_html())
+
     @app.get("/api/status")
     def get_status(token: None = Depends(verify_token)):
         """Get daemon status with live process check."""
@@ -1670,6 +1680,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="display:flex;align-items:center;gap:12px;">
     <a href="/scanner" class="btn btn-control" style="text-decoration:none;">Scanner</a>
     <a href="/scanner-settings" class="btn btn-control" style="text-decoration:none;">Scan Config</a>
+    <a href="/learning" class="btn btn-control" style="text-decoration:none;">Learning</a>
     <a href="/config" class="btn btn-control" style="text-decoration:none;">Settings</a>
     <a href="/guardrails" class="btn btn-control" style="text-decoration:none;">Guardrails</a>
     <a href="/prompts" class="btn btn-control" style="text-decoration:none;">Prompts</a>

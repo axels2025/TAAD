@@ -480,6 +480,16 @@ class TAADDaemon:
             self._persist_guardrail_metrics(db)
             self._record_clean_day(db)
 
+        # Route learning events directly to the learning loop —
+        # these bypass the normal Claude reasoning pipeline.
+        if event_type == EventType.EOD_REFLECTION.value:
+            await self._handle_eod_reflection(event, db)
+            return
+
+        if event_type == EventType.WEEKLY_LEARNING.value:
+            await self._handle_weekly_learning(event, db)
+            return
+
         try:
             # Step 1: Assemble context
             context = self.memory.assemble_context(event_type)
@@ -2477,6 +2487,174 @@ class TAADDaemon:
         except Exception as e:
             logger.error(f"Trade outcome recording failed: {e}", exc_info=True)
 
+    async def _handle_eod_reflection(self, event: DaemonEvent, db: Session) -> None:
+        """Route EOD_REFLECTION to the learning loop instead of Claude reasoning.
+
+        Runs Claude Sonnet to reflect on today's decisions and trades,
+        stores the reflection in working memory. Respects the
+        eod_reflection_enabled and eod_reflection_frequency config.
+
+        Args:
+            event: The EOD_REFLECTION event
+            db: Database session
+        """
+        try:
+            # Check if EOD reflection is enabled
+            if not self.config.learning.eod_reflection_enabled:
+                logger.info("EOD reflection disabled in config — skipping")
+                self.event_bus.mark_completed(event)
+                return
+
+            # If frequency is 'weekly', only run on the weekly learning day
+            if self.config.learning.eod_reflection_frequency == "weekly":
+                _DAY_MAP = {
+                    "monday": 0, "tuesday": 1, "wednesday": 2,
+                    "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+                }
+                learning_day = _DAY_MAP.get(
+                    self.config.learning.weekly_learning_day.lower(), 4
+                )
+                now_et = datetime.now(ET)
+                if now_et.weekday() != learning_day:
+                    logger.info(
+                        f"EOD reflection set to weekly — skipping "
+                        f"(today is not {self.config.learning.weekly_learning_day})"
+                    )
+                    self.event_bus.mark_completed(event)
+                    return
+
+            logger.info("Running EOD reflection via learning loop...")
+            report = await self.learning.run_eod_reflection()
+            # Note: run_eod_reflection() already stores the reflection
+            # in working memory via self.memory.add_reflection()
+
+            if report:
+                logger.info(
+                    f"EOD reflection complete: "
+                    f"{report.get('decisions_count', 0)} decisions, "
+                    f"{report.get('trades_count', 0)} trades reviewed"
+                )
+            else:
+                logger.info("EOD reflection: no activity to reflect on")
+
+            self.event_bus.mark_completed(event)
+
+        except Exception as e:
+            logger.error(f"EOD reflection failed: {e}", exc_info=True)
+            self.event_bus.mark_failed(event, str(e))
+
+    async def _handle_weekly_learning(self, event: DaemonEvent, db: Session) -> None:
+        """Route WEEKLY_LEARNING to the learning orchestrator.
+
+        Runs the full 5-step weekly learning cycle: detect patterns,
+        validate, evaluate experiments, propose changes, auto-apply.
+        Optionally runs Claude-powered hypothesis generation.
+
+        Args:
+            event: The WEEKLY_LEARNING event
+            db: Database session
+        """
+        try:
+            logger.info("=" * 60)
+            logger.info("WEEKLY LEARNING CYCLE STARTING")
+            logger.info("=" * 60)
+
+            # Pass auto_apply_threshold from config to orchestrator
+            self.learning.orchestrator.auto_apply_threshold = (
+                self.config.learning.auto_apply_threshold
+            )
+
+            # Step 1: Run the core learning cycle (pure Python, no API cost)
+            report = self.learning.run_weekly_learning()
+
+            if report.get("error"):
+                logger.error(f"Weekly learning failed: {report['error']}")
+                self.event_bus.mark_failed(event, report["error"])
+                return
+
+            # Step 2: Run Claude-powered hypothesis generation if enabled
+            if self.config.learning.hypothesis_generation_enabled:
+                logger.info("Running Claude-powered hypothesis generation...")
+                try:
+                    hypotheses = await self._generate_hypotheses(db, report)
+                    if hypotheses:
+                        report["hypotheses"] = hypotheses
+                        logger.info(
+                            f"Generated {len(hypotheses)} hypotheses"
+                        )
+                except Exception as e:
+                    logger.error(f"Hypothesis generation failed: {e}", exc_info=True)
+
+            # Store summary in working memory as a reflection
+            self.memory.add_reflection({
+                "type": "weekly_learning",
+                "date": str(date.today()),
+                **report,
+            })
+
+            logger.info("=" * 60)
+            logger.info("WEEKLY LEARNING CYCLE COMPLETE")
+            logger.info("=" * 60)
+
+            self.event_bus.mark_completed(event)
+
+        except Exception as e:
+            logger.error(f"Weekly learning failed: {e}", exc_info=True)
+            self.event_bus.mark_failed(event, str(e))
+
+    async def _generate_hypotheses(self, db: Session, learning_report: dict) -> list[dict]:
+        """Use PerformanceAnalyzer to generate Claude-powered hypotheses.
+
+        Sends aggregated trade data and learning results to Claude,
+        which returns structured insights including new hypotheses
+        to test in future experiments.
+
+        Args:
+            db: Database session
+            learning_report: Summary from the weekly learning cycle
+
+        Returns:
+            List of hypothesis dicts with title, body, confidence, etc.
+        """
+        from src.agents.performance_analyzer import PerformanceAnalyzer
+        from src.agents.models import AnalysisDepth
+        from src.agents.data_aggregator import DataAggregator
+
+        aggregator = DataAggregator(db)
+        context = aggregator.build_context(days=90)
+
+        analyzer = PerformanceAnalyzer(depth=AnalysisDepth.STANDARD)
+        analysis = analyzer.analyze(context)
+
+        # Extract hypotheses and other insights
+        hypotheses = []
+        for insight in analysis.insights:
+            hypotheses.append({
+                "category": insight.category,
+                "title": insight.title,
+                "body": insight.body,
+                "confidence": insight.confidence,
+                "priority": insight.priority,
+                "related_patterns": insight.related_patterns,
+                "actionable": insight.actionable,
+                "generated_at": utc_now().isoformat(),
+            })
+
+        # Store hypotheses in learning_history for dashboard access
+        from src.data.models import LearningHistory
+        for h in hypotheses:
+            event = LearningHistory(
+                event_type="hypothesis_generated",
+                event_date=utc_now(),
+                pattern_name=h["title"],
+                confidence=1.0 if h["confidence"] == "high" else 0.7 if h["confidence"] == "medium" else 0.4,
+                reasoning=h["body"],
+            )
+            db.add(event)
+        db.commit()
+
+        return hypotheses
+
     def _record_clean_day(self, db: Session) -> None:
         """If no errors or overrides today, record as clean day for promotion.
 
@@ -3599,13 +3777,14 @@ class TAADDaemon:
     async def _time_based_emitter(self) -> None:
         """Emit time-based events using MarketCalendar.
 
-        Emits MARKET_OPEN, MARKET_CLOSE, EOD_REFLECTION, SCHEDULED_CHECK
-        at appropriate times. Also drives periodic IBKR reconnection attempts
-        when the connection is down.
+        Emits MARKET_OPEN, MARKET_CLOSE, EOD_REFLECTION, WEEKLY_LEARNING,
+        SCHEDULED_CHECK at appropriate times. Also drives periodic IBKR
+        reconnection attempts when the connection is down.
         """
         last_market_open_emitted: Optional[date] = None
         last_market_close_emitted: Optional[date] = None
         last_eod_reflection_emitted: Optional[date] = None
+        last_weekly_learning_emitted: Optional[date] = None
         last_scheduled_check = utc_now()
         last_reconnect_attempt: float = 0.0
 
@@ -3695,6 +3874,30 @@ class TAADDaemon:
                     logger.info("Emitting EOD_REFLECTION")
                     self.event_bus.emit(EventType.EOD_REFLECTION)
                     last_eod_reflection_emitted = today
+
+                # Weekly learning cycle (configurable day/hour, default Friday 17:00 ET)
+                _DAY_MAP = {
+                    "monday": 0, "tuesday": 1, "wednesday": 2,
+                    "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+                }
+                learning_day = _DAY_MAP.get(
+                    self.config.learning.weekly_learning_day.lower(), 4
+                )
+                learning_hour = self.config.learning.weekly_learning_hour
+                if (
+                    now_et.weekday() == learning_day
+                    and now_et.hour == learning_hour
+                    and now_et.minute < 5
+                    and last_weekly_learning_emitted != today
+                    and self.calendar.is_trading_day(now_et)
+                ):
+                    logger.info(
+                        f"Emitting WEEKLY_LEARNING "
+                        f"({self.config.learning.weekly_learning_day} "
+                        f"{learning_hour}:00 ET)"
+                    )
+                    self.event_bus.emit(EventType.WEEKLY_LEARNING)
+                    last_weekly_learning_emitted = today
 
                 # Periodic scheduled check (every 15 minutes during market hours)
                 if (

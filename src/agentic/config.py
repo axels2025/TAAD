@@ -79,8 +79,15 @@ class LearningLoopConfig(BaseModel):
     """Learning loop configuration."""
 
     eod_reflection_time: str = "16:30"  # 4:30 PM ET
+    weekly_learning_day: str = Field(default="Friday", description="Day of week for weekly learning cycle")
+    weekly_learning_hour: int = Field(default=17, ge=0, le=23, description="Hour (ET) for weekly learning trigger")
     min_trades_for_experiment: int = Field(default=10, ge=3)
     max_concurrent_experiments: int = Field(default=3, ge=1)
+    auto_apply_threshold: float = Field(default=0.80, ge=0.50, le=1.0, description="Confidence threshold for auto-applying parameter changes")
+    eod_reflection_enabled: bool = Field(default=True, description="Enable daily EOD reflection via Claude")
+    eod_reflection_frequency: str = Field(default="daily", description="Reflection frequency: 'daily' or 'weekly'")
+    hypothesis_generation_enabled: bool = Field(default=True, description="Enable Claude-generated hypotheses during weekly learning")
+    hypothesis_model: str = Field(default="claude-sonnet-4-5-20250929", description="Model for hypothesis generation")
 
 
 class StrategyConfig(BaseModel):
