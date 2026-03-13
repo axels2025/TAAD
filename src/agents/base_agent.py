@@ -2,8 +2,14 @@
 
 Provides client initialization, model selection, retry logic,
 and cost tracking for all AI agent interactions.
+
+A module-level threading lock serialises all Claude API calls so that
+concurrent callers (e.g. reasoning + CRO running in separate
+asyncio.to_thread workers) do not fire duplicate requests during
+credit exhaustion or rate-limit back-off.
 """
 
+import threading
 import time
 from typing import Optional
 
@@ -12,6 +18,17 @@ from loguru import logger
 
 from src.config.base import get_config
 
+
+# Serialise all Claude API calls across agent instances.
+# This prevents duplicate concurrent requests when credits are
+# exhausted or the API is rate-limiting — each caller waits its
+# turn instead of independently retrying in parallel.
+_api_lock = threading.Lock()
+
+# Circuit breaker: when a credit/auth error is hit, block all calls
+# for this many seconds to avoid hammering the API.
+_circuit_breaker_until: float = 0.0
+_CIRCUIT_BREAKER_COOLDOWN = 60.0  # seconds
 
 # Approximate pricing per 1M tokens (as of 2026-02)
 _PRICING = {
@@ -65,6 +82,14 @@ class BaseAgent:
     ) -> dict:
         """Send a message to Claude with retry logic.
 
+        All calls are serialised through a module-level lock so that
+        concurrent callers (reasoning, CRO, reflection) cannot fire
+        duplicate requests during credit exhaustion or rate limiting.
+
+        A circuit breaker trips on credit/auth errors (401/403) and
+        blocks all callers for 60 seconds, preventing a storm of
+        doomed retries.
+
         Args:
             system_prompt: System instructions for Claude
             user_message: The user/data message
@@ -77,63 +102,91 @@ class BaseAgent:
         Raises:
             APIError: After all retries exhausted
         """
+        global _circuit_breaker_until
+
+        # Check circuit breaker before acquiring the lock
+        remaining = _circuit_breaker_until - time.monotonic()
+        if remaining > 0:
+            raise APIError(
+                message=f"Circuit breaker open — API calls blocked for {remaining:.0f}s after credit/auth failure",
+                request=None,
+                body=None,
+            )
+
         last_error = None
 
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": user_message}],
-                    timeout=self.timeout,
-                )
+        with _api_lock:
+            for attempt in range(1, self.max_retries + 1):
+                # Re-check circuit breaker inside retry loop
+                if _circuit_breaker_until > time.monotonic():
+                    raise APIError(
+                        message="Circuit breaker tripped during retry — aborting",
+                        request=None,
+                        body=None,
+                    )
 
-                input_tokens = response.usage.input_tokens
-                output_tokens = response.usage.output_tokens
-                self.total_input_tokens += input_tokens
-                self.total_output_tokens += output_tokens
-                self.total_requests += 1
+                try:
+                    response = self.client.messages.create(
+                        model=self.model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": user_message}],
+                        timeout=self.timeout,
+                    )
 
-                content = response.content[0].text if response.content else ""
+                    input_tokens = response.usage.input_tokens
+                    output_tokens = response.usage.output_tokens
+                    self.total_input_tokens += input_tokens
+                    self.total_output_tokens += output_tokens
+                    self.total_requests += 1
 
-                cost = self.estimate_cost(input_tokens, output_tokens)
-                logger.info(
-                    f"CLAUDE API CALL: model={self.model}, "
-                    f"tokens={input_tokens}in/{output_tokens}out, "
-                    f"cost=${cost:.4f}, "
-                    f"session_total=${self.session_cost:.4f}"
-                )
+                    content = response.content[0].text if response.content else ""
 
-                return {
-                    "content": content,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "model": self.model,
-                }
+                    cost = self.estimate_cost(input_tokens, output_tokens)
+                    logger.info(
+                        f"CLAUDE API CALL: model={self.model}, "
+                        f"tokens={input_tokens}in/{output_tokens}out, "
+                        f"cost=${cost:.4f}, "
+                        f"session_total=${self.session_cost:.4f}"
+                    )
 
-            except RateLimitError as e:
-                last_error = e
-                wait = min(2 ** attempt, 30)
-                logger.warning(f"Rate limited (attempt {attempt}/{self.max_retries}), waiting {wait}s")
-                time.sleep(wait)
+                    return {
+                        "content": content,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "model": self.model,
+                    }
 
-            except APITimeoutError as e:
-                last_error = e
-                logger.warning(f"Timeout (attempt {attempt}/{self.max_retries})")
-
-            except BadRequestError:
-                raise  # 400 errors are not retryable
-
-            except APIError as e:
-                last_error = e
-                if e.status_code and e.status_code >= 500:
+                except RateLimitError as e:
+                    last_error = e
                     wait = min(2 ** attempt, 30)
-                    logger.warning(f"Server error {e.status_code} (attempt {attempt}/{self.max_retries}), waiting {wait}s")
+                    logger.warning(f"Rate limited (attempt {attempt}/{self.max_retries}), waiting {wait}s")
                     time.sleep(wait)
-                else:
-                    raise
+
+                except APITimeoutError as e:
+                    last_error = e
+                    logger.warning(f"Timeout (attempt {attempt}/{self.max_retries})")
+
+                except BadRequestError:
+                    raise  # 400 errors are not retryable
+
+                except APIError as e:
+                    last_error = e
+                    if e.status_code and e.status_code in (401, 403):
+                        # Credit exhaustion or auth failure — trip circuit breaker
+                        _circuit_breaker_until = time.monotonic() + _CIRCUIT_BREAKER_COOLDOWN
+                        logger.error(
+                            f"Credit/auth error ({e.status_code}), "
+                            f"circuit breaker tripped for {_CIRCUIT_BREAKER_COOLDOWN:.0f}s"
+                        )
+                        raise
+                    elif e.status_code and e.status_code >= 500:
+                        wait = min(2 ** attempt, 30)
+                        logger.warning(f"Server error {e.status_code} (attempt {attempt}/{self.max_retries}), waiting {wait}s")
+                        time.sleep(wait)
+                    else:
+                        raise
 
         raise last_error  # type: ignore[misc]
 

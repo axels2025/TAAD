@@ -173,11 +173,13 @@ const SECTIONS = [
   },
   {
     key: 'budget',
-    label: 'Budget',
-    desc: 'Controls how much margin the scanner pipeline allocates for new positions. These are pipeline limits — the risk governor in .env enforces separate hard safety ceilings at execution time.',
+    label: 'Budget & Position Sizing',
+    desc: 'Controls how much margin the scanner pipeline allocates for new positions and how individual positions are sized.',
     fields: [
-      { key: 'margin_budget_pct', label: 'Margin Budget %', desc: 'Fraction of NLV for scanner budget (0.01-1.0)', type: 'number', min: 0.01, max: 1, step: 0.05 },
-      { key: 'max_positions', label: 'Max Positions', desc: 'Maximum number of staged positions', type: 'number', min: 1, max: 100, step: 1 },
+      { key: 'margin_budget_pct', label: 'Margin Budget %', desc: 'Fraction of NLV for total margin budget (0.01-1.0). No hardcoded cap — this % of your NLV is the authority.', type: 'number', min: 0.01, max: 1, step: 0.05 },
+      { key: 'margin_budget_default', label: 'Offline Budget Default', desc: 'Fallback margin budget ($) when IBKR is disconnected', type: 'number', min: 1000, step: 5000 },
+      { key: 'max_positions', label: 'Max Positions', desc: 'Maximum number of open positions', type: 'number', min: 1, max: 100, step: 1 },
+      { key: 'max_positions_per_day', label: 'Max Positions / Day', desc: 'Maximum new positions opened per trading day', type: 'number', min: 1, max: 50, step: 1 },
       { key: 'max_per_sector', label: 'Max Per Sector', desc: 'Sector concentration limit', type: 'number', min: 1, max: 20, step: 1 },
       { key: 'price_threshold', label: 'Price Threshold', desc: 'Stock price dividing cheap/expensive ($)', type: 'number', min: 0, step: 5 },
       { key: 'max_contracts_expensive', label: 'Max Contracts (Expensive)', desc: 'Max contracts for stocks above threshold', type: 'number', min: 1, max: 20, step: 1 },
@@ -187,6 +189,19 @@ const SECTIONS = [
       { key: 'vix_scale_normal', label: 'VIX Scale (15-25)', desc: 'Sizing multiplier in normal VIX (1.0=full, 0.8=20% reduction)', type: 'number', min: 0.1, max: 1.0, step: 0.05 },
       { key: 'vix_scale_elevated', label: 'VIX Scale (25-35)', desc: 'Sizing multiplier in elevated VIX', type: 'number', min: 0.1, max: 1.0, step: 0.05 },
       { key: 'vix_scale_extreme', label: 'VIX Scale (>35)', desc: 'Sizing multiplier in extreme VIX', type: 'number', min: 0.0, max: 1.0, step: 0.05 },
+    ],
+  },
+  {
+    key: 'risk_governor',
+    label: 'Risk Governor',
+    desc: 'Hard safety circuit breakers enforced at execution time. These limits halt trading when breached — they are the last line of defense.',
+    fields: [
+      { key: 'max_margin_utilization', label: 'Max Margin Utilization', desc: 'Max total margin as fraction of NLV (0.80 = 80%)', type: 'number', min: 0.10, max: 1.0, step: 0.05 },
+      { key: 'max_margin_per_trade_pct', label: 'Max Margin / Trade', desc: 'Max margin for a single trade as fraction of NLV (0.10 = 10%)', type: 'number', min: 0.01, max: 0.50, step: 0.01 },
+      { key: 'max_daily_loss_pct', label: 'Max Daily Loss', desc: 'Circuit breaker: max daily loss as fraction (-0.02 = -2%)', type: 'number', min: -1.0, max: 0, step: 0.01 },
+      { key: 'max_weekly_loss_pct', label: 'Max Weekly Loss', desc: 'Circuit breaker: max weekly loss as fraction (-0.05 = -5%)', type: 'number', min: -1.0, max: 0, step: 0.01 },
+      { key: 'max_drawdown_pct', label: 'Max Drawdown', desc: 'Circuit breaker: max peak-to-trough drawdown (-0.10 = -10%)', type: 'number', min: -1.0, max: 0, step: 0.01 },
+      { key: 'max_position_loss', label: 'Max Position Loss ($)', desc: 'Stop loss per position in dollars (negative, e.g. -500)', type: 'number', max: 0, step: 50 },
     ],
   },
   {

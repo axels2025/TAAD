@@ -53,7 +53,15 @@ class BudgetSettings(BaseModel):
     """Budget and position limits for the scanner portfolio."""
 
     margin_budget_pct: float = Field(default=0.20, ge=0.01, le=1.0)
+    margin_budget_default: float = Field(
+        default=50000.0, ge=1000.0,
+        description="Fallback margin budget when IBKR is offline ($)",
+    )
     max_positions: int = Field(default=10, ge=1)
+    max_positions_per_day: int = Field(
+        default=10, ge=1,
+        description="Maximum new positions opened per day",
+    )
     max_per_sector: int = Field(default=5, ge=1)
     price_threshold: float = Field(default=90.0, ge=0.0)
     max_contracts_expensive: int = Field(default=3, ge=1)
@@ -84,6 +92,39 @@ class BudgetSettings(BaseModel):
     )
 
 
+class RiskGovernorSettings(BaseModel):
+    """Risk governor circuit breaker settings.
+
+    These limits are enforced at execution time by the RiskGovernor.
+    They act as hard safety ceilings independent of the scanner pipeline.
+    """
+
+    max_margin_utilization: float = Field(
+        default=0.80, ge=0.10, le=1.0,
+        description="Maximum margin utilization allowed (0.80 = 80% of NLV)",
+    )
+    max_margin_per_trade_pct: float = Field(
+        default=0.10, ge=0.01, le=0.50,
+        description="Max margin for a single trade as fraction of NLV (0.10 = 10%)",
+    )
+    max_daily_loss_pct: float = Field(
+        default=-0.02, ge=-1.0, le=0.0,
+        description="Max daily loss before circuit breaker (-0.02 = -2%)",
+    )
+    max_weekly_loss_pct: float = Field(
+        default=-0.05, ge=-1.0, le=0.0,
+        description="Max weekly loss before circuit breaker (-0.05 = -5%)",
+    )
+    max_drawdown_pct: float = Field(
+        default=-0.10, ge=-1.0, le=0.0,
+        description="Max peak-to-trough drawdown before halt (-0.10 = -10%)",
+    )
+    max_position_loss: float = Field(
+        default=-500.0, le=0.0,
+        description="Max loss per position before stop loss ($)",
+    )
+
+
 class ScannerScanSettings(BaseModel):
     """IBKR scanner parameters (num_rows, etc.)."""
 
@@ -106,11 +147,12 @@ class EarningsFilterSettings(BaseModel):
 
 
 class ScannerSettings(BaseModel):
-    """Complete scanner settings: filters, ranking, budget, and earnings."""
+    """Complete scanner settings: filters, ranking, budget, earnings, and risk."""
 
     filters: FilterSettings = FilterSettings()
     ranking: RankingWeights = RankingWeights()
     budget: BudgetSettings = BudgetSettings()
+    risk_governor: RiskGovernorSettings = Field(default_factory=RiskGovernorSettings)
     earnings: EarningsFilterSettings = Field(default_factory=EarningsFilterSettings)
     scanner: ScannerScanSettings = Field(default_factory=ScannerScanSettings)
 

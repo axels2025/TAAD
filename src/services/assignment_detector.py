@@ -283,7 +283,7 @@ class AssignmentDetector:
                     )
                     exit_service.save_snapshot(exit_snapshot)
                 except Exception as snap_err:
-                    logger.warning(f"Exit snapshot failed for assignment: {snap_err}")
+                    logger.warning(f"Exit snapshot failed for assignment: {snap_err}", exc_info=True)
 
                 # Create stock position tracking
                 try:

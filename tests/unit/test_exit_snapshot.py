@@ -365,6 +365,9 @@ def test_save_snapshot(exit_service, mock_db_session):
     snapshot.win = True
     snapshot.roi_pct = 0.5
 
+    # Mock: no existing snapshot for this trade_id
+    mock_db_session.query.return_value.filter.return_value.first.return_value = None
+
     exit_service.save_snapshot(snapshot)
 
     # Verify database operations
@@ -382,7 +385,8 @@ def test_save_snapshot_handles_errors(exit_service, mock_db_session):
         captured_at=datetime.now(),
     )
 
-    # Mock commit error
+    # Mock: no existing snapshot, but commit will fail
+    mock_db_session.query.return_value.filter.return_value.first.return_value = None
     mock_db_session.commit.side_effect = Exception("Database error")
 
     with pytest.raises(Exception):

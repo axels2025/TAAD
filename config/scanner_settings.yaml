@@ -15,7 +15,9 @@ ranking:
   efficiency: 10
 budget:
   margin_budget_pct: 0.5
+  margin_budget_default: 50000.0
   max_positions: 25
+  max_positions_per_day: 25
   max_per_sector: 5
   price_threshold: 90.0
   max_contracts_expensive: 5
@@ -25,6 +27,13 @@ budget:
   vix_scale_normal: 1.0
   vix_scale_elevated: 0.75
   vix_scale_extreme: 0.25
+risk_governor:
+  max_margin_utilization: 0.80
+  max_margin_per_trade_pct: 0.10
+  max_daily_loss_pct: -0.02
+  max_weekly_loss_pct: -0.05
+  max_drawdown_pct: -0.10
+  max_position_loss: -500.0
 earnings:
   enabled: true
   additional_otm_pct: 0.15

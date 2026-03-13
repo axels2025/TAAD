@@ -1374,7 +1374,9 @@ class PatternDetector:
         filtered_trades = []
 
         for trade in closed_trades:
-            snapshot = trade.entry_snapshot
+            snapshot = trade.entry_snapshots[0] if trade.entry_snapshots else None
+            if not snapshot:
+                continue
             qqq_change = snapshot.qqq_change_pct
             iwm_change = snapshot.iwm_change_pct
 

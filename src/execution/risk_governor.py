@@ -118,16 +118,22 @@ class RiskGovernor:
         self._account_health_cache: dict | None = None
         self._last_health_check: datetime | None = None
 
-        # Risk limits — driven by Config (which reads .env)
-        self.MAX_DAILY_LOSS_PCT = config.max_daily_loss
-        self.MAX_POSITION_LOSS = config.max_position_loss
-        self.MAX_POSITIONS = config.max_positions
-        self.MAX_POSITIONS_PER_DAY = config.max_positions_per_day
+        # Risk limits — prefer scanner_settings.yaml (hot-reloadable), fall back to .env
+        from src.agentic.scanner_settings import load_scanner_settings
+
+        scanner = load_scanner_settings()
+        rg = scanner.risk_governor
+        budget = scanner.budget
+
+        self.MAX_DAILY_LOSS_PCT = rg.max_daily_loss_pct
+        self.MAX_POSITION_LOSS = rg.max_position_loss
+        self.MAX_POSITIONS = budget.max_positions
+        self.MAX_POSITIONS_PER_DAY = budget.max_positions_per_day
         self.MAX_SECTOR_CONCENTRATION = config.risk_limits.max_sector_concentration
-        self.MAX_MARGIN_UTILIZATION = config.max_margin_utilization
-        self.MAX_MARGIN_PER_TRADE_PCT = config.max_margin_per_trade_pct
-        self.MAX_WEEKLY_LOSS_PCT = config.max_weekly_loss_pct
-        self.MAX_DRAWDOWN_PCT = config.max_drawdown_pct
+        self.MAX_MARGIN_UTILIZATION = rg.max_margin_utilization
+        self.MAX_MARGIN_PER_TRADE_PCT = rg.max_margin_per_trade_pct
+        self.MAX_WEEKLY_LOSS_PCT = rg.max_weekly_loss_pct
+        self.MAX_DRAWDOWN_PCT = rg.max_drawdown_pct
         self.MIN_EXCESS_LIQUIDITY_PCT = 0.10  # Safety invariant — keep hardcoded
 
         # Weekly/drawdown tracking

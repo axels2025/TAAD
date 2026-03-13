@@ -47,22 +47,23 @@ class PortfolioConfig:
 
     @classmethod
     def from_env(cls) -> "PortfolioConfig":
-        """Load configuration from the central Config singleton.
+        """Load configuration from scanner_settings.yaml (hot-reloadable).
 
-        Values come from .env via ``get_config()`` so there is a single
-        source of truth for MAX_POSITIONS, MARGIN_BUDGET_PCT, etc.
+        Falls back to .env via ``get_config()`` for values not in scanner
+        settings.
 
         Returns:
-            PortfolioConfig instance with values from the central config
+            PortfolioConfig instance with values from scanner settings
         """
-        from src.config.base import get_config
+        from src.agentic.scanner_settings import load_scanner_settings
 
-        cfg = get_config()
+        settings = load_scanner_settings()
+        budget = settings.budget
         return cls(
-            margin_budget_pct=cfg.margin_budget_pct,
-            margin_budget_default=cfg.margin_budget_default,
-            max_positions=cfg.max_positions,
-            max_sector_concentration=cfg.max_sector_count,
+            margin_budget_pct=budget.margin_budget_pct,
+            margin_budget_default=budget.margin_budget_default,
+            max_positions=budget.max_positions,
+            max_sector_concentration=budget.max_per_sector,
         )
 
 
@@ -300,30 +301,24 @@ class PortfolioBuilder:
         # Step 1: Check already-staged trades
         already_staged_margin, already_staged_count = self._get_already_staged_margin()
 
-        # Step 2: Determine margin budget and apply MAX_TOTAL_MARGIN ceiling
+        # Step 2: Determine margin budget (NLV × margin_budget_pct)
         budget = margin_budget or self._get_margin_budget()
 
-        # Get MAX_TOTAL_MARGIN from central config (absolute ceiling)
-        from src.config.base import get_config
-
-        max_total_margin = get_config().max_total_margin
-
-        # Check if already-staged trades exceed the absolute ceiling
-        if already_staged_margin >= max_total_margin:
+        # Calculate available budget for NEW trades (budget minus already staged)
+        if already_staged_margin >= budget:
             logger.error(
                 f"Already-staged trades (${already_staged_margin:,.0f}) "
-                f"exceed MAX_TOTAL_MARGIN (${max_total_margin:,.0f})"
+                f"exceed margin budget (${budget:,.0f})"
             )
             empty_plan = self._empty_plan(budget)
             empty_plan.warnings = [
                 f"CRITICAL: {already_staged_count} trades already staged with "
-                f"${already_staged_margin:,.0f} margin exceeds absolute limit "
-                f"of ${max_total_margin:,.0f}. Cancel some staged trades before adding more."
+                f"${already_staged_margin:,.0f} margin exceeds budget "
+                f"of ${budget:,.0f}. Cancel some staged trades before adding more."
             ]
             return empty_plan
 
-        # Calculate available budget for NEW trades
-        available_budget = min(budget, max_total_margin - already_staged_margin)
+        available_budget = budget - already_staged_margin
 
         if already_staged_count > 0:
             logger.warning(

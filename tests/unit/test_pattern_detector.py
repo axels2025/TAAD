@@ -384,7 +384,7 @@ def sample_trades_with_technical_indicators():
             captured_at=base_date + timedelta(days=i),
         )
 
-        trade.entry_snapshot = snapshot
+        trade.entry_snapshots = [snapshot]
         trades.append(trade)
 
     return trades
@@ -403,10 +403,10 @@ def test_analyze_by_rsi_regime(mock_db_session, sample_trades_with_technical_ind
     with patch.object(detector, '_get_trades_in_rsi_range') as mock_get:
         # Oversold trades (RSI < 30)
         oversold_trades = [t for t in sample_trades_with_technical_indicators
-                          if t.entry_snapshot.rsi_14 < 30]
+                          if t.entry_snapshots[0].rsi_14 < 30]
         # Neutral trades (RSI 30-70)
         neutral_trades = [t for t in sample_trades_with_technical_indicators
-                         if 30 <= t.entry_snapshot.rsi_14 <= 70]
+                         if 30 <= t.entry_snapshots[0].rsi_14 <= 70]
 
         def mock_rsi_filter(min_rsi, max_rsi):
             if max_rsi <= 30:
@@ -445,7 +445,7 @@ def test_analyze_by_macd_histogram(mock_db_session, sample_trades_with_technical
         # Return different subsets based on histogram range
         def mock_macd_filter(min_hist, max_hist):
             return [t for t in sample_trades_with_technical_indicators
-                   if min_hist <= t.entry_snapshot.macd_histogram < max_hist]
+                   if min_hist <= t.entry_snapshots[0].macd_histogram < max_hist]
 
         mock_get.side_effect = mock_macd_filter
 
@@ -471,7 +471,7 @@ def test_analyze_by_trend_strength(mock_db_session, sample_trades_with_technical
     with patch.object(detector, '_get_trades_in_adx_range') as mock_get:
         def mock_adx_filter(min_adx, max_adx):
             return [t for t in sample_trades_with_technical_indicators
-                   if min_adx <= t.entry_snapshot.adx < max_adx]
+                   if min_adx <= t.entry_snapshots[0].adx < max_adx]
 
         mock_get.side_effect = mock_adx_filter
 
@@ -497,7 +497,7 @@ def test_analyze_by_bb_position(mock_db_session, sample_trades_with_technical_in
     with patch.object(detector, '_get_trades_in_bb_position_range') as mock_get:
         def mock_bb_filter(min_pos, max_pos):
             return [t for t in sample_trades_with_technical_indicators
-                   if min_pos <= t.entry_snapshot.bb_position < max_pos]
+                   if min_pos <= t.entry_snapshots[0].bb_position < max_pos]
 
         mock_get.side_effect = mock_bb_filter
 
@@ -523,7 +523,7 @@ def test_analyze_by_support_proximity(mock_db_session, sample_trades_with_techni
     with patch.object(detector, '_get_trades_in_support_proximity_range') as mock_get:
         def mock_support_filter(min_dist, max_dist):
             return [t for t in sample_trades_with_technical_indicators
-                   if min_dist <= t.entry_snapshot.distance_to_support_pct < max_dist]
+                   if min_dist <= t.entry_snapshots[0].distance_to_support_pct < max_dist]
 
         mock_get.side_effect = mock_support_filter
 
@@ -549,7 +549,7 @@ def test_analyze_by_atr_volatility(mock_db_session, sample_trades_with_technical
     with patch.object(detector, '_get_trades_in_atr_range') as mock_get:
         def mock_atr_filter(min_atr, max_atr):
             return [t for t in sample_trades_with_technical_indicators
-                   if min_atr <= t.entry_snapshot.atr_pct < max_atr]
+                   if min_atr <= t.entry_snapshots[0].atr_pct < max_atr]
 
         mock_get.side_effect = mock_atr_filter
 
@@ -680,7 +680,7 @@ def sample_trades_with_market_context():
             captured_at=base_date + timedelta(days=i),
         )
 
-        trade.entry_snapshot = snapshot
+        trade.entry_snapshots = [snapshot]
         trades.append(trade)
 
     return trades
@@ -702,7 +702,7 @@ def test_analyze_by_sector(mock_db_session, sample_trades_with_market_context):
     with patch.object(detector, '_get_trades_by_sector') as mock_get:
         def mock_sector_filter(sector):
             return [t for t in sample_trades_with_market_context
-                   if t.entry_snapshot.sector == sector]
+                   if t.entry_snapshots[0].sector == sector]
 
         mock_get.side_effect = mock_sector_filter
 
@@ -728,7 +728,7 @@ def test_analyze_by_vol_regime(mock_db_session, sample_trades_with_market_contex
     with patch.object(detector, '_get_trades_by_vol_regime') as mock_get:
         def mock_vol_filter(regime):
             return [t for t in sample_trades_with_market_context
-                   if t.entry_snapshot.vol_regime == regime]
+                   if t.entry_snapshots[0].vol_regime == regime]
 
         mock_get.side_effect = mock_vol_filter
 
@@ -754,7 +754,7 @@ def test_analyze_by_market_regime(mock_db_session, sample_trades_with_market_con
     with patch.object(detector, '_get_trades_by_market_regime') as mock_get:
         def mock_market_filter(regime):
             return [t for t in sample_trades_with_market_context
-                   if t.entry_snapshot.market_regime == regime]
+                   if t.entry_snapshots[0].market_regime == regime]
 
         mock_get.side_effect = mock_market_filter
 
@@ -780,7 +780,7 @@ def test_analyze_by_opex_week(mock_db_session, sample_trades_with_market_context
     with patch.object(detector, '_get_trades_by_opex_week') as mock_get:
         def mock_opex_filter(is_opex):
             return [t for t in sample_trades_with_market_context
-                   if t.entry_snapshot.is_opex_week == is_opex]
+                   if t.entry_snapshots[0].is_opex_week == is_opex]
 
         mock_get.side_effect = mock_opex_filter
 
@@ -807,7 +807,7 @@ def test_analyze_by_fomc_proximity(mock_db_session, sample_trades_with_market_co
     with patch.object(detector, '_get_trades_by_fomc_proximity') as mock_get:
         def mock_fomc_filter(min_days, max_days):
             return [t for t in sample_trades_with_market_context
-                   if min_days <= t.entry_snapshot.days_to_fomc < max_days]
+                   if min_days <= t.entry_snapshots[0].days_to_fomc < max_days]
 
         mock_get.side_effect = mock_fomc_filter
 
@@ -834,10 +834,10 @@ def test_analyze_by_earnings_timing(mock_db_session, sample_trades_with_market_c
         def mock_earnings_filter(timing):
             if timing is None:
                 return [t for t in sample_trades_with_market_context
-                       if not t.entry_snapshot.earnings_in_dte]
+                       if not t.entry_snapshots[0].earnings_in_dte]
             else:
                 return [t for t in sample_trades_with_market_context
-                       if t.entry_snapshot.earnings_timing == timing]
+                       if t.entry_snapshots[0].earnings_timing == timing]
 
         mock_get.side_effect = mock_earnings_filter
 
@@ -864,8 +864,8 @@ def test_analyze_by_market_breadth(mock_db_session, sample_trades_with_market_co
         def mock_breadth_filter(breadth_type):
             filtered = []
             for t in sample_trades_with_market_context:
-                qqq = t.entry_snapshot.qqq_change_pct
-                iwm = t.entry_snapshot.iwm_change_pct
+                qqq = t.entry_snapshots[0].qqq_change_pct
+                iwm = t.entry_snapshots[0].iwm_change_pct
                 if breadth_type == "risk_on" and iwm > qqq:
                     filtered.append(t)
                 elif breadth_type == "risk_off" and qqq > iwm:

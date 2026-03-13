@@ -448,31 +448,44 @@ class TwoTierExecutionScheduler:
             errors.append(f"Market data unavailable: {health_error}")
             logger.error(f"❌ {health_error}")
 
-        # Check 2: Total margin within MAX_TOTAL_MARGIN
+        # Check 2: Total margin within budget (NLV × margin_budget_pct)
         logger.info("Pre-flight check 2: Margin limits...")
         total_margin = sum(opp.staged_margin for opp in staged if opp.staged_margin)
         from src.config.base import get_config
-        cfg = get_config()
-        max_total_margin = cfg.max_total_margin
+        from src.agentic.scanner_settings import load_scanner_settings
 
-        if total_margin > max_total_margin:
+        cfg = get_config()
+        scanner_settings = load_scanner_settings()
+        margin_budget_pct = scanner_settings.budget.margin_budget_pct
+
+        # Calculate budget from IBKR NLV or use default
+        margin_budget = scanner_settings.budget.margin_budget_default
+        try:
+            summary = self.client.get_account_summary()
+            if summary and "NetLiquidation" in summary:
+                nlv = float(summary["NetLiquidation"])
+                margin_budget = nlv * margin_budget_pct
+        except Exception as e:
+            logger.warning(f"Could not get NLV for pre-flight: {e}")
+
+        if total_margin > margin_budget:
             errors.append(
-                f"Total margin ${total_margin:,.0f} exceeds MAX_TOTAL_MARGIN "
-                f"${max_total_margin:,.0f}"
+                f"Total margin ${total_margin:,.0f} exceeds margin budget "
+                f"${margin_budget:,.0f} ({margin_budget_pct:.0%} of NLV)"
             )
             logger.error(
                 f"❌ Total margin ${total_margin:,.0f} > "
-                f"${max_total_margin:,.0f} limit"
+                f"${margin_budget:,.0f} budget"
             )
         else:
             logger.info(
                 f"✓ Margin check passed: ${total_margin:,.0f} / "
-                f"${max_total_margin:,.0f}"
+                f"${margin_budget:,.0f}"
             )
 
         # Check 3: Position count within MAX_POSITIONS
         logger.info("Pre-flight check 3: Position count...")
-        max_positions = cfg.max_positions
+        max_positions = scanner_settings.budget.max_positions
         if len(staged) > max_positions:
             errors.append(
                 f"Trade count {len(staged)} exceeds MAX_POSITIONS {max_positions}"

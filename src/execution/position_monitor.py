@@ -212,7 +212,7 @@ class PositionMonitor:
                     exit_service.save_snapshot(exit_snapshot)
                     logger.debug(f"  Exit snapshot captured for expired {trade.symbol}")
                 except Exception as snap_err:
-                    logger.warning(f"  Exit snapshot failed for expired {trade.symbol}: {snap_err}")
+                    logger.warning(f"  Exit snapshot failed for expired {trade.symbol}: {snap_err}", exc_info=True)
 
                 logger.info(
                     f"Auto-closed expired position: {trade.symbol} ${trade.strike} "

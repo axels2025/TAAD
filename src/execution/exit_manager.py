@@ -423,12 +423,17 @@ class ExitManager:
                                     exit_premium=exit_price,
                                     exit_reason=decision.reason
                                 )
+                                # Capture values before save_snapshot commits and expires ORM attrs
+                                snap_win = exit_snapshot.win
+                                snap_roi = exit_snapshot.roi_pct
+                                snap_quality = exit_snapshot.trade_quality_score
+
                                 exit_service.save_snapshot(exit_snapshot)
 
                                 logger.info(
-                                    f"✓ Exit snapshot captured (Win: {exit_snapshot.win}, "
-                                    f"ROI: {exit_snapshot.roi_pct:.1%}, "
-                                    f"Quality: {exit_snapshot.trade_quality_score:.2f})"
+                                    f"✓ Exit snapshot captured (Win: {snap_win}, "
+                                    f"ROI: {snap_roi:.1%}, "
+                                    f"Quality: {snap_quality:.2f})"
                                 )
                             else:
                                 logger.warning(f"Trade record not found for position {position_id}")
@@ -775,12 +780,8 @@ class ExitManager:
                         exit_reason=exit_reason
                     )
                     exit_service.save_snapshot(exit_snapshot)
-                    logger.info(
-                        f"Exit snapshot captured (Win: {exit_snapshot.win}, "
-                        f"ROI: {exit_snapshot.roi_pct:.1%})"
-                    )
                 except Exception as snap_err:
-                    logger.error(f"Failed to capture exit snapshot: {snap_err}")
+                    logger.error(f"Failed to capture exit snapshot: {snap_err}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Failed to record fill in DB for {position_id}: {e}", exc_info=True)

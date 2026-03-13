@@ -286,24 +286,45 @@ class ExitSnapshotService:
                     )
 
     def save_snapshot(self, snapshot: TradeExitSnapshot) -> None:
-        """Save exit snapshot to database.
+        """Save exit snapshot to database (idempotent).
+
+        If an exit snapshot already exists for this trade_id, it is
+        updated rather than duplicated.  This prevents UniqueViolation
+        when multiple code paths (expiry close, assignment detector,
+        exit manager) all attempt to capture the same exit.
 
         Args:
             snapshot: Exit snapshot to save
         """
+        trade_id = snapshot.trade_id
         try:
+            # Check for existing snapshot (unique constraint on trade_id)
+            existing = (
+                self.db.query(TradeExitSnapshot)
+                .filter(TradeExitSnapshot.trade_id == trade_id)
+                .first()
+            )
+            if existing:
+                logger.info(
+                    f"Exit snapshot already exists for trade {trade_id} "
+                    f"(id={existing.id}), skipping duplicate"
+                )
+                return
+
+            # Capture values before commit expires ORM attributes
+            win = snapshot.win
+            roi = snapshot.roi_pct
+
             self.db.add(snapshot)
             self.db.commit()
             logger.info(
-                f"Saved exit snapshot to database",
-                extra={
-                    "snapshot_id": snapshot.id,
-                    "trade_id": snapshot.trade_id,
-                    "win": snapshot.win,
-                    "roi_pct": snapshot.roi_pct,
-                },
+                f"Saved exit snapshot for trade {trade_id} "
+                f"(win={win}, roi={roi})"
             )
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Failed to save exit snapshot: {e}", exc_info=True)
+            logger.error(
+                f"Failed to save exit snapshot for trade {trade_id}: {e}",
+                exc_info=True,
+            )
             raise
