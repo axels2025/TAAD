@@ -109,6 +109,16 @@ class AutoScanConfig(BaseModel):
     require_ibkr: bool = True  # Hard requirement for IBKR connection
 
 
+class CROConfig(BaseModel):
+    """Chief Risk Officer adversarial agent configuration."""
+
+    enabled: bool = Field(default=True, description="Enable CRO adversarial review before trade execution")
+    model: str = Field(default="claude-sonnet-4-5-20250929", description="Model for CRO review (Sonnet for cost efficiency)")
+    escalate_on_high: bool = Field(default=True, description="Escalate to human review on HIGH/CRITICAL objections")
+    timeout: float = Field(default=45.0, ge=10.0, le=120.0, description="CRO API call timeout in seconds")
+    max_retries: int = Field(default=2, ge=1, le=5)
+
+
 class ExitRulesConfig(BaseModel):
     """Dashboard-configurable exit rules for the daemon's ExitManager.
 
@@ -140,6 +150,7 @@ class Phase5Config(BaseModel):
     auto_scan: AutoScanConfig = Field(default_factory=AutoScanConfig)
     exit_rules: ExitRulesConfig = Field(default_factory=ExitRulesConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
+    cro: CROConfig = Field(default_factory=CROConfig)
     guardrails: "GuardrailConfig" = Field(default_factory=lambda: _default_guardrail_config())
 
 

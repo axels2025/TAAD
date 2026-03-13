@@ -32,6 +32,7 @@ from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from src.agentic.action_executor import ActionExecutor
+from src.agents.cro_agent import CROAgent, CROAssessment
 from src.agentic.autonomy_governor import AutonomyGovernor
 from src.agentic.config import Phase5Config, load_phase5_config
 from src.agentic.event_bus import EventBus, EventType
@@ -189,6 +190,19 @@ class TAADDaemon:
             ibkr_client=self.ibkr_client,
             market_calendar=self.calendar,
         )
+
+        # Initialize CRO (Chief Risk Officer) adversarial agent
+        self.cro_agent: Optional[CROAgent] = None
+        if self.config.cro.enabled:
+            self.cro_agent = CROAgent(
+                model=self.config.cro.model,
+                max_retries=self.config.cro.max_retries,
+                timeout=self.config.cro.timeout,
+            )
+            logger.info(
+                f"CRO agent initialized (model={self.config.cro.model}, "
+                f"escalate_on_high={self.config.cro.escalate_on_high})"
+            )
 
         # Reconnection state
         self._last_reconnect_alert_time: float = 0.0
@@ -727,6 +741,83 @@ class TAADDaemon:
                     guardrail_flags=self.guardrails.results_to_dict(action_guardrail_results) if action_guardrail_results else None,
                 )
 
+                # Step 3.25: CRO adversarial review (only for trade-affecting actions)
+                cro_assessment: Optional[CROAssessment] = None
+                if (
+                    self.cro_agent is not None
+                    and decision.action in ("EXECUTE_TRADES", "STAGE_CANDIDATES")
+                    and not skip_claude
+                    and decision.key_factors != ["duplicate_suppressed"]
+                    and decision.key_factors != ["pending_approval_exists"]
+                ):
+                    logger.info(f"CRO review triggered for {decision.action}")
+                    cro_assessment = await asyncio.to_thread(
+                        self.cro_agent.review,
+                        context,
+                        primary_decision_reasoning=decision.reasoning or "",
+                    )
+
+                    # Store CRO assessment in audit metadata
+                    meta = dict(decision.metadata or {})
+                    meta["cro_assessment"] = cro_assessment.to_dict()
+                    audit.decision_metadata = meta
+
+                    # Escalate to human if CRO flags HIGH/CRITICAL risk
+                    if (
+                        cro_assessment.should_escalate
+                        and self.config.cro.escalate_on_high
+                        and cro_assessment.has_high
+                    ):
+                        logger.warning(
+                            f"CRO escalation: {cro_assessment.overall_risk_level} risk — "
+                            f"{cro_assessment.strongest_objection}"
+                        )
+                        audit.executed = False
+                        audit.autonomy_approved = False
+                        audit.execution_result = {
+                            "cro_layer": "adversarial_review",
+                            "risk_level": cro_assessment.overall_risk_level,
+                            "strongest_objection": cro_assessment.strongest_objection,
+                            "message": (
+                                f"CRO adversarial review: {cro_assessment.overall_risk_level} risk. "
+                                f"{cro_assessment.strongest_objection}"
+                            ),
+                        }
+                        db.add(audit)
+                        db.commit()
+
+                        # Create dashboard notification
+                        objection_details = "\n".join(
+                            f"- [{o.severity}] {o.target}: {o.objection}"
+                            for o in cro_assessment.objections
+                        )
+                        self._upsert_notification(
+                            db=db,
+                            key=f"cro_review_{audit.id}",
+                            category="risk",
+                            title=f"CRO Review: {cro_assessment.overall_risk_level} Risk",
+                            message=(
+                                f"{cro_assessment.assessment_summary}\n\n"
+                                f"Objections:\n{objection_details}"
+                            ),
+                            details=cro_assessment.to_dict(),
+                        )
+
+                        self.memory.add_decision({
+                            "timestamp": self._market_timestamp(),
+                            "event_type": event_type,
+                            "action": decision.action,
+                            "confidence": decision.confidence,
+                            "reasoning": decision.reasoning[:200] if decision.reasoning else "",
+                            "executed": False,
+                            "result": (
+                                f"CRO blocked: {cro_assessment.overall_risk_level} — "
+                                f"{cro_assessment.strongest_objection[:150]}"
+                            ),
+                        })
+                        self.health.record_decision()
+                        continue  # Skip to next action in plan
+
                 # Step 3.5: Pre-execution gate (Phase 6)
                 exec_gate_results = self.guardrails.validate_execution(
                     decision, context, ibkr_client=self.ibkr_client
@@ -780,7 +871,11 @@ class TAADDaemon:
                 # Update audit with execution result
                 audit.autonomy_approved = result.success and result.action != "REQUEST_HUMAN_REVIEW"
                 audit.executed = result.success and result.action not in ("MONITOR_ONLY", "REQUEST_HUMAN_REVIEW")
-                audit.execution_result = {"message": result.message, "data": result.data}
+                exec_result_data = {"message": result.message, "data": result.data}
+                # Attach CRO assessment to execution result for dashboard visibility
+                if cro_assessment is not None:
+                    exec_result_data["cro_assessment"] = cro_assessment.to_dict()
+                audit.execution_result = exec_result_data
                 if result.error:
                     audit.execution_error = result.error
                 if exec_gate_results:

@@ -56,11 +56,11 @@ learning:
   weekly_learning_hour: 17
   min_trades_for_experiment: 10
   max_concurrent_experiments: 3
-  auto_apply_threshold: 0.80
+  auto_apply_threshold: 0.8
   eod_reflection_enabled: true
   eod_reflection_frequency: daily
   hypothesis_generation_enabled: true
-  hypothesis_model: claude-sonnet-4-5-20250929
+  hypothesis_model: claude-opus-4-6
 auto_scan:
   enabled: false
   delay_minutes: 5
@@ -70,14 +70,18 @@ auto_scan:
 exit_rules:
   profit_target: 0.75
   stop_loss: -3.0
-  time_exit_dte: 1
+  time_exit_dte: -1
   let_expire_premium: 0.05
 strategy:
   entry_days:
   - Monday
   - Tuesday
-  - Wednesday
-  - Thursday
+cro:
+  enabled: true
+  model: claude-sonnet-4-5-20250929
+  escalate_on_high: true
+  timeout: 45.0
+  max_retries: 2
 guardrails:
   enabled: true
   action_plausibility_enabled: true
