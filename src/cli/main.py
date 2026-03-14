@@ -3138,6 +3138,7 @@ def learn(
     experiments: bool = typer.Option(False, "--experiments", help="View active experiments"),
     proposals: bool = typer.Option(False, "--proposals", help="View parameter proposals"),
     health: bool = typer.Option(False, "--health", help="Run alpha decay / strategy health check"),
+    regimes: bool = typer.Option(False, "--regimes", help="Show regime-aware adaptation status"),
     report: bool = typer.Option(False, "--report", help="Generate learning report"),
     summary: bool = typer.Option(False, "--summary", help="Show learning summary"),
     days: int = typer.Option(30, help="Number of days for summary/report"),
@@ -3177,7 +3178,7 @@ def learn(
         console.print("[bold blue]Learning Engine[/bold blue]\n")
 
         # If no flags specified, show help
-        if not any([analyse, patterns, experiments, proposals, health, report, summary]):
+        if not any([analyse, patterns, experiments, proposals, health, regimes, report, summary]):
             console.print("[yellow]No action specified. Use --help to see options.[/yellow]\n")
             console.print("[cyan]Common commands:[/cyan]")
             console.print("  nakedtrader learn --analyse    # Run weekly analysis")
@@ -3502,6 +3503,118 @@ def learn(
                             f"value={alert.cusum_value:.1f} (threshold={alert.threshold:.1f}), "
                             f"{alert.consecutive_trades} consecutive trades[/{alert_style}]"
                         )
+
+            # Regime-aware adaptation status
+            if regimes:
+                from src.learning.regime_adapter import RegimeAdapter, classify_vix_regime
+                from src.learning.experiment_engine import ExperimentEngine
+
+                console.print("[bold cyan]Regime-Aware Adaptation (Phase D)[/bold cyan]\n")
+
+                exp_engine = ExperimentEngine(db)
+                orchestrator = LearningOrchestrator(db)
+                adapter = orchestrator.regime_adapter
+
+                # Get latest VIX from recent trades
+                from src.data.models import Trade as TradeModel
+                latest_trade = (
+                    db.query(TradeModel)
+                    .filter(TradeModel.vix_at_entry.isnot(None))
+                    .order_by(TradeModel.entry_date.desc())
+                    .first()
+                )
+                current_vix = latest_trade.vix_at_entry if latest_trade else 20.0
+
+                regime_report = adapter.analyse(current_vix)
+
+                # Current regime banner
+                regime_colors = {
+                    "low": "cyan", "normal": "green", "elevated": "yellow",
+                    "high": "red", "extreme": "bold white on red",
+                }
+                r_style = regime_colors.get(regime_report.current_regime, "dim")
+                console.print(
+                    f"[{r_style}]Current Regime: {regime_report.current_regime.upper()} "
+                    f"(VIX={current_vix:.1f})[/{r_style}]"
+                )
+
+                # Term structure / VIX direction
+                if regime_report.term_structure:
+                    ts = regime_report.term_structure
+                    signal_colors = {
+                        "favorable": "green", "neutral": "yellow", "unfavorable": "red",
+                    }
+                    s_style = signal_colors.get(ts.entry_signal, "dim")
+                    vix_change = f"{ts.vix_change_pct:+.1%}" if ts.vix_change_pct is not None else "N/A"
+                    console.print(
+                        f"VIX Direction: {ts.direction} ({vix_change} over 5d) "
+                        f"→ Entry Signal: [{s_style}]{ts.entry_signal.upper()}[/{s_style}]"
+                    )
+
+                # Regime parameter table
+                console.print()
+                param_table = Table(title="Regime Parameter Table")
+                param_table.add_column("Regime", style="cyan")
+                param_table.add_column("VIX Range")
+                param_table.add_column("Profit Target", justify="right")
+                param_table.add_column("Stop Loss", justify="right")
+                param_table.add_column("Max Pos", justify="right")
+                param_table.add_column("DTE Range")
+                param_table.add_column("Size %", justify="right")
+                param_table.add_column("Entry Gate")
+                param_table.add_column("Source")
+
+                vix_ranges = {"low": "<15", "normal": "15-20", "elevated": "20-25", "high": "25-35", "extreme": ">35"}
+
+                for rp in regime_report.all_regime_params:
+                    is_active = rp.regime == regime_report.current_regime
+                    name = f"[bold]{rp.regime.upper()}[/bold]" if is_active else rp.regime.title()
+                    param_table.add_row(
+                        name,
+                        vix_ranges.get(rp.regime, "?"),
+                        f"{rp.profit_target:.0%}",
+                        f"{rp.stop_loss:.1f}x",
+                        str(rp.max_positions),
+                        f"{rp.min_dte}-{rp.max_dte}",
+                        f"{rp.position_size_pct:.0%}",
+                        rp.entry_gate,
+                        rp.source,
+                    )
+
+                console.print(param_table)
+
+                # Regime experiments
+                if regime_report.regime_experiments:
+                    console.print()
+                    exp_table = Table(title="Regime Experiments")
+                    exp_table.add_column("Name", style="cyan")
+                    exp_table.add_column("Status")
+                    exp_table.add_column("Control")
+                    exp_table.add_column("Test")
+                    exp_table.add_column("Trades (C/T)", justify="right")
+                    exp_table.add_column("P-value", justify="right")
+
+                    for re in regime_report.regime_experiments:
+                        status_style = {"active": "green", "adopted": "bold green", "rejected": "red"}.get(re["status"], "dim")
+                        exp_table.add_row(
+                            re["name"],
+                            f"[{status_style}]{re['status'].upper()}[/{status_style}]",
+                            str(re["control"]),
+                            str(re["test"]),
+                            f"{re['control_trades']}/{re['test_trades']}",
+                            f"{re['p_value']:.4f}" if re.get("p_value") else "-",
+                        )
+
+                    console.print(exp_table)
+                else:
+                    console.print("\n[dim]No regime experiments yet. Experiments are created automatically on regime transitions.[/dim]")
+
+                # Recent transitions
+                if regime_report.recent_transitions:
+                    console.print()
+                    console.print("[bold]Recent Regime Transitions (30d):[/bold]")
+                    for t in regime_report.recent_transitions[:5]:
+                        console.print(f"  {t.get('date', '?')}: {t.get('pattern', '?')}")
 
             # Generate report
             if report or summary:

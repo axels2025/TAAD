@@ -187,6 +187,8 @@ class LearningReport:
     baseline_avg_roi: float = 0.0
     alpha_decay_health: str = ""
     alpha_decay_reasons: list[str] = field(default_factory=list)
+    regime_health: str = ""
+    regime_entry_signal: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""

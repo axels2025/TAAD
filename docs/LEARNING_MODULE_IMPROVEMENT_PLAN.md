@@ -59,16 +59,18 @@
 
 **Impact:** 16 PRELIMINARY patterns (vs 24 before FDR). 0 VALIDATED — walk-forward CV correctly blocks patterns that haven't been consistently exploitable across time periods. The top signal is `moderate_fomc_proximity` (n=514, p=0.0001, d=0.283) — trades entered near FOMC meetings show a meaningful directional effect.
 
-## Phase D: Regime-Aware Adaptation
+## Phase D: Regime-Aware Adaptation — COMPLETE (2026-03-14)
 
 **Priority:** MEDIUM — the single biggest performance improvement for options selling
 **Goal:** Different parameters per market regime
 
-| ID | Change | Details |
-|----|--------|---------|
-| D1 | VIX regime parameter tables | Different delta/DTE/size targets per VIX regime. |
-| D2 | Term structure monitoring | Track VIX contango/backwardation as entry gate. Backwardation = near-term fear = reduce selling. |
-| D3 | Auto-experiment on regime shifts | When entering a new regime, spawn experiment comparing adapted vs static params. Builds evidence for regime-specific tuning. |
+| ID | Change | Status | Details |
+|----|--------|--------|---------|
+| D1 | VIX regime parameter tables | DONE | 5-tier regime table (low/normal/elevated/high/extreme) with per-regime profit_target, stop_loss, max_positions, DTE range, position_size_pct, entry_gate. 3-layer merge: defaults → YAML config → learned overrides. Configurable in `config/phase5.yaml` under `regime_adaptation`. |
+| D2 | Term structure monitoring | DONE | VIX rate-of-change proxy (5-day lookback). Rising >15% → unfavorable entry signal, falling >10% → favorable. Uses trade `vix_at_entry` history as VIX proxy since VIX futures not available via standard IBKR API. |
+| D3 | Auto-experiment on regime shifts | DONE | `RegimeExperimentManager` detects regime transitions and spawns scoped A/B experiments (adapted profit_target vs static baseline). Max 2 concurrent regime experiments. Transitions logged to `learning_history` with `event_type="regime_transition"`. |
+
+**Architecture:** Unified `RegimeAdapter` class in `src/learning/regime_adapter.py` combines D1+D2+D3. Integrated into `LearningOrchestrator` as step 7/7 in weekly cycle. CLI accessible via `learn --regimes`.
 
 ## Professional Standards Reference
 

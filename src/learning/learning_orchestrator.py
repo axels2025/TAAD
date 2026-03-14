@@ -18,6 +18,7 @@ from src.learning.experiment_engine import ExperimentEngine
 from src.learning.models import LearningReport
 from src.learning.parameter_optimizer import ParameterOptimizer
 from src.learning.pattern_detector import PatternDetector
+from src.learning.regime_adapter import RegimeAdapter
 from src.learning.statistical_validator import StatisticalValidator
 
 
@@ -55,6 +56,12 @@ class LearningOrchestrator:
             baseline_config = self._load_baseline_config()
 
         self.optimizer = ParameterOptimizer(db_session, baseline_config)
+
+        # D: Regime-aware adaptation
+        regime_overrides = self._load_regime_overrides()
+        self.regime_adapter = RegimeAdapter(
+            db_session, self.experiment_engine, config_overrides=regime_overrides,
+        )
 
         logger.info("Learning orchestrator initialized")
 
@@ -102,14 +109,14 @@ class LearningOrchestrator:
         )
 
         # Step 1: Detect patterns
-        logger.info("\n[1/6] Detecting patterns...")
+        logger.info("\n[1/7] Detecting patterns...")
         patterns = self.pattern_detector.detect_patterns()
         report.patterns_detected = len(patterns)
 
         logger.info(f"  → Detected {len(patterns)} patterns")
 
         # Step 2: Validate patterns and persist ALL findings
-        logger.info("\n[2/6] Validating patterns...")
+        logger.info("\n[2/7] Validating patterns...")
 
         # C1: Apply FDR correction across all pattern p-values before validation
         if patterns:
@@ -157,7 +164,7 @@ class LearningOrchestrator:
         )
 
         # Step 3: Evaluate active experiments
-        logger.info("\n[3/6] Evaluating active experiments...")
+        logger.info("\n[3/7] Evaluating active experiments...")
         active_experiments = self.experiment_engine.get_active_experiments()
 
         for exp in active_experiments:
@@ -214,7 +221,7 @@ class LearningOrchestrator:
         )
 
         # Step 4: Propose new optimizations
-        logger.info("\n[4/6] Proposing parameter optimizations...")
+        logger.info("\n[4/7] Proposing parameter optimizations...")
         proposals = self.optimizer.propose_changes(validated_patterns)
         report.proposals = proposals
 
@@ -233,7 +240,7 @@ class LearningOrchestrator:
             self._save_proposal(proposal)
 
         # Step 5: Auto-apply high-confidence changes
-        logger.info("\n[5/6] Auto-applying high-confidence changes...")
+        logger.info("\n[5/7] Auto-applying high-confidence changes...")
 
         for proposal in proposals:
             if proposal.confidence >= self.auto_apply_threshold:
@@ -248,7 +255,7 @@ class LearningOrchestrator:
         logger.info(f"  → Applied {len(report.changes_applied)} changes automatically")
 
         # Step 6: Alpha decay monitoring
-        logger.info("\n[6/6] Running alpha decay analysis...")
+        logger.info("\n[6/7] Running alpha decay analysis...")
         decay_report = self.alpha_decay_monitor.run_analysis()
         report.alpha_decay_health = decay_report.overall_health
         report.alpha_decay_reasons = decay_report.health_reasons
@@ -268,6 +275,35 @@ class LearningOrchestrator:
                     f"WR={m.win_rate:.0%}, ROI={m.avg_roi:.1%}, "
                     f"Sharpe={m.sharpe_ratio:.2f}"
                 )
+
+        # Step 7: Regime-aware adaptation analysis
+        logger.info("\n[7/7] Running regime adaptation analysis...")
+        try:
+            # Use latest VIX from closed trades
+            latest_vix = self._get_latest_vix(closed_trades)
+            if latest_vix:
+                regime_report = self.regime_adapter.analyse(latest_vix)
+                report.regime_health = regime_report.current_regime
+                report.regime_entry_signal = (
+                    regime_report.term_structure.entry_signal
+                    if regime_report.term_structure else "unknown"
+                )
+
+                logger.info(
+                    f"  Regime: {regime_report.current_regime} (VIX={latest_vix:.1f})"
+                )
+                if regime_report.term_structure:
+                    logger.info(
+                        f"  VIX direction: {regime_report.term_structure.direction} "
+                        f"→ entry signal: {regime_report.term_structure.entry_signal}"
+                    )
+                logger.info(
+                    f"  Active regime experiments: {len(regime_report.regime_experiments)}"
+                )
+            else:
+                logger.info("  No VIX data available — skipping regime analysis")
+        except Exception as e:
+            logger.warning(f"  Regime analysis failed: {e}")
 
         # Save learning report
         self._save_report(report)
@@ -445,6 +481,46 @@ class LearningOrchestrator:
         self.db.commit()
 
         logger.info(f"Saved learning report: {summary}")
+
+    def _get_latest_vix(self, trades: list) -> Optional[float]:
+        """Get the most recent VIX value from trade history.
+
+        Args:
+            trades: List of closed trades
+
+        Returns:
+            Latest VIX value or None
+        """
+        vix_trades = [
+            t for t in trades
+            if t.vix_at_entry is not None and t.entry_date is not None
+        ]
+        if not vix_trades:
+            return None
+        latest = max(vix_trades, key=lambda t: t.entry_date)
+        return latest.vix_at_entry
+
+    def _load_regime_overrides(self) -> dict:
+        """Load regime parameter overrides from phase5.yaml config.
+
+        Returns:
+            Dict mapping regime names to parameter overrides
+        """
+        try:
+            import yaml
+            from pathlib import Path
+
+            config_path = Path(__file__).parent.parent.parent / "config" / "phase5.yaml"
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = yaml.safe_load(f)
+                regime_config = config.get("regime_adaptation", {})
+                if regime_config.get("enabled", False):
+                    return regime_config.get("regime_overrides", {})
+            return {}
+        except Exception as e:
+            logger.warning(f"Could not load regime overrides: {e}")
+            return {}
 
     def _load_baseline_config(self) -> dict:
         """Load baseline strategy configuration.
