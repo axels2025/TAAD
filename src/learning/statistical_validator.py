@@ -10,6 +10,7 @@ import math
 import numpy as np
 from loguru import logger
 from scipy import stats
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from src.data.models import Trade
@@ -181,7 +182,7 @@ class StatisticalValidator:
             return (0.0, 1.0)
 
         # Get baseline trades (all others)
-        all_trades = self.db.query(Trade).filter(Trade.exit_date.isnot(None)).all()
+        all_trades = self.db.query(Trade).filter(Trade.exit_date.isnot(None)).filter(sa.or_(Trade.trade_source.is_(None), Trade.trade_source != "paper")).all()
         pattern_ids = {t.trade_id for t in pattern_trades}
         baseline_trades = [t for t in all_trades if t.trade_id not in pattern_ids]
 
@@ -218,7 +219,7 @@ class StatisticalValidator:
             return 0.0
 
         # Get baseline
-        all_trades = self.db.query(Trade).filter(Trade.exit_date.isnot(None)).all()
+        all_trades = self.db.query(Trade).filter(Trade.exit_date.isnot(None)).filter(sa.or_(Trade.trade_source.is_(None), Trade.trade_source != "paper")).all()
         pattern_ids = {t.trade_id for t in pattern_trades}
         baseline_trades = [t for t in all_trades if t.trade_id not in pattern_ids]
 
@@ -327,7 +328,7 @@ class StatisticalValidator:
         Returns:
             List of matching trades
         """
-        all_trades = self.db.query(Trade).filter(Trade.exit_date.isnot(None)).all()
+        all_trades = self.db.query(Trade).filter(Trade.exit_date.isnot(None)).filter(sa.or_(Trade.trade_source.is_(None), Trade.trade_source != "paper")).all()
 
         # Filter based on pattern type
         if pattern.pattern_type == "dte_bucket":

@@ -84,13 +84,14 @@ class LearningOrchestrator:
 
         report = LearningReport(timestamp=datetime.now())
 
-        # Get baseline metrics (exclude stock_held trades with incomplete P&L)
+        # Get baseline metrics (exclude stock_held and paper trades)
         closed_trades = (
             self.db.query(Trade)
             .filter(Trade.exit_date.isnot(None))
             .filter(
                 sa.or_(Trade.lifecycle_status.is_(None), Trade.lifecycle_status != "stock_held")
             )
+            .filter(sa.or_(Trade.trade_source.is_(None), Trade.trade_source != "paper"))
             .all()
         )
         report.total_trades_analyzed = len(closed_trades)

@@ -25,10 +25,14 @@ from src.learning.statistical_validator import StatisticalValidator
 def mock_db():
     """Create mock database session."""
     db = Mock()
-    # Setup default mock returns for common query patterns
-    db.query().filter().all.return_value = []
-    db.query().filter().filter().all.return_value = []
-    db.query().filter().filter().filter().all.return_value = []
+    # Setup a chainable mock query that returns [] from .all() at any depth
+    mock_query = Mock()
+    mock_query.filter.return_value = mock_query
+    mock_query.order_by.return_value = mock_query
+    mock_query.limit.return_value = mock_query
+    mock_query.all.return_value = []
+    mock_query.first.return_value = None
+    db.query.return_value = mock_query
     return db
 
 
@@ -478,17 +482,16 @@ def test_full_learning_cycle_simulation(mock_db):
     # Setup mock to return trades for Trade queries and empty for Experiment queries
     def mock_query_side_effect(model_class):
         mock_query_result = Mock()
+        # Make filter/order_by/limit chainable (returns self)
+        mock_query_result.filter.return_value = mock_query_result
+        mock_query_result.order_by.return_value = mock_query_result
+        mock_query_result.limit.return_value = mock_query_result
         if model_class == Trade:
-            mock_query_result.filter().all.return_value = trades
-            mock_query_result.filter().filter().all.return_value = trades
-            mock_query_result.filter().filter().filter().all.return_value = trades
-            # Alpha decay monitor uses .order_by().all()
-            mock_query_result.filter().filter().order_by().all.return_value = trades
+            mock_query_result.all.return_value = trades
+            mock_query_result.first.return_value = trades[0] if trades else None
         else:  # Experiment, LearningHistory, or other models
-            mock_query_result.filter().all.return_value = []
-            mock_query_result.filter().filter().all.return_value = []
-            mock_query_result.filter().order_by().first.return_value = None
-            mock_query_result.filter().order_by().limit().all.return_value = []
+            mock_query_result.all.return_value = []
+            mock_query_result.first.return_value = None
         return mock_query_result
 
     mock_db.query.side_effect = mock_query_side_effect

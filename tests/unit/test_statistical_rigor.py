@@ -35,7 +35,15 @@ def _make_pattern(name, p_value, effect_size=0.3, sample_size=100, win_rate=0.80
 
 @pytest.fixture
 def mock_db():
-    return MagicMock()
+    db = MagicMock()
+    # Make query().filter() chainable — filter() returns itself
+    mock_query = MagicMock()
+    mock_query.filter.return_value = mock_query
+    mock_query.order_by.return_value = mock_query
+    mock_query.all.return_value = []
+    mock_query.first.return_value = None
+    db.query.return_value = mock_query
+    return db
 
 
 # ============================================================================

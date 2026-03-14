@@ -195,13 +195,14 @@ class AlphaDecayMonitor:
         return report
 
     def _get_closed_trades(self) -> list[Trade]:
-        """Get all closed trades sorted by exit date."""
+        """Get all closed trades sorted by exit date (excludes paper trades)."""
         return (
             self.db.query(Trade)
             .filter(Trade.exit_date.isnot(None))
             .filter(
                 sa.or_(Trade.lifecycle_status.is_(None), Trade.lifecycle_status != "stock_held")
             )
+            .filter(sa.or_(Trade.trade_source.is_(None), Trade.trade_source != "paper"))
             .order_by(Trade.exit_date.asc())
             .all()
         )
