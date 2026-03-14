@@ -254,14 +254,14 @@ function renderSettings(s) {
         const checked = val ? 'checked' : '';
         html += '<div class="checkbox-wrap">' +
           '<input type="checkbox" id="f-' + section.key + '-' + f.key + '" ' + checked +
-          ' onchange="updateField(\'' + section.key + '\',\'' + f.key + '\',this.checked)">' +
+          ' onchange="updateField(\\'' + section.key + '\\',\\'' + f.key + '\\',this.checked)">' +
           '<label for="f-' + section.key + '-' + f.key + '">' + (val ? 'On' : 'Off') + '</label></div>';
       } else {
         const attrs = (f.min != null ? ' min="' + f.min + '"' : '') +
                       (f.max != null ? ' max="' + f.max + '"' : '') +
                       (f.step != null ? ' step="' + f.step + '"' : '');
         html += '<input type="number" id="f-' + section.key + '-' + f.key + '" value="' + esc(val) + '"' + attrs +
-          ' onchange="updateField(\'' + section.key + '\',\'' + f.key + '\',this.value,\'' + f.type + '\')">';
+          ' onchange="updateField(\\'' + section.key + '\\',\\'' + f.key + '\\',this.value,\\'' + f.type + '\\')">';
       }
 
       html += '</div>';
