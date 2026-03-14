@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from src.data.models import LearningHistory, Pattern as PatternModel, Trade
 from src.utils.timezone import utc_now
+from src.learning.alpha_decay_monitor import AlphaDecayMonitor
 from src.learning.experiment_engine import ExperimentEngine
 from src.learning.models import LearningReport
 from src.learning.parameter_optimizer import ParameterOptimizer
@@ -47,6 +48,7 @@ class LearningOrchestrator:
         self.pattern_detector = PatternDetector(db_session)
         self.validator = StatisticalValidator(db_session)
         self.experiment_engine = ExperimentEngine(db_session)
+        self.alpha_decay_monitor = AlphaDecayMonitor(db_session)
 
         # Load baseline config
         if baseline_config is None:
@@ -100,15 +102,21 @@ class LearningOrchestrator:
         )
 
         # Step 1: Detect patterns
-        logger.info("\n[1/5] Detecting patterns...")
+        logger.info("\n[1/6] Detecting patterns...")
         patterns = self.pattern_detector.detect_patterns()
         report.patterns_detected = len(patterns)
 
         logger.info(f"  → Detected {len(patterns)} patterns")
 
-        # Step 2: Validate patterns
-        logger.info("\n[2/5] Validating patterns...")
+        # Step 2: Validate patterns and persist ALL findings
+        logger.info("\n[2/6] Validating patterns...")
+
+        # C1: Apply FDR correction across all pattern p-values before validation
+        if patterns:
+            self.validator.apply_fdr_correction(patterns)
+
         validated_patterns = []
+        preliminary_patterns = []
 
         for pattern in patterns:
             result = self.validator.validate_pattern(pattern)
@@ -116,6 +124,7 @@ class LearningOrchestrator:
             if result.valid:
                 validated_patterns.append(pattern)
                 self._save_pattern(pattern)
+                self._save_pattern_candidate(pattern, result)
 
                 logger.info(
                     f"  ✓ {pattern.pattern_name}: "
@@ -123,15 +132,32 @@ class LearningOrchestrator:
                     f"ROI={pattern.avg_roi:.2%}, "
                     f"confidence={pattern.confidence:.1%}"
                 )
+            elif result.status == "PRELIMINARY":
+                preliminary_patterns.append(pattern)
+                self._save_pattern_candidate(pattern, result)
+
+                logger.info(
+                    f"  ~ {pattern.pattern_name} [PRELIMINARY]: "
+                    f"{pattern.sample_size} trades, "
+                    f"ROI={pattern.avg_roi:.2%}, "
+                    f"p={pattern.p_value:.4f} — {result.reason}"
+                )
             else:
+                # A1: Persist even rejected patterns as candidates for audit trail
+                self._save_pattern_candidate(pattern, result)
                 logger.debug(f"  ✗ {pattern.pattern_name}: {result.reason}")
 
         report.patterns_validated = len(validated_patterns)
+        report.patterns_preliminary = len(preliminary_patterns)
 
-        logger.info(f"  → Validated {len(validated_patterns)} patterns")
+        logger.info(
+            f"  → Validated {len(validated_patterns)}, "
+            f"Preliminary {len(preliminary_patterns)}, "
+            f"Rejected {len(patterns) - len(validated_patterns) - len(preliminary_patterns)}"
+        )
 
         # Step 3: Evaluate active experiments
-        logger.info("\n[3/5] Evaluating active experiments...")
+        logger.info("\n[3/6] Evaluating active experiments...")
         active_experiments = self.experiment_engine.get_active_experiments()
 
         for exp in active_experiments:
@@ -188,7 +214,7 @@ class LearningOrchestrator:
         )
 
         # Step 4: Propose new optimizations
-        logger.info("\n[4/5] Proposing parameter optimizations...")
+        logger.info("\n[4/6] Proposing parameter optimizations...")
         proposals = self.optimizer.propose_changes(validated_patterns)
         report.proposals = proposals
 
@@ -202,8 +228,12 @@ class LearningOrchestrator:
                 f"improvement={proposal.expected_improvement:.2%})"
             )
 
+        # A2: Persist ALL proposals to learning_history (not just auto-applied ones)
+        for proposal in proposals:
+            self._save_proposal(proposal)
+
         # Step 5: Auto-apply high-confidence changes
-        logger.info("\n[5/5] Auto-applying high-confidence changes...")
+        logger.info("\n[5/6] Auto-applying high-confidence changes...")
 
         for proposal in proposals:
             if proposal.confidence >= self.auto_apply_threshold:
@@ -216,6 +246,28 @@ class LearningOrchestrator:
                 )
 
         logger.info(f"  → Applied {len(report.changes_applied)} changes automatically")
+
+        # Step 6: Alpha decay monitoring
+        logger.info("\n[6/6] Running alpha decay analysis...")
+        decay_report = self.alpha_decay_monitor.run_analysis()
+        report.alpha_decay_health = decay_report.overall_health
+        report.alpha_decay_reasons = decay_report.health_reasons
+
+        health_style = {
+            "HEALTHY": "✓", "WATCH": "~", "WARNING": "⚠", "CRITICAL": "✗",
+        }.get(decay_report.overall_health, "?")
+
+        logger.info(f"  {health_style} Strategy health: {decay_report.overall_health}")
+        for reason in decay_report.health_reasons:
+            logger.info(f"    • {reason}")
+
+        if decay_report.rolling_metrics:
+            for m in decay_report.rolling_metrics:
+                logger.info(
+                    f"  {m.window_days}d: {m.trade_count} trades, "
+                    f"WR={m.win_rate:.0%}, ROI={m.avg_roi:.1%}, "
+                    f"Sharpe={m.sharpe_ratio:.2f}"
+                )
 
         # Save learning report
         self._save_report(report)
@@ -316,6 +368,57 @@ class LearningOrchestrator:
         self.db.add(learning_event)
         self.db.commit()
 
+    def _save_pattern_candidate(self, pattern, result) -> None:
+        """Persist every detected pattern as a candidate for audit trail (A1).
+
+        Creates a learning_history record with event_type='pattern_candidate',
+        including stats and validation status/reason so nothing is lost.
+        """
+        import json
+
+        details = {
+            "pattern_type": pattern.pattern_type,
+            "pattern_value": pattern.pattern_value,
+            "win_rate": round(pattern.win_rate, 4),
+            "avg_roi": round(pattern.avg_roi, 4),
+            "baseline_win_rate": round(pattern.baseline_win_rate, 4) if pattern.baseline_win_rate else None,
+            "baseline_roi": round(pattern.baseline_roi, 4) if pattern.baseline_roi else None,
+            "p_value": round(pattern.p_value, 6),
+            "effect_size": round(pattern.effect_size, 4),
+            "validation_status": result.status,
+            "rejection_reason": result.reason if not result.valid else None,
+        }
+
+        event = LearningHistory(
+            event_type="pattern_candidate",
+            event_date=utc_now(),
+            pattern_name=pattern.pattern_name,
+            confidence=pattern.confidence,
+            sample_size=pattern.sample_size,
+            reasoning=json.dumps(details),
+        )
+        self.db.add(event)
+        self.db.commit()
+
+    def _save_proposal(self, proposal) -> None:
+        """Persist a proposal to learning_history even if not auto-applied (A2).
+
+        Creates a learning_history record with event_type='proposal_generated'.
+        """
+        event = LearningHistory(
+            event_type="proposal_generated",
+            event_date=utc_now(),
+            pattern_name=proposal.source_pattern.pattern_name if proposal.source_pattern else None,
+            confidence=proposal.confidence,
+            parameter_changed=proposal.parameter,
+            old_value=str(proposal.current_value),
+            new_value=str(proposal.proposed_value),
+            reasoning=proposal.reasoning,
+            expected_improvement=proposal.expected_improvement,
+        )
+        self.db.add(event)
+        self.db.commit()
+
     def _save_report(self, report: LearningReport) -> None:
         """Save learning report summary to database.
 
@@ -326,6 +429,7 @@ class LearningOrchestrator:
         summary = (
             f"Weekly analysis: {report.patterns_detected} patterns detected, "
             f"{report.patterns_validated} validated, "
+            f"{report.patterns_preliminary} preliminary, "
             f"{len(report.experiments_adopted)} experiments adopted, "
             f"{len(report.changes_applied)} changes applied"
         )

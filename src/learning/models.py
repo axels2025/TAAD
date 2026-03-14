@@ -39,11 +39,22 @@ class DetectedPattern:
     market_regime: Optional[str] = None
 
     def is_significant(self, min_samples: int = 30, max_p: float = 0.05, min_effect: float = 0.5) -> bool:
-        """Check if pattern meets significance criteria."""
+        """Check if pattern meets full significance criteria."""
         return (
             self.sample_size >= min_samples
             and self.p_value < max_p
             and abs(self.effect_size) > min_effect
+        )
+
+    def is_preliminary(self, min_samples: int = 10, max_p: float = 0.20) -> bool:
+        """Check if pattern meets preliminary (early-stage) criteria.
+
+        Surfaces directional signals before full statistical confirmation.
+        Requires fewer samples and a relaxed p-value threshold.
+        """
+        return (
+            self.sample_size >= min_samples
+            and self.p_value < max_p
         )
 
     def to_dict(self) -> dict:
@@ -68,6 +79,7 @@ class ValidationResult:
 
     valid: bool
     reason: str = ""
+    status: str = "REJECTED"  # VALIDATED, PRELIMINARY, REJECTED
     p_value: Optional[float] = None
     effect_size: Optional[float] = None
     cv_score: Optional[float] = None  # Cross-validation score
@@ -165,6 +177,7 @@ class LearningReport:
     timestamp: datetime
     patterns_detected: int = 0
     patterns_validated: int = 0
+    patterns_preliminary: int = 0
     experiments_adopted: list = field(default_factory=list)
     experiments_rejected: list = field(default_factory=list)
     proposals: list[ParameterProposal] = field(default_factory=list)
@@ -172,6 +185,8 @@ class LearningReport:
     total_trades_analyzed: int = 0
     baseline_win_rate: float = 0.0
     baseline_avg_roi: float = 0.0
+    alpha_decay_health: str = ""
+    alpha_decay_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -179,6 +194,7 @@ class LearningReport:
             "timestamp": self.timestamp.isoformat(),
             "patterns_detected": self.patterns_detected,
             "patterns_validated": self.patterns_validated,
+            "patterns_preliminary": self.patterns_preliminary,
             "experiments_adopted": len(self.experiments_adopted),
             "experiments_rejected": len(self.experiments_rejected),
             "proposals": len(self.proposals),

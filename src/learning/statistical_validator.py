@@ -1,8 +1,11 @@
 """Statistical Validator for ensuring patterns are real, not noise.
 
 Validates detected patterns using rigorous statistical tests including
-t-tests, effect size calculations, and time-series cross-validation.
+t-tests, effect size calculations, walk-forward cross-validation,
+Benjamini-Hochberg FDR correction, and adaptive thresholds.
 """
+
+import math
 
 import numpy as np
 from loguru import logger
@@ -18,6 +21,11 @@ class StatisticalValidator:
 
     Ensures patterns are statistically significant and not just
     random noise by applying multiple validation checks.
+
+    Phase C enhancements:
+    - C1: Benjamini-Hochberg FDR correction across all pattern tests
+    - C2: Adaptive validation thresholds that scale with dataset size
+    - C3: Walk-forward cross-validation (replaces static k-fold)
     """
 
     def __init__(
@@ -27,6 +35,8 @@ class StatisticalValidator:
         significance_level: float = 0.05,
         min_effect_size: float = 0.5,
         min_cv_score: float = 0.6,
+        adaptive_thresholds: bool = True,
+        fdr_correction: bool = True,
     ):
         """Initialize statistical validator.
 
@@ -36,44 +46,86 @@ class StatisticalValidator:
             significance_level: Maximum p-value for significance (default 0.05)
             min_effect_size: Minimum Cohen's d effect size (default 0.5)
             min_cv_score: Minimum cross-validation score (default 0.6)
+            adaptive_thresholds: Scale thresholds by dataset size (default True)
+            fdr_correction: Apply Benjamini-Hochberg FDR correction (default True)
         """
         self.db = db_session
         self.min_samples = min_samples
         self.significance_level = significance_level
         self.min_effect_size = min_effect_size
         self.min_cv_score = min_cv_score
+        self.adaptive_thresholds = adaptive_thresholds
+        self.fdr_correction = fdr_correction
 
     def validate_pattern(self, pattern: DetectedPattern) -> ValidationResult:
         """Run comprehensive statistical tests on a detected pattern.
+
+        Returns VALIDATED (all 4 gates pass), PRELIMINARY (directional signal
+        with relaxed thresholds), or REJECTED.
+
+        Uses adaptive thresholds (C2) when enabled — effect size and p-value
+        thresholds scale with dataset size. Uses the pattern's p_value which
+        may have been FDR-corrected (C1) by apply_fdr_correction().
 
         Args:
             pattern: Detected pattern to validate
 
         Returns:
-            ValidationResult with outcome and metrics
+            ValidationResult with outcome, status tier, and metrics
         """
         logger.debug(f"Validating pattern: {pattern.pattern_name}")
 
+        # C2: Compute adaptive thresholds based on dataset size
+        eff_threshold = self._adaptive_effect_threshold(pattern.sample_size)
+        p_threshold = self.significance_level  # p-value threshold stays fixed (FDR handles multiplicity)
+
         # 1. Sample size check
         if pattern.sample_size < self.min_samples:
+            if pattern.is_preliminary():
+                return ValidationResult(
+                    valid=False,
+                    status="PRELIMINARY",
+                    reason=f"Need n≥{self.min_samples} (have {pattern.sample_size})",
+                    p_value=pattern.p_value,
+                    effect_size=pattern.effect_size,
+                )
             return ValidationResult(
                 valid=False,
+                status="REJECTED",
                 reason=f"Insufficient samples: {pattern.sample_size} < {self.min_samples}",
             )
 
-        # 2. Statistical significance check (p-value)
-        if pattern.p_value > self.significance_level:
+        # 2. Statistical significance check (p-value, possibly FDR-corrected)
+        if pattern.p_value > p_threshold:
+            if pattern.is_preliminary():
+                return ValidationResult(
+                    valid=False,
+                    status="PRELIMINARY",
+                    reason=f"Need p<{p_threshold} (p={pattern.p_value:.4f})",
+                    p_value=pattern.p_value,
+                    effect_size=pattern.effect_size,
+                )
             return ValidationResult(
                 valid=False,
-                reason=f"Not statistically significant (p={pattern.p_value:.4f})",
+                status="REJECTED",
+                reason=f"p={pattern.p_value:.4f} > {p_threshold}",
                 p_value=pattern.p_value,
             )
 
-        # 3. Effect size check
-        if abs(pattern.effect_size) < self.min_effect_size:
+        # 3. Effect size check (C2: adaptive threshold)
+        if abs(pattern.effect_size) < eff_threshold:
+            if pattern.is_preliminary():
+                return ValidationResult(
+                    valid=False,
+                    status="PRELIMINARY",
+                    reason=f"Need |d|>{eff_threshold:.2f} (d={pattern.effect_size:.3f})",
+                    p_value=pattern.p_value,
+                    effect_size=pattern.effect_size,
+                )
             return ValidationResult(
                 valid=False,
-                reason=f"Effect size too small ({pattern.effect_size:.3f})",
+                status="REJECTED",
+                reason=f"|d|={abs(pattern.effect_size):.3f} < {eff_threshold:.2f}",
                 p_value=pattern.p_value,
                 effect_size=pattern.effect_size,
             )
@@ -83,6 +135,7 @@ class StatisticalValidator:
         if cv_score < self.min_cv_score:
             return ValidationResult(
                 valid=False,
+                status="PRELIMINARY",
                 reason=f"Poor cross-validation score ({cv_score:.2f})",
                 p_value=pattern.p_value,
                 effect_size=pattern.effect_size,
@@ -102,6 +155,7 @@ class StatisticalValidator:
 
         return ValidationResult(
             valid=True,
+            status="VALIDATED",
             reason="Pattern meets all validation criteria",
             p_value=pattern.p_value,
             effect_size=pattern.effect_size,
@@ -186,66 +240,80 @@ class StatisticalValidator:
 
         return cohen_d
 
-    def cross_validate(self, pattern: DetectedPattern, n_folds: int = 5) -> float:
-        """Time-series cross-validation.
+    def cross_validate(self, pattern: DetectedPattern, n_splits: int = 5) -> float:
+        """Walk-forward cross-validation (C3).
 
-        Splits trades into chronological folds and validates that
-        pattern holds across different time periods.
+        Uses expanding-window walk-forward: always trains on data *before*
+        the test period, never on future data. This matches how trading
+        decisions are made in practice.
+
+        The data is split into n_splits+1 chronological blocks. For each
+        split i, trains on blocks 0..i and tests on block i+1.
 
         Args:
             pattern: Pattern to cross-validate
-            n_folds: Number of folds for CV (default 5)
+            n_splits: Number of walk-forward splits (default 5)
 
         Returns:
-            Average validation score across folds
+            Average validation score across splits
         """
         pattern_trades = self._get_pattern_trades(pattern)
 
-        if len(pattern_trades) < n_folds:
-            logger.warning(f"Not enough trades for {n_folds}-fold CV")
+        min_trades_needed = n_splits + 1
+        if len(pattern_trades) < min_trades_needed:
+            logger.warning(f"Not enough trades for {n_splits}-split walk-forward CV")
             return 0.0
 
         # Sort trades chronologically
         pattern_trades = sorted(pattern_trades, key=lambda t: t.entry_date)
 
-        # Split into folds
-        fold_size = len(pattern_trades) // n_folds
-        fold_scores = []
+        # Split into n_splits + 1 blocks
+        n_blocks = n_splits + 1
+        block_size = len(pattern_trades) // n_blocks
+        blocks = []
+        for i in range(n_blocks):
+            start = i * block_size
+            end = start + block_size if i < n_blocks - 1 else len(pattern_trades)
+            blocks.append(pattern_trades[start:end])
 
-        for i in range(n_folds):
-            # Define test fold
-            test_start = i * fold_size
-            test_end = test_start + fold_size if i < n_folds - 1 else len(pattern_trades)
-            test_trades = pattern_trades[test_start:test_end]
+        split_scores = []
 
-            # Train folds are all others
-            train_trades = pattern_trades[:test_start] + pattern_trades[test_end:]
+        for i in range(n_splits):
+            # Train on blocks 0..i, test on block i+1
+            train_trades = []
+            for j in range(i + 1):
+                train_trades.extend(blocks[j])
+            test_trades = blocks[i + 1]
 
-            if len(test_trades) == 0 or len(train_trades) == 0:
+            if not test_trades or not train_trades:
                 continue
 
-            # Calculate performance on train vs test
-            train_roi = np.mean([t.roi for t in train_trades if t.roi is not None])
-            test_roi = np.mean([t.roi for t in test_trades if t.roi is not None])
+            train_rois = [t.roi for t in train_trades if t.roi is not None]
+            test_rois = [t.roi for t in test_trades if t.roi is not None]
 
-            # Score: 1.0 if test matches or exceeds train, 0.0 if opposite
-            # Use scaled score based on how close they are
+            if not train_rois or not test_rois:
+                continue
+
+            train_roi = float(np.mean(train_rois))
+            test_roi = float(np.mean(test_rois))
+
+            # Score measures consistency: how close is out-of-sample to in-sample?
+            # 1.0 = perfect match, decays as test diverges from train
             if train_roi == 0:
                 score = 1.0 if test_roi >= 0 else 0.0
             else:
                 ratio = test_roi / train_roi
-                # Score is high if test ~= train
                 score = max(0.0, min(1.0, 1.0 - abs(1.0 - ratio)))
 
-            fold_scores.append(score)
+            split_scores.append(score)
 
-        if not fold_scores:
+        if not split_scores:
             return 0.0
 
-        avg_score = np.mean(fold_scores)
+        avg_score = float(np.mean(split_scores))
 
         logger.debug(
-            f"Cross-validation: {n_folds} folds, avg score={avg_score:.2f}"
+            f"Walk-forward CV: {n_splits} splits, avg score={avg_score:.2f}"
         )
 
         return avg_score
@@ -337,3 +405,95 @@ class StatisticalValidator:
         )
 
         return max(0.0, min(1.0, confidence))
+
+    # ======================================================================
+    # C1: Benjamini-Hochberg FDR Correction
+    # ======================================================================
+
+    def apply_fdr_correction(self, patterns: list[DetectedPattern]) -> list[DetectedPattern]:
+        """Apply Benjamini-Hochberg FDR correction across all patterns (C1).
+
+        When testing many hypotheses simultaneously, some will appear
+        significant by chance. BH-FDR controls the expected *proportion*
+        of false discoveries among all discoveries.
+
+        Modifies pattern.p_value in-place to the adjusted p-value.
+        Returns the same list (mutated) for convenience.
+
+        Args:
+            patterns: All detected patterns from pattern_detector
+
+        Returns:
+            Same list with p_values replaced by FDR-adjusted values
+        """
+        if not self.fdr_correction or len(patterns) < 2:
+            return patterns
+
+        m = len(patterns)
+        p_values = np.array([p.p_value for p in patterns])
+
+        # Benjamini-Hochberg procedure:
+        # 1. Sort p-values ascending
+        sorted_indices = np.argsort(p_values)
+        sorted_p = p_values[sorted_indices]
+
+        # 2. Compute adjusted p-values: p_adj[i] = p[i] * m / (i+1)
+        adjusted = np.zeros(m)
+        for i in range(m):
+            adjusted[i] = sorted_p[i] * m / (i + 1)
+
+        # 3. Enforce monotonicity (from right): p_adj[i] = min(p_adj[i], p_adj[i+1])
+        for i in range(m - 2, -1, -1):
+            adjusted[i] = min(adjusted[i], adjusted[i + 1])
+
+        # 4. Cap at 1.0
+        adjusted = np.minimum(adjusted, 1.0)
+
+        # 5. Map back to original order and update patterns
+        for idx, orig_idx in enumerate(sorted_indices):
+            patterns[orig_idx].p_value = float(adjusted[idx])
+
+        n_significant = sum(1 for p in patterns if p.p_value < self.significance_level)
+        logger.info(
+            f"FDR correction applied: {m} tests, "
+            f"{n_significant} significant at α={self.significance_level} "
+            f"(was {sum(1 for p in p_values if p < self.significance_level)} before correction)"
+        )
+
+        return patterns
+
+    # ======================================================================
+    # C2: Adaptive Validation Thresholds
+    # ======================================================================
+
+    def _adaptive_effect_threshold(self, sample_size: int) -> float:
+        """Compute adaptive effect size threshold based on sample size (C2).
+
+        With few trades, we need large effects to be confident.
+        With many trades, we can reliably detect smaller effects.
+
+        Scaling: uses Cohen's detectable effect size formula, with a
+        floor at 0.10 (trivial effects are never actionable) and
+        ceiling at self.min_effect_size (the configured default).
+
+        Args:
+            sample_size: Number of trades in the pattern bucket
+
+        Returns:
+            Minimum |Cohen's d| required for this sample size
+        """
+        if not self.adaptive_thresholds:
+            return self.min_effect_size
+
+        # Minimum detectable effect at 80% power:
+        # d ≈ 2.8 / sqrt(n) for a two-sample test
+        # We use a slightly less aggressive formula with a floor
+        if sample_size <= 0:
+            return self.min_effect_size
+
+        detectable = 2.8 / math.sqrt(sample_size)
+
+        # Clamp: never below 0.10 (trivial), never above configured max
+        threshold = max(0.10, min(self.min_effect_size, detectable))
+
+        return round(threshold, 3)

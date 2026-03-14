@@ -3137,6 +3137,7 @@ def learn(
     patterns: bool = typer.Option(False, "--patterns", help="View detected patterns"),
     experiments: bool = typer.Option(False, "--experiments", help="View active experiments"),
     proposals: bool = typer.Option(False, "--proposals", help="View parameter proposals"),
+    health: bool = typer.Option(False, "--health", help="Run alpha decay / strategy health check"),
     report: bool = typer.Option(False, "--report", help="Generate learning report"),
     summary: bool = typer.Option(False, "--summary", help="Show learning summary"),
     days: int = typer.Option(30, help="Number of days for summary/report"),
@@ -3176,7 +3177,7 @@ def learn(
         console.print("[bold blue]Learning Engine[/bold blue]\n")
 
         # If no flags specified, show help
-        if not any([analyse, patterns, experiments, proposals, report, summary]):
+        if not any([analyse, patterns, experiments, proposals, health, report, summary]):
             console.print("[yellow]No action specified. Use --help to see options.[/yellow]\n")
             console.print("[cyan]Common commands:[/cyan]")
             console.print("  nakedtrader learn --analyse    # Run weekly analysis")
@@ -3204,6 +3205,7 @@ def learn(
                 results_table.add_row("Baseline Avg ROI", f"{learning_report.baseline_avg_roi:.2%}")
                 results_table.add_row("Patterns Detected", str(learning_report.patterns_detected))
                 results_table.add_row("Patterns Validated", str(learning_report.patterns_validated))
+                results_table.add_row("Patterns Preliminary", str(learning_report.patterns_preliminary))
                 results_table.add_row(
                     "Experiments Adopted", str(len(learning_report.experiments_adopted))
                 )
@@ -3213,7 +3215,19 @@ def learn(
                 results_table.add_row("Proposals Generated", str(len(learning_report.proposals)))
                 results_table.add_row("Changes Auto-Applied", str(len(learning_report.changes_applied)))
 
+                # Alpha decay health from the weekly cycle
+                if learning_report.alpha_decay_health:
+                    health_colors = {"HEALTHY": "green", "WATCH": "yellow", "WARNING": "red", "CRITICAL": "bold red"}
+                    hc = health_colors.get(learning_report.alpha_decay_health, "dim")
+                    results_table.add_row("Strategy Health", f"[{hc}]{learning_report.alpha_decay_health}[/{hc}]")
+
                 console.print(results_table)
+
+                # Show health reasons if not healthy
+                if learning_report.alpha_decay_health and learning_report.alpha_decay_health != "HEALTHY":
+                    console.print(f"\n[bold yellow]Health Concerns:[/bold yellow]")
+                    for reason in learning_report.alpha_decay_reasons:
+                        console.print(f"  • {reason}")
 
                 # Show auto-applied changes
                 if learning_report.changes_applied:
@@ -3223,6 +3237,68 @@ def learn(
                             f"  • {change.parameter}: {change.current_value} → {change.proposed_value} "
                             f"(confidence={change.confidence:.1%})"
                         )
+
+                # A4: Show top patterns with stats (even unvalidated)
+                console.print("\n[bold cyan]Top Patterns by Sample Size[/bold cyan]\n")
+
+                # Query the pattern_candidate records we just saved
+                import json as _json
+
+                candidates = (
+                    db.query(LearningHistory)
+                    .filter(LearningHistory.event_type == "pattern_candidate")
+                    .order_by(LearningHistory.event_date.desc())
+                    .limit(learning_report.patterns_detected)
+                    .all()
+                )
+
+                if candidates:
+                    # Sort by sample_size descending
+                    def _get_sample(c):
+                        return c.sample_size or 0
+
+                    candidates_sorted = sorted(candidates, key=_get_sample, reverse=True)
+
+                    top_table = Table(title="Top 15 Patterns (All Tiers)")
+                    top_table.add_column("Pattern", style="cyan", max_width=30)
+                    top_table.add_column("Status")
+                    top_table.add_column("Samples", justify="right")
+                    top_table.add_column("Win Rate", justify="right")
+                    top_table.add_column("Avg ROI", justify="right")
+                    top_table.add_column("p-value", justify="right")
+                    top_table.add_column("Effect (d)", justify="right")
+                    top_table.add_column("What's Needed", max_width=35)
+
+                    for c in candidates_sorted[:15]:
+                        try:
+                            details = _json.loads(c.reasoning) if c.reasoning else {}
+                        except (ValueError, TypeError):
+                            details = {}
+
+                        status = details.get("validation_status", "REJECTED")
+                        style = {"VALIDATED": "bold green", "PRELIMINARY": "yellow", "REJECTED": "dim"}.get(status, "dim")
+                        p_val = details.get("p_value")
+                        effect = details.get("effect_size")
+                        win_rate = details.get("win_rate")
+                        avg_roi = details.get("avg_roi")
+
+                        # What does this pattern need to pass?
+                        needed = details.get("rejection_reason", "✓ Validated") if status != "VALIDATED" else "✓ Validated"
+
+                        top_table.add_row(
+                            c.pattern_name or "-",
+                            f"[{style}]{status}[/{style}]",
+                            str(c.sample_size or "-"),
+                            f"{win_rate:.1%}" if win_rate is not None else "-",
+                            f"{avg_roi:.2%}" if avg_roi is not None else "-",
+                            f"{p_val:.4f}" if p_val is not None else "-",
+                            f"{effect:.3f}" if effect is not None else "-",
+                            needed,
+                        )
+
+                    console.print(top_table)
+                else:
+                    console.print("[dim]No pattern candidates recorded.[/dim]")
 
             # View patterns
             if patterns:
@@ -3299,36 +3375,40 @@ def learn(
 
                     console.print(exp_table)
 
-            # View proposals
+            # View proposals (A5: query both pending and applied proposals)
             if proposals:
                 console.print("[bold cyan]Parameter Change Proposals[/bold cyan]\n")
-                console.print(
-                    "[yellow]Note: This requires running --analyse first to generate proposals[/yellow]\n"
-                )
 
-                # Query recent parameter proposals from learning history
+                # Query both generated proposals and applied changes
                 recent_proposals = (
                     db.query(LearningHistory)
-                    .filter(LearningHistory.event_type == "parameter_adjusted")
+                    .filter(
+                        LearningHistory.event_type.in_(
+                            ["proposal_generated", "parameter_adjusted"]
+                        )
+                    )
                     .order_by(LearningHistory.event_date.desc())
-                    .limit(10)
+                    .limit(20)
                     .all()
                 )
 
                 if not recent_proposals:
                     console.print("[dim]No proposals found. Run --analyse to generate proposals.[/dim]")
                 else:
-                    proposals_table = Table(title="Recent Parameter Changes")
+                    proposals_table = Table(title=f"{len(recent_proposals)} Recent Proposals & Changes")
                     proposals_table.add_column("Date")
+                    proposals_table.add_column("Status")
                     proposals_table.add_column("Parameter", style="cyan")
                     proposals_table.add_column("Old Value")
                     proposals_table.add_column("New Value")
                     proposals_table.add_column("Confidence", justify="right")
-                    proposals_table.add_column("Pattern")
+                    proposals_table.add_column("Source Pattern")
 
                     for p in recent_proposals:
+                        status = "[green]APPLIED[/green]" if p.event_type == "parameter_adjusted" else "[yellow]PENDING[/yellow]"
                         proposals_table.add_row(
                             p.event_date.strftime("%Y-%m-%d"),
+                            status,
                             p.parameter_changed or "-",
                             p.old_value or "-",
                             p.new_value or "-",
@@ -3337,6 +3417,91 @@ def learn(
                         )
 
                     console.print(proposals_table)
+
+            # Strategy health / alpha decay check
+            if health:
+                from src.learning.alpha_decay_monitor import AlphaDecayMonitor
+
+                console.print("[bold cyan]Strategy Health Check (Alpha Decay Monitor)[/bold cyan]\n")
+
+                monitor = AlphaDecayMonitor(db)
+                decay_report = monitor.run_analysis()
+
+                # Health status banner
+                health_colors = {
+                    "HEALTHY": "bold green",
+                    "WATCH": "bold yellow",
+                    "WARNING": "bold red",
+                    "CRITICAL": "bold white on red",
+                    "INSUFFICIENT_DATA": "dim",
+                }
+                style = health_colors.get(decay_report.overall_health, "dim")
+                console.print(f"[{style}]Overall Health: {decay_report.overall_health}[/{style}]\n")
+
+                for reason in decay_report.health_reasons:
+                    console.print(f"  • {reason}")
+
+                # Rolling metrics table
+                if decay_report.rolling_metrics:
+                    console.print()
+                    rolling_table = Table(title="Rolling Performance Metrics")
+                    rolling_table.add_column("Window", style="cyan")
+                    rolling_table.add_column("Trades", justify="right")
+                    rolling_table.add_column("Win Rate", justify="right")
+                    rolling_table.add_column("Avg ROI", justify="right")
+                    rolling_table.add_column("Total P&L", justify="right")
+                    rolling_table.add_column("Sharpe", justify="right")
+                    rolling_table.add_column("Max DD", justify="right")
+                    rolling_table.add_column("Loss Streak", justify="right")
+
+                    for m in decay_report.rolling_metrics:
+                        rolling_table.add_row(
+                            f"{m.window_days}d",
+                            str(m.trade_count),
+                            f"{m.win_rate:.1%}" if m.trade_count else "-",
+                            f"{m.avg_roi:.2%}" if m.trade_count else "-",
+                            f"${m.total_pnl:,.0f}" if m.trade_count else "-",
+                            f"{m.sharpe_ratio:.2f}" if m.trade_count else "-",
+                            f"{m.max_drawdown:.1%}" if m.trade_count else "-",
+                            str(m.loss_streak) if m.loss_streak > 0 else "-",
+                        )
+
+                    console.print(rolling_table)
+
+                # Regime performance table
+                if decay_report.regime_performance:
+                    console.print()
+                    regime_table = Table(title="Performance by VIX Regime")
+                    regime_table.add_column("VIX Regime", style="cyan")
+                    regime_table.add_column("Trades", justify="right")
+                    regime_table.add_column("Win Rate", justify="right")
+                    regime_table.add_column("Avg ROI", justify="right")
+                    regime_table.add_column("Avg P&L", justify="right")
+                    regime_table.add_column("Sharpe", justify="right")
+
+                    for r in decay_report.regime_performance:
+                        wr_style = "green" if r.win_rate >= 0.70 else ("yellow" if r.win_rate >= 0.50 else "red")
+                        regime_table.add_row(
+                            r.regime.title(),
+                            str(r.trade_count),
+                            f"[{wr_style}]{r.win_rate:.1%}[/{wr_style}]",
+                            f"{r.avg_roi:.2%}",
+                            f"${r.avg_pnl:,.0f}",
+                            f"{r.sharpe_ratio:.2f}",
+                        )
+
+                    console.print(regime_table)
+
+                # CUSUM alerts
+                if decay_report.cusum_alerts:
+                    console.print()
+                    for alert in decay_report.cusum_alerts:
+                        alert_style = "red" if alert.direction == "degradation" else "green"
+                        console.print(
+                            f"[{alert_style}]CUSUM {alert.direction.upper()}: "
+                            f"value={alert.cusum_value:.1f} (threshold={alert.threshold:.1f}), "
+                            f"{alert.consecutive_trades} consecutive trades[/{alert_style}]"
+                        )
 
             # Generate report
             if report or summary:

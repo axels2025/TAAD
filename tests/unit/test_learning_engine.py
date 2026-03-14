@@ -113,7 +113,7 @@ def test_validate_insufficient_samples(mock_db, insignificant_pattern):
     result = validator.validate_pattern(insignificant_pattern)
 
     assert result.valid is False
-    assert "Insufficient samples" in result.reason
+    assert "Insufficient samples" in result.reason or "Need n" in result.reason
 
 
 def test_validate_low_p_value(mock_db):
@@ -127,7 +127,7 @@ def test_validate_low_p_value(mock_db):
         avg_roi=0.25,
         baseline_win_rate=0.60,
         baseline_roi=0.20,
-        p_value=0.5,  # Not significant
+        p_value=0.5,  # Not significant (p > 0.20, so not even PRELIMINARY)
         effect_size=1.0,
         confidence=0.70,
         date_detected=datetime.now(),
@@ -137,11 +137,12 @@ def test_validate_low_p_value(mock_db):
     result = validator.validate_pattern(pattern)
 
     assert result.valid is False
-    assert "Not statistically significant" in result.reason
+    assert result.status == "REJECTED"
+    assert "0.5" in result.reason or "p=" in result.reason
 
 
 def test_validate_small_effect_size(mock_db):
-    """Test validation fails with small effect size."""
+    """Test validation fails with small effect size but qualifies as PRELIMINARY."""
     pattern = DetectedPattern(
         pattern_type="test",
         pattern_name="test_pattern",
@@ -152,7 +153,7 @@ def test_validate_small_effect_size(mock_db):
         baseline_win_rate=0.60,
         baseline_roi=0.20,
         p_value=0.01,
-        effect_size=0.2,  # Too small
+        effect_size=0.2,  # Too small for full validation
         confidence=0.70,
         date_detected=datetime.now(),
     )
@@ -161,7 +162,9 @@ def test_validate_small_effect_size(mock_db):
     result = validator.validate_pattern(pattern)
 
     assert result.valid is False
-    assert "Effect size too small" in result.reason
+    # Pattern has p=0.01 and n=50, so it qualifies as PRELIMINARY
+    assert result.status == "PRELIMINARY"
+    assert "|d|" in result.reason
 
 
 # ============================================================================
@@ -479,9 +482,13 @@ def test_full_learning_cycle_simulation(mock_db):
             mock_query_result.filter().all.return_value = trades
             mock_query_result.filter().filter().all.return_value = trades
             mock_query_result.filter().filter().filter().all.return_value = trades
-        else:  # Experiment or other models
+            # Alpha decay monitor uses .order_by().all()
+            mock_query_result.filter().filter().order_by().all.return_value = trades
+        else:  # Experiment, LearningHistory, or other models
             mock_query_result.filter().all.return_value = []
             mock_query_result.filter().filter().all.return_value = []
+            mock_query_result.filter().order_by().first.return_value = None
+            mock_query_result.filter().order_by().limit().all.return_value = []
         return mock_query_result
 
     mock_db.query.side_effect = mock_query_side_effect
