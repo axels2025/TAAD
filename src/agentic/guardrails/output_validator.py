@@ -9,13 +9,20 @@ it received. Three checks:
 Zero additional Claude API calls. All pure Python logic.
 """
 
+from __future__ import annotations
+
 import re
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from src.agentic.guardrails.config import GuardrailConfig
 from src.agentic.guardrails.registry import GuardrailResult
+
+if TYPE_CHECKING:
+    from src.agentic.reasoning_engine import DecisionOutput
+    from src.agentic.working_memory import ReasoningContext
 from src.config.exchange_profile import get_active_profile
 
 # Common financial abbreviations that should NOT be flagged as unknown symbols
@@ -64,8 +71,8 @@ class OutputValidator:
 
     def validate(
         self,
-        decision,
-        context,
+        decision: DecisionOutput,
+        context: ReasoningContext,
         config: GuardrailConfig,
     ) -> list[GuardrailResult]:
         """Run all output validation checks.

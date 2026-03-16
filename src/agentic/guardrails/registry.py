@@ -4,12 +4,18 @@ Coordinates all registered guards and collects results.
 On any severity="block" result, overrides the decision to MONITOR_ONLY.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
 from src.agentic.guardrails.config import GuardrailConfig
+
+if TYPE_CHECKING:
+    from src.agentic.reasoning_engine import DecisionOutput
+    from src.agentic.working_memory import ReasoningContext
 
 
 @dataclass
@@ -53,7 +59,7 @@ class GuardrailRegistry:
         """Register a pre-execution gate."""
         self._execution_gates.append(gate)
 
-    def validate_context(self, context) -> list[GuardrailResult]:
+    def validate_context(self, context: ReasoningContext) -> list[GuardrailResult]:
         """Run all context validators (pre-Claude).
 
         Args:
@@ -82,7 +88,7 @@ class GuardrailRegistry:
         self._log_results("context", results)
         return results
 
-    def validate_output(self, decision, context) -> list[GuardrailResult]:
+    def validate_output(self, decision: DecisionOutput, context: ReasoningContext) -> list[GuardrailResult]:
         """Run all output validators (post-Claude).
 
         Args:
@@ -112,7 +118,12 @@ class GuardrailRegistry:
         self._log_results("output", results)
         return results
 
-    def validate_execution(self, decision, context, **kwargs) -> list[GuardrailResult]:
+    def validate_execution(
+        self,
+        decision: DecisionOutput,
+        context: ReasoningContext,
+        **kwargs,
+    ) -> list[GuardrailResult]:
         """Run all execution gates (pre-execution).
 
         Args:

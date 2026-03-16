@@ -9,15 +9,22 @@ we're not exceeding rate limits.
 Cost: 1 IBKR data request for live state diff.
 """
 
+from __future__ import annotations
+
 import time
 from collections import deque
 from datetime import date as date_type
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
 from src.agentic.guardrails.config import GuardrailConfig
 from src.agentic.guardrails.registry import GuardrailResult
+
+if TYPE_CHECKING:
+    from src.agentic.reasoning_engine import DecisionOutput
+    from src.agentic.working_memory import ReasoningContext
+    from src.broker.protocols import BrokerClient
 
 
 # Actions that affect order state (vs just monitoring)
@@ -40,10 +47,10 @@ class ExecutionGate:
 
     def validate(
         self,
-        decision,
-        context,
+        decision: DecisionOutput,
+        context: ReasoningContext,
         config: GuardrailConfig,
-        ibkr_client=None,
+        ibkr_client: BrokerClient | None = None,
         **kwargs,
     ) -> list[GuardrailResult]:
         """Run all execution gate checks.
@@ -54,8 +61,8 @@ class ExecutionGate:
             decision: DecisionOutput about to be executed
             context: ReasoningContext or execution context dict
             config: Guardrail configuration
-            ibkr_client: Optional IBKR client for live data
-            **kwargs: Additional arguments
+            ibkr_client: Optional broker client for live data
+            **kwargs: Additional arguments passed from registry
 
         Returns:
             List of GuardrailResult

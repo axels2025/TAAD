@@ -6,10 +6,17 @@ Catches stale data, impossible values, and null fields.
 Risk reduction: High. Cost: negative (saves API cost by skipping bad calls).
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from loguru import logger
 
 from src.agentic.guardrails.config import GuardrailConfig
 from src.agentic.guardrails.registry import GuardrailResult
+
+if TYPE_CHECKING:
+    from src.agentic.working_memory import ReasoningContext
 
 
 class ContextValidator:
@@ -23,7 +30,7 @@ class ContextValidator:
 
     def validate(
         self,
-        context,
+        context: ReasoningContext,
         config: GuardrailConfig,
     ) -> list[GuardrailResult]:
         """Run all context validation checks.
