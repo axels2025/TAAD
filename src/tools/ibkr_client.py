@@ -8,6 +8,7 @@ import asyncio
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -162,10 +163,6 @@ class IBKRErrorConsolidator(logging.Filter):
 
     def filter(self, record):
         """Filter and consolidate IBKR error messages."""
-        import re
-        import time
-        from loguru import logger as loguru_logger
-
         message = record.getMessage()
 
         # Extract error code from message
@@ -198,7 +195,7 @@ class IBKRErrorConsolidator(logging.Filter):
                 # Log first occurrence at WARNING level
                 if key not in self._last_logged:
                     self._last_logged[key] = current_time
-                    loguru_logger.warning(
+                    logger.warning(
                         f"⚠ IBKR Error 354/10090: Market data not available for {symbol} options. "
                         f"This usually means: (1) No market data subscription for this symbol, "
                         f"(2) Options market closed, or (3) Invalid contract. "
@@ -207,7 +204,7 @@ class IBKRErrorConsolidator(logging.Filter):
                 # Subsequent occurrences within interval - just count them
                 elif (current_time - self._last_logged[key]) > self._consolidation_interval:
                     self._last_logged[key] = current_time
-                    loguru_logger.debug(f"No market data subscription for {symbol} (repeated)")
+                    logger.debug(f"No market data subscription for {symbol} (repeated)")
 
                 return False  # Suppress original verbose message
 
@@ -218,7 +215,7 @@ class IBKRErrorConsolidator(logging.Filter):
 
             if key not in self._last_logged or (current_time - self._last_logged[key]) > self._consolidation_interval:
                 self._last_logged[key] = current_time
-                loguru_logger.warning("⚠ Competing IBKR session detected - using snapshot data instead of live stream")
+                logger.warning("⚠ Competing IBKR session detected - using snapshot data instead of live stream")
 
             return False
 
