@@ -332,7 +332,9 @@ class PositionMonitor:
                     status = self._create_status_from_trade(trade)
                     position_statuses.append(status)
 
-            # Enrich with entry stock prices for underlying drop detection
+            # Enrich with entry stock prices and current underlying prices
+            # for drop detection alerts (batched: 1 quote per unique symbol)
+            self._enrich_underlying_prices(position_statuses)
             self._enrich_entry_stock_prices(position_statuses, open_trades)
 
             logger.info(f"Built {len(position_statuses)} position statuses")
@@ -365,10 +367,12 @@ class PositionMonitor:
             for ib_pos in positions:
                 if self._get_position_id(ib_pos) == position_id:
                     status = self._get_position_status(ib_pos)
+                    if status:
+                        self._enrich_underlying_prices([status])
 
-                    # Update database if repository available
-                    if status and self.position_repository:
-                        self._save_position_to_db(status)
+                        # Update database if repository available
+                        if self.position_repository:
+                            self._save_position_to_db(status)
 
                     return status
 
@@ -737,25 +741,9 @@ class PositionMonitor:
             gamma_value = getattr(quote, "gamma", None) if hasattr(quote, 'gamma') else None
             vega_value = getattr(quote, "vega", None) if hasattr(quote, 'vega') else None
 
-            # Get current underlying stock price (for drop detection)
+            # underlying_price is enriched in batch by _enrich_underlying_prices()
+            # after all positions are built, to avoid N separate IBKR quote requests.
             underlying_price = None
-            try:
-                from ib_async import Stock
-                from src.config.exchange_profile import get_active_profile
-                _profile = get_active_profile()
-                stock_contract = Stock(contract.symbol, _profile.ibkr_exchange, _profile.currency)
-                stock_qualified = self.ibkr_client.qualify_contract(stock_contract)
-                if stock_qualified:
-                    stock_quote = self.ibkr_client.get_quote_sync(
-                        stock_qualified, timeout=5.0
-                    )
-                    if stock_quote.is_valid:
-                        if is_valid(stock_quote.last):
-                            underlying_price = stock_quote.last
-                        elif is_valid(stock_quote.bid) and is_valid(stock_quote.ask):
-                            underlying_price = (stock_quote.bid + stock_quote.ask) / 2
-            except Exception as e:
-                logger.debug(f"Could not fetch underlying price for {contract.symbol}: {e}")
 
             # Check alert conditions
             profit_target = self.config.exit_rules.profit_target
@@ -834,6 +822,51 @@ class PositionMonitor:
                                 break
         except Exception as e:
             logger.debug(f"Could not look up entry stock prices: {e}")
+
+    def _enrich_underlying_prices(self, statuses: list[PositionStatus]) -> None:
+        """Batch-fetch underlying stock prices for all positions.
+
+        Fetches one quote per unique symbol (not per position), then maps
+        the price to all positions sharing that symbol.  This replaces the
+        previous per-position fetch which made N IBKR requests per cycle.
+        """
+        import math
+        from ib_async import Stock
+        from src.config.exchange_profile import get_active_profile
+
+        def is_valid(value):
+            return value is not None and not math.isnan(value) and value > 0
+
+        # Collect unique symbols that need pricing
+        symbols = {s.symbol for s in statuses if s.underlying_price is None}
+        if not symbols:
+            return
+
+        _profile = get_active_profile()
+        price_map: dict[str, float] = {}
+
+        for symbol in symbols:
+            try:
+                stock_contract = Stock(symbol, _profile.ibkr_exchange, _profile.currency)
+                qualified = self.ibkr_client.qualify_contract(stock_contract)
+                if not qualified:
+                    continue
+                quote = self.ibkr_client.get_quote_sync(qualified, timeout=5.0)
+                if quote.is_valid:
+                    if is_valid(quote.last):
+                        price_map[symbol] = quote.last
+                    elif is_valid(quote.bid) and is_valid(quote.ask):
+                        price_map[symbol] = (quote.bid + quote.ask) / 2
+            except Exception as e:
+                logger.debug(f"Could not fetch underlying price for {symbol}: {e}")
+
+        # Apply to all matching positions
+        for status in statuses:
+            if status.symbol in price_map:
+                status.underlying_price = price_map[status.symbol]
+
+        if price_map:
+            logger.debug(f"Enriched underlying prices for {len(price_map)} symbols")
 
     def _create_status_from_trade(self, trade) -> PositionStatus:
         """Create PositionStatus from database trade when IBKR has no data.
