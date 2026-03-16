@@ -1592,7 +1592,7 @@ def auto_monitor(
                     console.print(
                         f"[dim]Sleeping {check_interval}s until next check...[/dim]\n"
                     )
-                    client.ib.sleep(check_interval)
+                    client.wait(check_interval)
                     continue
 
                 # Evaluate exits
@@ -1680,7 +1680,7 @@ def auto_monitor(
             console.print(
                 f"[dim]Sleeping {check_interval}s until next check...[/dim]\n"
             )
-            client.ib.sleep(check_interval)
+            client.wait(check_interval)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠ Stopped by user[/yellow]")
@@ -1943,7 +1943,7 @@ def cleanup(
             from src.tools.ibkr_client import IBKRClient
             client = IBKRClient(config.ibkr, suppress_errors=True)
             try:
-                if client.ib.isConnected():
+                if client.is_connected():
                     client.disconnect()
                     console.print("[green]✓ Disconnected from IBKR[/green]")
                 else:
@@ -2803,7 +2803,7 @@ def quote(
         else:
             # Stock quote
             contract = Stock(symbol, "SMART", "USD")
-            qualified = client.ib.qualifyContracts(contract)
+            qualified = client.qualify_contracts_batch(contract)
 
             if not qualified or qualified[0] is None:
                 console.print(f"[bold red]✗ Could not find stock: {symbol}[/bold red]")
@@ -2815,8 +2815,8 @@ def quote(
 
         # Request market data
         with console.status("[bold yellow]Fetching market data..."):
-            ticker = client.ib.reqMktData(qualified, snapshot=True)
-            client.ib.sleep(4)  # Wait longer for options data
+            ticker = client.subscribe_market_data(qualified, snapshot=True)
+            client.wait(4)  # Wait longer for options data
 
         # Display results
         if ticker:
@@ -2887,7 +2887,7 @@ def quote(
 
         # Clean up market data subscription
         try:
-            client.ib.cancelMktData(qualified)
+            client.cancel_market_data(qualified)
         except:
             pass  # Ignore errors when canceling
 
@@ -2934,7 +2934,7 @@ def option_chain(
 
         # Get stock contract
         stock = Stock(symbol, "SMART", "USD")
-        qualified_stock = client.ib.qualifyContracts(stock)
+        qualified_stock = client.qualify_contracts_batch(stock)
 
         if not qualified_stock or qualified_stock[0] is None:
             console.print(f"[bold red]✗ Could not find stock: {symbol}[/bold red]")
@@ -2952,11 +2952,11 @@ def option_chain(
 
         # Request option chains
         with console.status("[bold yellow]Fetching option chain..."):
-            chains = client.ib.reqSecDefOptParams(
+            chains = client.get_option_chain_definitions(
                 qualified_stock.symbol,
-                "",
-                qualified_stock.secType,
-                qualified_stock.conId,
+                sec_type=qualified_stock.secType,
+                exchange="",
+                con_id=qualified_stock.conId,
             )
 
         if not chains:

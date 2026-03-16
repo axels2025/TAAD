@@ -24,7 +24,7 @@ from src.execution.position_monitor import PositionMonitor
 from src.utils.timezone import us_trading_date
 from src.services.kill_switch import KillSwitch
 from src.strategies.base import TradeOpportunity
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 def _trading_date_utc_bounds(trading_dt: date) -> tuple[datetime, datetime]:
@@ -115,7 +115,7 @@ class RiskGovernor:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         position_monitor: PositionMonitor,
         config: Config,
         kill_switch: KillSwitch | None = None,
@@ -1047,10 +1047,7 @@ class RiskGovernor:
         # Check 2: Pending orders
         try:
             # Request fresh open orders data (don't rely on cache)
-            self.ibkr_client.ib.reqOpenOrders()
-            self.ibkr_client.wait(1.0)  # Wait for data to populate
-
-            open_orders = self.ibkr_client.ib.openOrders()
+            open_orders = self.ibkr_client.request_open_orders()
 
             logger.debug(f"Checking {len(open_orders)} pending orders for duplicates")
 

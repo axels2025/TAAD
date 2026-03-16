@@ -44,7 +44,7 @@ from src.services.market_conditions import MarketConditionMonitor
 from src.services.premarket_validator import PremarketValidator, StagedOpportunity, ValidationStatus
 from src.services.rapid_fire_executor import RapidFireExecutor
 from src.services.order_reconciliation import OrderReconciliation
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 console = Console()
 
@@ -107,7 +107,7 @@ class TwoTierExecutionScheduler:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         premarket_validator: PremarketValidator | None = None,
         rapid_fire_executor: RapidFireExecutor | None = None,
         reconciler: OrderReconciliation | None = None,

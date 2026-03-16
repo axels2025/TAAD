@@ -13,7 +13,7 @@ import time as time_mod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Protocol
+from src.broker.protocols import BrokerClient
 
 from loguru import logger
 
@@ -186,23 +186,6 @@ class OpenCheckResult:
         )
 
 
-class IBKRClientProtocol(Protocol):
-    """Protocol for IBKR client dependency injection."""
-
-    def get_stock_price(self, symbol: str) -> float | None:
-        """Get current stock price."""
-        ...
-
-    def get_option_quote(
-        self, symbol: str, strike: float, expiration: str, right: str
-    ) -> dict | None:
-        """Get option quote with bid/ask."""
-        ...
-
-    def get_actual_margin(self, contract, quantity: int = 1) -> float | None:
-        """Get actual margin via whatIfOrder."""
-        ...
-
 
 class PremarketValidator:
     """Two-stage validation for staged trades.
@@ -221,7 +204,7 @@ class PremarketValidator:
 
     def __init__(
         self,
-        ibkr_client: IBKRClientProtocol | None = None,
+        ibkr_client: BrokerClient | None = None,
         config: ValidationConfig | None = None,
         limit_calculator: LimitPriceCalculator | None = None,
     ):
@@ -417,11 +400,10 @@ class PremarketValidator:
                 qualified = self.ibkr_client.qualify_contract(stock_contract)
 
                 if qualified:
-                    chains = self.ibkr_client.ib.reqSecDefOptParams(
+                    chains = self.ibkr_client.get_option_chain_definitions(
                         qualified.symbol,
-                        "",
-                        qualified.secType,
-                        qualified.conId,
+                        sec_type=qualified.secType,
+                        con_id=qualified.conId,
                     )
 
                     if chains and len(chains) > 0:

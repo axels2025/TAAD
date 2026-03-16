@@ -8,12 +8,12 @@ ib_async synchronous placeOrder pattern. Exchange-aware via config profile.
 from dataclasses import dataclass
 from datetime import datetime
 
-from ib_async import LimitOrder, Option, Order
+from src.broker.types import LimitOrder, Option, Order
 from loguru import logger
 
 from src.nakedtrader.config import NakedTraderConfig
 from src.nakedtrader.strike_selector import StrikeSelection
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 @dataclass
@@ -30,7 +30,7 @@ class BracketOrderResult:
 
 
 def build_option_contract(
-    client: IBKRClient,
+    client: BrokerClient,
     selection: StrikeSelection,
     config: NakedTraderConfig | None = None,
 ) -> Option | None:
@@ -71,7 +71,7 @@ def build_option_contract(
 
 
 def place_bracket_order(
-    client: IBKRClient,
+    client: BrokerClient,
     contract: Option,
     selection: StrikeSelection,
     config: NakedTraderConfig,
@@ -121,7 +121,7 @@ def place_bracket_order(
         transmit=False,  # Don't send until children attached
     )
 
-    parent_trade = client.ib.placeOrder(contract, parent)
+    parent_trade = client.place_order_sync(contract, parent, reason="Bracket parent SELL")
     parent_id = parent_trade.order.orderId
     logger.info(f"Parent SELL order placed: orderId={parent_id}")
 
@@ -134,7 +134,7 @@ def place_bracket_order(
         parentId=parent_id,
         transmit=not has_stop,  # Transmit if no stop-loss child follows
     )
-    pt_trade = client.ib.placeOrder(contract, profit_take)
+    pt_trade = client.place_order_sync(contract, profit_take, reason="Bracket profit-take BUY")
     pt_id = pt_trade.order.orderId
     logger.info(f"Profit-take BUY order placed: orderId={pt_id}, price=${pt_price:.2f}")
 
@@ -149,7 +149,7 @@ def place_bracket_order(
             parentId=parent_id,
             transmit=True,  # Last child transmits the entire group
         )
-        sl_trade = client.ib.placeOrder(contract, stop_loss)
+        sl_trade = client.place_order_sync(contract, stop_loss, reason="Bracket stop-loss BUY")
         sl_id = sl_trade.order.orderId
         logger.info(f"Stop-loss BUY order placed: orderId={sl_id}, price=${sl_price:.2f}")
 
@@ -162,7 +162,7 @@ def place_bracket_order(
 
 
 def wait_for_fill(
-    client: IBKRClient,
+    client: BrokerClient,
     parent_order_id: int,
     timeout_seconds: int = 300,
 ) -> tuple[float | None, datetime | None]:
@@ -182,9 +182,9 @@ def wait_for_fill(
 
     start = time.time()
     while (time.time() - start) < timeout_seconds:
-        client.ib.sleep(2)
+        client.wait(2)
 
-        for trade in client.ib.trades():
+        for trade in client.get_trades():
             if trade.order.orderId == parent_order_id:
                 status = trade.orderStatus.status
                 if status == "Filled":

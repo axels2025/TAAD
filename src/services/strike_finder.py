@@ -7,7 +7,6 @@ the portfolio builder and IBKR scanner pipeline.
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Protocol
 
 from loguru import logger
 
@@ -199,21 +198,3 @@ class StrikeCandidate:
         return "estimated"
 
 
-class IBKRClientProtocol(Protocol):
-    """Protocol for IBKR client dependency injection."""
-
-    def get_stock_price(self, symbol: str) -> float | None:
-        """Get current stock price."""
-        ...
-
-    def get_option_chain(
-        self, symbol: str, expiration: date
-    ) -> list[dict] | None:
-        """Get option chain for symbol and expiration."""
-        ...
-
-    def get_actual_margin(
-        self, symbol: str, strike: float, expiration: date
-    ) -> float | None:
-        """Get actual margin requirement via whatIfOrder."""
-        ...

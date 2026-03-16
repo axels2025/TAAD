@@ -8,7 +8,7 @@ Greeks changes, and path data for learning engine analysis.
 from datetime import date, datetime
 from typing import List, Optional
 
-from ib_async import Index, Stock
+from src.broker.types import Index, Stock
 from loguru import logger
 from sqlalchemy.orm import Session
 
@@ -142,14 +142,14 @@ class PositionSnapshotService:
             )
 
             # Qualify contract
-            qualified = self.ibkr.ib.qualifyContracts(contract)
+            qualified = self.ibkr.qualify_contracts_batch(contract)
             if not qualified or qualified[0] is None:
                 logger.warning(f"Could not qualify contract for trade {trade.id}")
                 return None
 
             # Request market data with Greeks
-            ticker = self.ibkr.ib.reqMktData(qualified[0], "", False, False)
-            self.ibkr.ib.sleep(1)  # Wait for data
+            ticker = self.ibkr.subscribe_market_data(qualified[0])
+            self.ibkr.wait(1)  # Wait for data
 
             # Capture current premium (NaN-safe)
             snapshot.current_premium = safe_price(ticker)
@@ -168,7 +168,7 @@ class PositionSnapshotService:
                 snapshot.iv = ticker.modelGreeks.impliedVol
 
             # Cancel market data
-            self.ibkr.ib.cancelMktData(qualified[0])
+            self.ibkr.cancel_market_data(qualified[0])
 
             # Calculate DTE remaining
             if trade.expiration:

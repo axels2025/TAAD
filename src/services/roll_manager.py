@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 
 from src.execution.position_monitor import PositionStatus
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 # Configuration defaults
@@ -104,7 +104,7 @@ class RollManager:
         ...     print(f"Roll to {decision.target.new_strike} exp {decision.target.new_expiration}")
     """
 
-    def __init__(self, ibkr_client: IBKRClient):
+    def __init__(self, ibkr_client: BrokerClient):
         """Initialize roll manager.
 
         Args:

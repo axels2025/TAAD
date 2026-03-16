@@ -13,7 +13,7 @@ from loguru import logger
 
 from src.config.exchange_profile import get_multiplier
 from src.nakedtrader.config import NakedTraderConfig
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 from src.utils.market_data import safe_field
 
 
@@ -97,7 +97,7 @@ def _is_index(symbol: str, config: NakedTraderConfig) -> bool:
 
 
 def get_valid_expirations(
-    client: IBKRClient,
+    client: BrokerClient,
     symbol: str,
     config: NakedTraderConfig,
 ) -> list[tuple[str, int]]:
@@ -133,8 +133,8 @@ def get_valid_expirations(
 
     # Get option chain definitions
     sec_type = "IND" if _is_index(symbol, config) else "STK"
-    chains = client.ib.reqSecDefOptParams(
-        symbol, "", sec_type, qualified.conId
+    chains = client.get_option_chain_definitions(
+        symbol, sec_type=sec_type, con_id=qualified.conId,
     )
 
     if not chains:
@@ -162,7 +162,7 @@ def get_valid_expirations(
 
 
 def get_underlying_price(
-    client: IBKRClient, symbol: str, config: NakedTraderConfig | None = None,
+    client: BrokerClient, symbol: str, config: NakedTraderConfig | None = None,
 ) -> float | None:
     """Get the current price of the underlying index or stock.
 
@@ -205,7 +205,7 @@ def get_underlying_price(
 
 
 def get_chain_with_greeks(
-    client: IBKRClient,
+    client: BrokerClient,
     symbol: str,
     expiration: str,
     underlying_price: float,
@@ -259,8 +259,8 @@ def get_chain_with_greeks(
         )
 
     sec_type = "IND" if _is_index(symbol, config) else "STK"
-    chains = client.ib.reqSecDefOptParams(
-        symbol, "", sec_type, qualified_underlying.conId
+    chains = client.get_option_chain_definitions(
+        symbol, sec_type=sec_type, con_id=qualified_underlying.conId,
     )
 
     # Find strikes — resolve actual trading class from IBKR
@@ -334,7 +334,7 @@ def get_chain_with_greeks(
         contracts.append((strike, opt))
 
     raw_contracts = [c for _, c in contracts]
-    qualified_list = client.ib.qualifyContracts(*raw_contracts)
+    qualified_list = client.qualify_contracts_batch(*raw_contracts)
 
     # Map qualified contracts back to strikes
     qualified_map: dict[float, object] = {}
@@ -357,14 +357,14 @@ def get_chain_with_greeks(
     tickers: dict[float, tuple] = {}
     for strike, contract in qualified_map.items():
         try:
-            ticker = client.ib.reqMktData(contract, "", False, False)
+            ticker = client.subscribe_market_data(contract)
             tickers[strike] = (ticker, contract)
         except Exception as e:
             logger.debug(f"{symbol} ${strike}: reqMktData failed: {e}")
 
     # Wait for Greeks to populate (up to 3 seconds)
     for _ in range(6):
-        client.ib.sleep(0.5)
+        client.wait(0.5)
         all_have_greeks = all(
             hasattr(t, "modelGreeks")
             and t.modelGreeks
@@ -420,7 +420,7 @@ def get_chain_with_greeks(
             logger.debug(f"{symbol} ${strike}: Error reading data: {e}")
         finally:
             try:
-                client.ib.cancelMktData(contract)
+                client.cancel_market_data(contract)
             except Exception:
                 pass
 

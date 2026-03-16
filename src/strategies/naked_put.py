@@ -10,7 +10,7 @@ from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy, get_baseline_strategy
 from src.strategies.base import BaseStrategy, ExitSignal, TradeOpportunity
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 from src.tools.options_finder import OptionsFinder
 from src.tools.screener import StockScreener
 from src.utils.calc import fmt_pct
@@ -49,7 +49,7 @@ class NakedPutStrategy(BaseStrategy):
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         config: BaselineStrategy | None = None,
     ):
         """Initialize naked put strategy.

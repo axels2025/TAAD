@@ -332,7 +332,7 @@ class TestCacheUsage:
         mock_chain.multiplier = "100"
         mock_chain.expirations = {"20250207"}
         mock_chain.strikes = {150.0}
-        scanner.ibkr_client.ib.reqSecDefOptParams.return_value = [mock_chain]
+        scanner.ibkr_client.get_option_chain_definitions.return_value = [mock_chain]
 
         chain = scanner.get_or_cache_chain("AAPL")
 
@@ -367,9 +367,9 @@ class TestBatchOperations:
             contract.conId = 12345
             mock_qualified.append(contract)
 
-        scanner.ibkr_client.ib.qualifyContracts.return_value = mock_qualified[:50]
+        scanner.ibkr_client.qualify_contracts_batch.return_value = mock_qualified[:50]
 
         qualified = scanner.batch_qualify_options(candidates)
 
         # Should have called qualifyContracts twice (2 batches)
-        assert scanner.ibkr_client.ib.qualifyContracts.call_count >= 1
+        assert scanner.ibkr_client.qualify_contracts_batch.call_count >= 1

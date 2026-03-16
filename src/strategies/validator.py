@@ -10,7 +10,7 @@ from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy
 from src.strategies.base import BaseStrategy, TradeOpportunity
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 class StrategyValidator:
@@ -31,7 +31,7 @@ class StrategyValidator:
     def __init__(
         self,
         strategy: BaseStrategy,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         config: BaselineStrategy | None = None,
     ):
         """Initialize validator.

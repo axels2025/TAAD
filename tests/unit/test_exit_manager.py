@@ -816,8 +816,7 @@ class TestEmergencyExitAll:
         mock_trade.orderStatus.status = "Filled"
         mock_trade.orderStatus.avgFillPrice = 0.41
 
-        mock_ibkr_client.ib.placeOrder.return_value = mock_trade
-        mock_ibkr_client.ib.sleep = Mock()
+        mock_ibkr_client.place_order_sync.return_value = mock_trade
 
         results = exit_manager.emergency_exit_all()
 

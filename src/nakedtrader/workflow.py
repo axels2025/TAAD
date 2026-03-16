@@ -29,7 +29,7 @@ from src.nakedtrader.order_manager import (
 from src.nakedtrader.strike_selector import StrikeSelection, select_strike
 from src.nakedtrader.trade_recorder import record_trade
 from src.services.market_calendar import MarketCalendar, MarketSession
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 def wait_for_market_open(
@@ -158,7 +158,7 @@ def display_trade_plan(
 
 
 def run_daily_trade(
-    client: IBKRClient,
+    client: BrokerClient,
     config: NakedTraderConfig,
     console: Console,
     dry_run: bool = True,
@@ -339,7 +339,7 @@ def run_daily_trade(
     return True
 
 
-def _verify_paper_trading(client: IBKRClient) -> None:
+def _verify_paper_trading(client: BrokerClient) -> None:
     """Verify we're connected to a paper trading account.
 
     Raises:

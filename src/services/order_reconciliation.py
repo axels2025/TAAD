@@ -24,7 +24,7 @@ from datetime import date, datetime
 from loguru import logger
 
 from src.services.assignment_detector import AssignmentEvent
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 from src.utils.calc import calc_pnl, calc_pnl_pct
 from src.utils.position_key import (
     canonical_position_key,
@@ -228,7 +228,7 @@ class OrderReconciliation:
         >>> print(f"Found {report.total_discrepancies} discrepancies")
     """
 
-    def __init__(self, ibkr_client: IBKRClient, trade_repository=None):
+    def __init__(self, ibkr_client: BrokerClient, trade_repository=None):
         """Initialize order reconciliation.
 
         Args:
@@ -285,7 +285,7 @@ class OrderReconciliation:
         # ib.openTrades() returns Trade objects for ALL open orders.
         try:
             logger.debug("Fetching open trades from TWS (all sessions)...")
-            open_trades = self.client.ib.openTrades()
+            open_trades = self.client.get_open_trades()
             merged_open = 0
             for ot in open_trades:
                 if ot.order.orderId not in seen_order_ids:
@@ -301,7 +301,7 @@ class OrderReconciliation:
         # reqCompletedOrders returns filled/cancelled orders from prior sessions.
         logger.debug("Fetching completed orders from TWS (all sessions)...")
         try:
-            completed_trades = self.client.ib.reqCompletedOrders(apiOnly=False)
+            completed_trades = self.client.get_completed_orders(api_only=False)
             logger.info(f"TWS completed orders (prior sessions): {len(completed_trades)}")
 
             # Merge, deduplicating by order ID

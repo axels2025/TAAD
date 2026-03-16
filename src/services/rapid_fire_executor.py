@@ -20,7 +20,7 @@ from loguru import logger
 
 from src.services.adaptive_order_executor import AdaptiveOrderExecutor, LiveQuote
 from src.services.premarket_validator import StagedOpportunity
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 # Avoid circular import — use TYPE_CHECKING for type hints only
 from typing import TYPE_CHECKING
@@ -285,7 +285,7 @@ class RapidFireExecutor:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         adaptive_executor: AdaptiveOrderExecutor,
         risk_governor: "RiskGovernor | None" = None,
     ):
@@ -308,7 +308,7 @@ class RapidFireExecutor:
 
         # Register event callback for order status changes
         # Access the event directly from ib object (property doesn't support +=)
-        self.client.ib.orderStatusEvent += self._on_order_status
+        self.client.order_status_event += self._on_order_status
 
         logger.debug(
             f"RapidFireExecutor initialized: "
@@ -730,5 +730,5 @@ class RapidFireExecutor:
         executor should not be reused.
         """
         self.pending_orders.clear()
-        self.client.ib.orderStatusEvent -= self._on_order_status
+        self.client.order_status_event -= self._on_order_status
         logger.debug("RapidFireExecutor cleanup complete")

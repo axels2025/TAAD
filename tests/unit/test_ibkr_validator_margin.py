@@ -12,7 +12,6 @@ import pytest
 def mock_ibkr_client():
     """Create mock IBKRClient."""
     client = Mock()
-    client.ib = Mock()
     client.get_actual_margin = Mock()
     return client
 
@@ -33,7 +32,7 @@ def test_get_actual_margin_success(validator, mock_ibkr_client):
     # Mock successful contract qualification
     mock_contract = Mock()
     mock_contract.conId = 12345
-    mock_ibkr_client.ib.qualifyContracts.return_value = [mock_contract]
+    mock_ibkr_client.qualify_contracts_batch.return_value = [mock_contract]
 
     # Mock successful margin retrieval
     mock_ibkr_client.get_actual_margin.return_value = 3500.00
@@ -49,7 +48,7 @@ def test_get_actual_margin_success(validator, mock_ibkr_client):
 def test_get_actual_margin_qualification_fails(validator, mock_ibkr_client):
     """Test returns None when contract qualification fails."""
     # Mock failed contract qualification
-    mock_ibkr_client.ib.qualifyContracts.return_value = []
+    mock_ibkr_client.qualify_contracts_batch.return_value = []
 
     result = validator._get_actual_margin(
         symbol="AAPL", strike=150.0, expiration="2026-02-28", premium=5.0
@@ -64,7 +63,7 @@ def test_get_actual_margin_no_conid(validator, mock_ibkr_client):
     # Mock contract without conId
     mock_contract = Mock()
     mock_contract.conId = None
-    mock_ibkr_client.ib.qualifyContracts.return_value = [mock_contract]
+    mock_ibkr_client.qualify_contracts_batch.return_value = [mock_contract]
 
     result = validator._get_actual_margin(
         symbol="AAPL", strike=150.0, expiration="2026-02-28", premium=5.0
@@ -76,7 +75,7 @@ def test_get_actual_margin_no_conid(validator, mock_ibkr_client):
 def test_get_actual_margin_exception(validator, mock_ibkr_client):
     """Test returns None when exception occurs."""
     # Mock exception during contract qualification
-    mock_ibkr_client.ib.qualifyContracts.side_effect = Exception("Connection error")
+    mock_ibkr_client.qualify_contracts_batch.side_effect = Exception("Connection error")
 
     result = validator._get_actual_margin(
         symbol="AAPL", strike=150.0, expiration="2026-02-28", premium=5.0
@@ -164,7 +163,7 @@ def test_actual_margin_preferred_over_estimate(validator, mock_ibkr_client):
     # Mock successful actual margin
     mock_contract = Mock()
     mock_contract.conId = 12345
-    mock_ibkr_client.ib.qualifyContracts.return_value = [mock_contract]
+    mock_ibkr_client.qualify_contracts_batch.return_value = [mock_contract]
     mock_ibkr_client.get_actual_margin.return_value = 4200.00
 
     actual_margin = validator._get_actual_margin(
@@ -194,7 +193,7 @@ def test_compare_actual_vs_estimate_volatile_stock(validator, mock_ibkr_client):
     # Mock IBKR returning higher margin for volatile stock
     mock_contract = Mock()
     mock_contract.conId = 12345
-    mock_ibkr_client.ib.qualifyContracts.return_value = [mock_contract]
+    mock_ibkr_client.qualify_contracts_batch.return_value = [mock_contract]
 
     # Simulate IBKR returning 80% higher margin for TSLA
     estimated = 2800.0

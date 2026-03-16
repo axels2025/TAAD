@@ -229,11 +229,10 @@ class TestProgressiveAdjust:
         self.client.sleep = AsyncMock()
         self.client.cancel_order = AsyncMock(return_value=True)
 
-        # Mock placeOrder
+        # Mock place_order_sync
         mock_trade = MagicMock()
         mock_trade.order.orderId = 200
-        self.client.ib = MagicMock()
-        self.client.ib.placeOrder.return_value = mock_trade
+        self.client.place_order_sync.return_value = mock_trade
 
         self.manager = FillManager(
             ibkr_client=self.client,

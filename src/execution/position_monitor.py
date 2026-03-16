@@ -12,7 +12,7 @@ This module monitors open positions with:
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from ib_async import Option
+from src.broker.types import Option
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy
@@ -21,7 +21,7 @@ from src.utils.position_key import position_key_from_contract, position_key_from
 from src.utils.timezone import us_eastern_now, us_trading_date
 from src.data.repositories import PositionRepository, TradeRepository
 from src.services.assignment_detector import AssignmentDetector, AssignmentEvent
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 @dataclass
@@ -123,7 +123,7 @@ class PositionMonitor:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         config: BaselineStrategy,
         position_repository: PositionRepository | None = None,
         trade_repository: TradeRepository | None = None,

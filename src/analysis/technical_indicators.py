@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
 
-from ib_async import Stock
+from src.broker.types import Stock
 from loguru import logger
 
 
@@ -164,7 +164,7 @@ class TechnicalIndicatorCalculator:
         try:
             # Create stock contract
             stock = Stock(symbol, "SMART", "USD")
-            qualified = self.ibkr.ib.qualifyContracts(stock)
+            qualified = self.ibkr.qualify_contracts_batch(stock)
 
             if not qualified or qualified[0] is None:
                 logger.debug(f"Could not qualify contract for {symbol}")
@@ -173,14 +173,13 @@ class TechnicalIndicatorCalculator:
             # Request historical data
             # Request slightly more days to account for weekends/holidays
             duration = f"{days + 30} D"
-            bars = self.ibkr.ib.reqHistoricalData(
+            bars = self.ibkr.get_historical_bars(
                 qualified[0],
-                endDateTime="",
-                durationStr=duration,
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
+                end_date_time="",
+                duration=duration,
+                bar_size="1 day",
+                what_to_show="TRADES",
+                use_rth=True,
             )
 
             if not bars:

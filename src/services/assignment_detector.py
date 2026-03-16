@@ -13,7 +13,7 @@ from datetime import datetime
 
 from loguru import logger
 
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 from src.utils.calc import calc_pnl, calc_pnl_pct
 from src.utils.timezone import us_eastern_now
 
@@ -66,7 +66,7 @@ class AssignmentDetector:
         ...     print(f"ASSIGNMENT: {event.symbol} {event.shares} shares")
     """
 
-    def __init__(self, ibkr_client: IBKRClient):
+    def __init__(self, ibkr_client: BrokerClient):
         """Initialize assignment detector.
 
         Args:

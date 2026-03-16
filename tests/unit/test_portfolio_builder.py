@@ -757,7 +757,7 @@ class TestPortfolioBuilderIntegration:
         assert result[0].margin_actual == 3000.0
         assert mock_ibkr.get_actual_margin.call_count == 2
         # Verify sleep was called for the settle delay between passes
-        mock_ibkr.ib.sleep.assert_any_call(1.0)
+        mock_ibkr.wait.assert_any_call(1.0)
 
     def test_get_actual_margins_no_retry_when_all_succeed(self):
         """Test that no retry pass happens when all margins succeed first time."""
@@ -782,6 +782,6 @@ class TestPortfolioBuilderIntegration:
         assert mock_ibkr.get_actual_margin.call_count == 2
         # No settle sleep (1.0) should have been called
         settle_calls = [
-            c for c in mock_ibkr.ib.sleep.call_args_list if c.args[0] == 1.0
+            c for c in mock_ibkr.wait.call_args_list if c.args[0] == 1.0
         ]
         assert len(settle_calls) == 0

@@ -17,7 +17,7 @@ from src.data.models import Trade
 from src.data.repositories import TradeRepository
 from src.nakedtrader.chain import get_underlying_price
 from src.nakedtrader.config import NakedTraderConfig
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 from src.utils.market_data import safe_field
 from src.utils.timezone import market_now
 
@@ -43,7 +43,7 @@ def get_open_nt_trades(session: Session) -> list[Trade]:
 
 
 def check_bracket_status(
-    client: IBKRClient,
+    client: BrokerClient,
     trade: Trade,
     session: Session,
 ) -> str:
@@ -64,7 +64,7 @@ def check_bracket_status(
         return trade.bracket_status or "unknown"
 
     # Check IBKR trades for fills on our child orders
-    for ibkr_trade in client.ib.trades():
+    for ibkr_trade in client.get_trades():
         order_id = ibkr_trade.order.orderId
         status = ibkr_trade.orderStatus.status
 
@@ -93,7 +93,7 @@ def check_bracket_status(
 
 
 def get_current_quote(
-    client: IBKRClient,
+    client: BrokerClient,
     trade: Trade,
     config: NakedTraderConfig | None = None,
 ) -> dict | None:
@@ -134,11 +134,11 @@ def get_current_quote(
     if not qualified:
         return None
 
-    ticker = client.ib.reqMktData(qualified, "", False, False)
+    ticker = client.subscribe_market_data(qualified)
 
     # Wait for data
     for _ in range(6):
-        client.ib.sleep(0.5)
+        client.wait(0.5)
         if hasattr(ticker, "modelGreeks") and ticker.modelGreeks:
             break
 
@@ -161,7 +161,7 @@ def get_current_quote(
             result["delta"] = abs(greeks.delta)
 
     try:
-        client.ib.cancelMktData(qualified)
+        client.cancel_market_data(qualified)
     except Exception:
         pass
 
@@ -235,7 +235,7 @@ def display_positions(
 
 
 def run_watch_cycle(
-    client: IBKRClient,
+    client: BrokerClient,
     session: Session,
     config: NakedTraderConfig,
     console: Console,
