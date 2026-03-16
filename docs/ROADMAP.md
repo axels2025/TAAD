@@ -65,6 +65,59 @@ This document tracks future improvements, enhancements, and technical debt for t
 
 ---
 
+#### Time-Boxed Decision Making
+**Status:** Planned
+**Date Added:** 2026-03-14
+**Effort:** Medium (1-2 days)
+**Value:** Prevent analysis paralysis — force decisions within hard deadlines, apply safe defaults on timeout
+
+**Problem Solved:**
+- The daemon's 8-step event pipeline has no aggregate time budget for decision-making
+- Claude reasoning + context enrichment + CRO review can stack up to 90+ seconds with no ceiling
+- During that time, option prices move and entry windows close
+- Exit decisions (especially stop-losses) can be delayed by re-evaluation loops
+- Reconciliation can block the next trade if DB sync is slow
+
+**Proposed Time-Boxes:**
+
+| Decision Type | Timeout | Default Action on Timeout |
+|---------------|---------|---------------------------|
+| Entry decisions (full pipeline) | 90s | Skip (`MONITOR_ONLY`) — retry next scheduled check |
+| Exit decisions (stop-loss) | 30s | Close at market (`CLOSE_POSITION` with market order) |
+| Exit decisions (profit-take) | 30s | Monitor only (less urgent) |
+| Claude reasoning API call | 30s | Fall back to `MONITOR_ONLY` |
+| Reconciliation | 60s | Defer remaining work to next cycle |
+
+**Implementation:**
+1. Add `TimeBoxConfig` dataclass to `src/agentic/config.py` with all timeout/default-action settings
+2. Add `time_boxing:` section to `config/phase5.yaml`
+3. Wrap `_process_event()` steps 1-6 in `asyncio.wait_for()` with per-event-type timeout
+4. Add timeout to Claude reasoning API call in `reasoning_engine.py`
+5. Add "Time-Boxing" settings card to dashboard (all parameters editable)
+6. Log timeout events + track frequency in dashboard metrics
+
+**Suggested Enhancements:**
+- Adaptive timeouts: tighten exit timeouts during high-VIX regimes
+- Per-step budgets within overall timeout (e.g., context assembly max 20s of 90s budget)
+- Timeout escalation: 2+ consecutive timeouts for same event type → `REQUEST_HUMAN_REVIEW`
+- Dashboard metrics: timeout frequency chart to detect systemic issues (slow IBKR, Claude latency)
+
+**Files to Modify:**
+- `src/agentic/config.py` — new `TimeBoxConfig`
+- `config/phase5.yaml` — new `time_boxing:` section
+- `src/agentic/daemon.py` — wrap `_process_event()` in `asyncio.wait_for()`
+- `src/agentic/reasoning_engine.py` — add timeout to Claude API call
+- `src/agentic/scanner_settings_page.py` / `config_api.py` — dashboard settings card
+- `src/agentic/dashboard_api.py` — timeout metrics endpoint
+
+**Prerequisites:**
+- None — can be implemented independently of other roadmap items
+
+**Design Principle:**
+Not about rushing or being reckless. A good decision now beats a perfect decision too late. The time budget forces the system to use its best heuristic within the window rather than searching for an optimal answer indefinitely.
+
+---
+
 ### 🟢 MEDIUM PRIORITY
 
 #### Phase 8: Portfolio Optimization

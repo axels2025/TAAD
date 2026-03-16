@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from src.data.models import LearningHistory, Pattern as PatternModel, Trade
 from src.utils.timezone import utc_now
+from src.learning.account_filter import get_learning_account_filter
 from src.learning.alpha_decay_monitor import AlphaDecayMonitor
 from src.learning.experiment_engine import ExperimentEngine
 from src.learning.models import LearningReport
@@ -84,14 +85,14 @@ class LearningOrchestrator:
 
         report = LearningReport(timestamp=datetime.now())
 
-        # Get baseline metrics (exclude stock_held and paper trades)
+        # Get baseline metrics (exclude stock_held; account filter from config)
         closed_trades = (
             self.db.query(Trade)
             .filter(Trade.exit_date.isnot(None))
             .filter(
                 sa.or_(Trade.lifecycle_status.is_(None), Trade.lifecycle_status != "stock_held")
             )
-            .filter(sa.or_(Trade.trade_source.is_(None), Trade.trade_source != "paper"))
+            .filter(get_learning_account_filter())
             .all()
         )
         report.total_trades_analyzed = len(closed_trades)

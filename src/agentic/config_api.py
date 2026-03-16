@@ -65,6 +65,47 @@ def create_config_router(verify_token) -> "APIRouter":
         }
 
     # ------------------------------------------------------------------
+    # GET /api/config/accounts — discover trade accounts in the database
+    # ------------------------------------------------------------------
+    @router.get("/accounts")
+    def get_accounts(token: None = Depends(verify_token)):
+        """Return distinct account/source combos from the trades table."""
+        try:
+            from sqlalchemy import func
+            from src.data.database import get_db_session
+            from src.data.models import Trade
+
+            with get_db_session() as db:
+                rows = (
+                    db.query(
+                        Trade.account_id,
+                        Trade.trade_source,
+                        func.count(Trade.id).label("trade_count"),
+                    )
+                    .filter(Trade.exit_date.isnot(None))
+                    .group_by(Trade.account_id, Trade.trade_source)
+                    .all()
+                )
+
+                accounts = []
+                for account_id, trade_source, count in rows:
+                    display = account_id or "unknown"
+                    if trade_source:
+                        display = f"{display} ({trade_source})"
+                    accounts.append({
+                        "account_id": account_id or "",
+                        "trade_source": trade_source or "",
+                        "trade_count": count,
+                        "display": display,
+                        "key": f"{account_id or ''}:{trade_source or ''}",
+                    })
+
+                return {"accounts": accounts}
+        except Exception as e:
+            logger.warning(f"Failed to discover accounts: {e}")
+            return {"accounts": [], "error": str(e)}
+
+    # ------------------------------------------------------------------
     # PUT /api/config — validate and save updated config
     # ------------------------------------------------------------------
     @router.put("")
@@ -324,6 +365,7 @@ const SECTIONS = {
       hypothesis_model: {desc: 'Model for hypothesis generation', type: 'model'},
       min_trades_for_experiment: {desc: 'Min trades to start an experiment', type: 'number'},
       max_concurrent_experiments: {desc: 'Max simultaneous experiments', type: 'number'},
+      learning_accounts: {desc: 'Accounts included in learning analysis (checked = included). Empty = all non-paper accounts.', type: 'accounts'},
     }
   },
   alerts: {
@@ -395,12 +437,19 @@ const SECTIONS = {
   },
 };
 
+let _accounts = [];
+
 async function loadConfig() {
   try {
-    const resp = await fetch('/api/config');
-    const data = await resp.json();
+    const [configResp, accountsResp] = await Promise.all([
+      fetch('/api/config'),
+      fetch('/api/config/accounts'),
+    ]);
+    const data = await configResp.json();
+    const accountsData = await accountsResp.json();
     _config = data.config;
     _models = data.models || [];
+    _accounts = accountsData.accounts || [];
     renderConfig();
   } catch(e) {
     document.getElementById('config-container').innerHTML =
@@ -444,6 +493,27 @@ function renderConfig() {
 }
 
 function renderField(id, meta, value) {
+  if (meta.type === 'accounts') {
+    const selected = Array.isArray(value) ? value : [];
+    if (_accounts.length === 0) {
+      return '<span style="color:var(--text-dim);font-size:12px;">No accounts found in database.</span>';
+    }
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:6px 16px;">';
+    for (const acct of _accounts) {
+      const acctKey = acct.key;
+      const isChecked = selected.includes(acctKey);
+      const cbId = id + '.' + acctKey;
+      html += `<div class="checkbox-wrap">
+        <input type="checkbox" id="${esc(cbId)}" data-trigger-group="${esc(id)}" value="${esc(acctKey)}" ${isChecked ? 'checked' : ''} onchange="markDirty()">
+        <label for="${esc(cbId)}" style="font-size:11px;">${esc(acct.display)} — ${acct.trade_count} trades</label>
+      </div>`;
+    }
+    html += '</div>';
+    if (selected.length === 0) {
+      html += '<div style="font-size:11px;color:var(--text-dim);margin-top:4px;">No accounts selected = all non-paper accounts included by default.</div>';
+    }
+    return html;
+  }
   if (meta.type === 'triggers') {
     const disabled = Array.isArray(value) ? value : [];
     let html = '<div style="display:flex;flex-wrap:wrap;gap:6px 16px;">';
@@ -508,7 +578,7 @@ function collectConfig() {
     for (const [key, fieldMeta] of Object.entries(meta.fields)) {
       const id = `${section}.${key}`;
 
-      if (fieldMeta.type === 'triggers') {
+      if (fieldMeta.type === 'triggers' || fieldMeta.type === 'accounts') {
         const groupId = `${section}.${key}`;
         const cbs = document.querySelectorAll(`input[data-trigger-group="${groupId}"]`);
         config[section][key] = Array.from(cbs).filter(cb => cb.checked).map(cb => cb.value);

@@ -61,6 +61,7 @@ learning:
   eod_reflection_frequency: daily
   hypothesis_generation_enabled: true
   hypothesis_model: claude-opus-4-6
+  learning_accounts: []
 auto_scan:
   enabled: false
   delay_minutes: 5

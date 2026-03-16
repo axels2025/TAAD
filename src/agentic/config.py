@@ -88,6 +88,10 @@ class LearningLoopConfig(BaseModel):
     eod_reflection_frequency: str = Field(default="daily", description="Reflection frequency: 'daily' or 'weekly'")
     hypothesis_generation_enabled: bool = Field(default=True, description="Enable Claude-generated hypotheses during weekly learning")
     hypothesis_model: str = Field(default="claude-sonnet-4-5-20250929", description="Model for hypothesis generation")
+    learning_accounts: list[str] = Field(
+        default_factory=list,
+        description="Account IDs included in learning analysis. Empty = all non-paper accounts.",
+    )
 
 
 class StrategyConfig(BaseModel):

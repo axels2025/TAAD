@@ -14,6 +14,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from src.data.models import Trade, TradeEntrySnapshot
+from src.learning.account_filter import get_learning_account_filter
 from src.learning.models import DetectedPattern
 from src.learning.path_analyzer import PathAnalyzer
 from src.learning.pattern_combiner import PatternCombiner
@@ -101,7 +102,7 @@ class PatternDetector:
             .filter(
                 sa.or_(Trade.lifecycle_status.is_(None), Trade.lifecycle_status != "stock_held")
             )
-            .filter(sa.or_(Trade.trade_source.is_(None), Trade.trade_source != "paper"))
+            .filter(get_learning_account_filter())
             .all()
         )
 
@@ -1065,7 +1066,7 @@ class PatternDetector:
             .filter(
                 sa.or_(Trade.lifecycle_status.is_(None), Trade.lifecycle_status != "stock_held")
             )
-            .filter(sa.or_(Trade.trade_source.is_(None), Trade.trade_source != "paper"))
+            .filter(get_learning_account_filter())
         )
 
     def _get_trades_in_delta_range(self, min_delta: float, max_delta: float) -> list[Trade]:
