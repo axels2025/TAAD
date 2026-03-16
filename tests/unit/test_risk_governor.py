@@ -1315,3 +1315,156 @@ class TestExcessLiquidity:
         result = risk_governor._check_margin_utilization(sample_opportunity)
 
         assert result.approved
+
+
+class TestDailyLossWithRealizedPnL:
+    """Test that daily loss circuit breaker uses realized + unrealized PnL."""
+
+    def test_daily_loss_includes_realized_pnl(
+        self, risk_governor, mock_position_monitor
+    ):
+        """Realized -1500 + unrealized -500 on 100k = -2%, triggers breaker."""
+        # Unrealized: -$500
+        mock_position_monitor.get_all_positions.return_value = [
+            PositionStatus(
+                position_id="POS1",
+                symbol="AAPL",
+                strike=200.0,
+                option_type="P",
+                expiration_date="20260219",
+                contracts=5,
+                entry_premium=0.50,
+                current_premium=0.60,
+                current_pnl=-500.0,
+                current_pnl_pct=-0.20,
+                days_held=1,
+                dte=8,
+            )
+        ]
+
+        # Realized: -$1500 from DB (trades closed earlier today)
+        with patch.object(
+            risk_governor, "_get_realized_daily_pnl", return_value=-1500.0
+        ):
+            result = risk_governor._check_daily_loss_limit()
+
+        # Total: -$2000 / $100k = -2.0%, equals MAX_DAILY_LOSS_PCT
+        assert not result.approved
+        assert result.limit_name == "daily_loss"
+        assert risk_governor.is_halted()
+
+    def test_daily_loss_unrealized_only_when_no_realized(
+        self, risk_governor, mock_position_monitor
+    ):
+        """When no trades closed today, behaves like old code (unrealized only)."""
+        mock_position_monitor.get_all_positions.return_value = [
+            PositionStatus(
+                position_id="POS1",
+                symbol="AAPL",
+                strike=200.0,
+                option_type="P",
+                expiration_date="20260219",
+                contracts=5,
+                entry_premium=0.50,
+                current_premium=0.55,
+                current_pnl=-250.0,
+                current_pnl_pct=-0.10,
+                days_held=1,
+                dte=8,
+            )
+        ]
+
+        with patch.object(
+            risk_governor, "_get_realized_daily_pnl", return_value=0.0
+        ):
+            result = risk_governor._check_daily_loss_limit()
+
+        # -$250 / $100k = -0.25%, within limit
+        assert result.approved
+
+    def test_daily_loss_survives_restart(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path
+    ):
+        """After restart, realized losses from DB still trigger breaker."""
+        # No open positions (all were closed before restart)
+        mock_position_monitor.get_all_positions.return_value = []
+
+        kill_switch = KillSwitch(halt_file=tmp_path / "ks.json", register_signals=False)
+
+        with patch(
+            "src.execution.risk_governor.RiskGovernor._load_trades_today_from_db",
+            return_value=3,
+        ):
+            governor = RiskGovernor(
+                ibkr_client=mock_ibkr_client,
+                position_monitor=mock_position_monitor,
+                config=config,
+                kill_switch=kill_switch,
+            )
+
+        # Realized: -$2500 from trades closed before crash
+        with patch.object(governor, "_get_realized_daily_pnl", return_value=-2500.0):
+            result = governor._check_daily_loss_limit()
+
+        # -$2500 / $100k = -2.5%, exceeds -2% limit
+        assert not result.approved
+        assert governor.is_halted()
+
+    def test_realized_pnl_db_failure_returns_zero(self, risk_governor):
+        """DB error returns 0.0 (fail-open, same as old behavior)."""
+        with patch(
+            "src.data.database.get_db_session",
+            side_effect=Exception("DB connection failed"),
+        ):
+            result = risk_governor._get_realized_daily_pnl()
+
+        assert result == 0.0
+
+    def test_trades_today_loaded_from_db(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path
+    ):
+        """Constructor loads trade count from DB to survive restarts."""
+        kill_switch = KillSwitch(halt_file=tmp_path / "ks.json", register_signals=False)
+
+        with patch(
+            "src.execution.risk_governor.RiskGovernor._load_trades_today_from_db",
+            return_value=5,
+        ):
+            governor = RiskGovernor(
+                ibkr_client=mock_ibkr_client,
+                position_monitor=mock_position_monitor,
+                config=config,
+                kill_switch=kill_switch,
+            )
+
+        assert governor._trades_today == 5
+
+    def test_get_risk_status_includes_realized_fields(
+        self, risk_governor, mock_position_monitor
+    ):
+        """Risk status dict includes realized and unrealized breakdowns."""
+        mock_position_monitor.get_all_positions.return_value = [
+            PositionStatus(
+                position_id="POS1",
+                symbol="AAPL",
+                strike=200.0,
+                option_type="P",
+                expiration_date="20260219",
+                contracts=5,
+                entry_premium=0.50,
+                current_premium=0.45,
+                current_pnl=25.0,
+                current_pnl_pct=0.10,
+                days_held=1,
+                dte=8,
+            )
+        ]
+
+        with patch.object(
+            risk_governor, "_get_realized_daily_pnl", return_value=100.0
+        ):
+            status = risk_governor.get_risk_status()
+
+        assert status["daily_pnl_realized"] == 100.0
+        assert status["daily_pnl_unrealized"] == 25.0
+        assert status["daily_pnl"] == 125.0

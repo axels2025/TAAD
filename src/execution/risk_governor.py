@@ -11,8 +11,9 @@ This module enforces risk limits and circuit breakers:
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
@@ -22,6 +23,26 @@ from src.utils.timezone import us_trading_date
 from src.services.kill_switch import KillSwitch
 from src.strategies.base import TradeOpportunity
 from src.tools.ibkr_client import IBKRClient
+
+
+def _trading_date_utc_bounds(trading_dt: date) -> tuple[datetime, datetime]:
+    """Convert a US trading date to naive-UTC start/end boundaries.
+
+    Args:
+        trading_dt: The trading date (US Eastern)
+
+    Returns:
+        (utc_start, utc_end) as naive UTC datetimes for DB queries
+    """
+    et = ZoneInfo("America/New_York")
+    start_et = datetime.combine(trading_dt, datetime.min.time()).replace(tzinfo=et)
+    end_et = datetime.combine(
+        trading_dt + timedelta(days=1), datetime.min.time()
+    ).replace(tzinfo=et)
+
+    utc_start = start_et.astimezone(timezone.utc).replace(tzinfo=None)
+    utc_end = end_et.astimezone(timezone.utc).replace(tzinfo=None)
+    return utc_start, utc_end
 
 
 @dataclass
@@ -110,8 +131,8 @@ class RiskGovernor:
         halted, reason = self._kill_switch.is_halted()
         self._trading_halted = halted
         self._halt_reason = reason
-        self._trades_today = 0
         self._last_reset_date = us_trading_date()
+        self._trades_today = self._load_trades_today_from_db()
 
         # Account health cache (refreshes every 5 minutes)
         self.ACCOUNT_HEALTH_INTERVAL_MINUTES = 5
@@ -367,11 +388,13 @@ class RiskGovernor:
         """
         positions = self.position_monitor.get_all_positions()
 
-        # Calculate daily P&L
-        total_pnl = sum(p.current_pnl for p in positions)
+        # Daily P&L = realized (DB) + unrealized (open positions)
+        unrealized_pnl = sum(p.current_pnl for p in positions)
+        realized_pnl = self._get_realized_daily_pnl()
+        total_pnl = realized_pnl + unrealized_pnl
 
         # Get account value
-        account_summary = self.ibkr_client.get_account_summary()
+        account_summary = self._get_cached_account_summary()
         account_value = account_summary.get("NetLiquidation", 100000)
 
         daily_pnl_pct = total_pnl / account_value if account_value > 0 else 0
@@ -385,6 +408,8 @@ class RiskGovernor:
             "max_trades_today": self.MAX_POSITIONS_PER_DAY,
             "daily_pnl": total_pnl,
             "daily_pnl_pct": daily_pnl_pct,
+            "daily_pnl_realized": realized_pnl,
+            "daily_pnl_unrealized": unrealized_pnl,
             "daily_loss_limit": self.MAX_DAILY_LOSS_PCT,
             "account_value": account_value,
         }
@@ -392,14 +417,22 @@ class RiskGovernor:
     def _check_daily_loss_limit(self) -> RiskLimitCheck:
         """Check daily loss circuit breaker.
 
-        Returns:
-            RiskLimitCheck: Check result
+        Total daily PnL = realized (from DB, trades closed today)
+                        + unrealized (from IBKR, open positions)
+
+        Survives process restarts because realized PnL comes from the database.
         """
+        # Unrealized PnL from currently open positions
         positions = self.position_monitor.get_all_positions()
-        total_pnl = sum(p.current_pnl for p in positions)
+        unrealized_pnl = sum(p.current_pnl for p in positions)
+
+        # Realized PnL from trades closed today (persisted in DB)
+        realized_pnl = self._get_realized_daily_pnl()
+
+        total_pnl = realized_pnl + unrealized_pnl
 
         # Get account value
-        account_summary = self.ibkr_client.get_account_summary()
+        account_summary = self._get_cached_account_summary()
         account_value = account_summary.get("NetLiquidation", 100000)
 
         daily_pnl_pct = total_pnl / account_value if account_value > 0 else 0
@@ -408,7 +441,8 @@ class RiskGovernor:
             # Trigger circuit breaker
             self.emergency_halt(
                 f"Daily loss limit exceeded: {daily_pnl_pct:.2%} "
-                f"(limit: {self.MAX_DAILY_LOSS_PCT:.2%})"
+                f"(limit: {self.MAX_DAILY_LOSS_PCT:.2%}, "
+                f"realized: ${realized_pnl:.0f}, unrealized: ${unrealized_pnl:.0f})"
             )
 
             return RiskLimitCheck(
@@ -430,6 +464,50 @@ class RiskGovernor:
             if self.MAX_DAILY_LOSS_PCT != 0
             else 0,
         )
+
+    def _get_realized_daily_pnl(self) -> float:
+        """Query DB for realized P&L from trades closed today.
+
+        Returns:
+            Total realized P&L for the current trading day.
+            Returns 0.0 on DB failure (fail-open).
+        """
+        from src.data.database import get_db_session
+        from src.data.repositories import TradeRepository
+
+        today = us_trading_date()
+        utc_start, utc_end = _trading_date_utc_bounds(today)
+
+        try:
+            with get_db_session() as session:
+                repo = TradeRepository(session)
+                return repo.get_realized_pnl_for_date(utc_start, utc_end)
+        except Exception as e:
+            logger.error(f"Failed to query realized daily PnL: {e}")
+            return 0.0
+
+    def _load_trades_today_from_db(self) -> int:
+        """Load today's trade count from DB to survive restarts.
+
+        Returns:
+            Number of trades entered today. Returns 0 on DB failure.
+        """
+        from src.data.database import get_db_session
+        from src.data.repositories import TradeRepository
+
+        today = us_trading_date()
+        utc_start, utc_end = _trading_date_utc_bounds(today)
+
+        try:
+            with get_db_session() as session:
+                repo = TradeRepository(session)
+                count = repo.count_trades_entered_on_date(utc_start, utc_end)
+                if count > 0:
+                    logger.info(f"Loaded {count} trades from DB for today")
+                return count
+        except Exception as e:
+            logger.error(f"Failed to load today's trade count: {e}")
+            return 0
 
     def _check_weekly_loss_limit(self) -> RiskLimitCheck:
         """Check weekly loss circuit breaker.
@@ -1113,6 +1191,6 @@ class RiskGovernor:
         today = us_trading_date()
 
         if today > self._last_reset_date:
-            logger.info(f"New trading day: resetting daily counters")
-            self._trades_today = 0
+            logger.info("New trading day: resetting daily counters")
+            self._trades_today = self._load_trades_today_from_db()
             self._last_reset_date = today

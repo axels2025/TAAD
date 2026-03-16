@@ -7,7 +7,7 @@ separating business logic from database operations.
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, or_
 from sqlalchemy.orm import Session
 
 from src.utils.timezone import utc_now
@@ -205,6 +205,61 @@ class TradeRepository:
             .order_by(desc(Trade.entry_date))
             .all()
         )
+
+    def get_realized_pnl_for_date(
+        self,
+        utc_start: datetime,
+        utc_end: datetime,
+        exclude_paper: bool = True,
+    ) -> float:
+        """Sum realized P&L for trades closed within a UTC time range.
+
+        Args:
+            utc_start: Start of period (naive UTC)
+            utc_end: End of period (naive UTC)
+            exclude_paper: If True, exclude paper trades
+
+        Returns:
+            Total realized P&L as float (0.0 if no trades)
+        """
+        query = (
+            self.session.query(func.coalesce(func.sum(Trade.profit_loss), 0.0))
+            .filter(Trade.exit_date >= utc_start)
+            .filter(Trade.exit_date < utc_end)
+            .filter(Trade.profit_loss.isnot(None))
+        )
+        if exclude_paper:
+            query = query.filter(
+                or_(Trade.trade_source.is_(None), Trade.trade_source != "paper")
+            )
+        return float(query.scalar())
+
+    def count_trades_entered_on_date(
+        self,
+        utc_start: datetime,
+        utc_end: datetime,
+        exclude_paper: bool = True,
+    ) -> int:
+        """Count trades entered within a UTC time range.
+
+        Args:
+            utc_start: Start of period (naive UTC)
+            utc_end: End of period (naive UTC)
+            exclude_paper: If True, exclude paper trades
+
+        Returns:
+            Number of trades entered in the period
+        """
+        query = (
+            self.session.query(func.count(Trade.id))
+            .filter(Trade.entry_date >= utc_start)
+            .filter(Trade.entry_date < utc_end)
+        )
+        if exclude_paper:
+            query = query.filter(
+                or_(Trade.trade_source.is_(None), Trade.trade_source != "paper")
+            )
+        return int(query.scalar())
 
     def update(self, trade: Trade) -> Trade:
         """Update an existing trade."""
