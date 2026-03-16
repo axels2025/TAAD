@@ -217,6 +217,22 @@ Not about rushing or being reckless. A good decision now beats a perfect decisio
 
 ### 🔵 LOW PRIORITY
 
+#### Extract Staging Columns from ScanOpportunity into StagedTrade Table
+**Status:** Future consideration
+**Date Added:** 2026-03-16
+**Effort:** Large (2-3 days, 22 files touch staging columns)
+**Value:** Cleaner schema separation — opportunity vs staging vs validation concerns
+
+**Problem:**
+- `ScanOpportunity` has ~60 columns spanning 6 concerns (core data, lifecycle, staging, pre-market validation, market-open validation, execution scheduling)
+- The staging/validation columns (Phase 4.1) are only populated for the ~10% of opportunities that get staged
+
+**Current Mitigation:** The wide table works fine in PostgreSQL. Columns are logically grouped with clear comments. Nullable staging columns have zero cost when unpopulated. No performance issues observed.
+
+**When to do this:** If the table grows further or if migration complexity becomes a blocker for schema changes. Not needed for functional correctness.
+
+---
+
 #### Tax Reporting Automation
 **Status:** Future consideration
 **Date Added:** 2026-02-07
