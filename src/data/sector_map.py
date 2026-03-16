@@ -179,6 +179,55 @@ SYMBOL_SECTOR_MAP: dict[str, str] = {
     "SO": "Utilities",
     "D": "Utilities",
     "AEP": "Utilities",
+    # =========================================================================
+    # ASX — Australian Stock Exchange
+    # =========================================================================
+    # Financials
+    "CBA": "Financials",
+    "NAB": "Financials",
+    "WBC": "Financials",
+    "ANZ": "Financials",
+    "MQG": "Financials",
+    "IAG": "Financials",
+    "SUN": "Financials",
+    "MPL": "Financials",
+    "QBE": "Financials",
+    "ASX": "Financials",
+    # Materials & Mining
+    "BHP": "Materials",
+    "RIO": "Materials",
+    "FMG": "Materials",
+    "MIN": "Materials",
+    "NCM": "Materials",
+    "NST": "Materials",
+    "S32": "Materials",
+    "ORI": "Materials",
+    "AMC": "Materials",
+    # Energy
+    "WDS": "Energy",
+    "STO": "Energy",
+    "ORG": "Energy",
+    "AGL": "Energy",
+    # Healthcare
+    "CSL": "Healthcare",
+    "SHL": "Healthcare",
+    # Consumer
+    "WES": "Consumer",
+    "WOW": "Consumer",
+    "COL": "Consumer",
+    "TWE": "Consumer",
+    "ALL": "Consumer",
+    # Industrials & Real Estate
+    "TCL": "Industrials",
+    "BXB": "Industrials",
+    "GMG": "Real Estate",
+    # Technology
+    "XRO": "Technology",
+    "REA": "Technology",
+    "CAR": "Technology",
+    "CPU": "Technology",
+    "IEL": "Technology",
+    "JHX": "Materials",
 }
 
 # Maps yfinance sector names to our internal sector names

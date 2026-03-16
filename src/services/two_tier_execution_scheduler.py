@@ -5,18 +5,18 @@ that preserves pre-market research value while leveraging market condition
 improvements later in the session.
 
 Key Features:
-- Tier 1 (9:30 AM): Execute while pre-market research still valid
+- Tier 1 (market open): Execute while pre-market research still valid
 - Tier 2 (Condition-based): Retry unfilled when VIX low + spreads tight
 - Progressive automation: hybrid → supervised → autonomous
-- FINRA-compliant clock synchronization
+- Exchange-aware scheduling (times derived from exchange profile)
 - Scalable from 3-5 trades → 10-15 trades
 
-Timeline:
-09:15    Stage 1: Pre-market validation
-09:30    Adaptive strike selection (or Stage 2 fallback)
-09:30    TIER 1: Submit all orders (conservative)
-09:35-10:30  TIER 2: Monitor conditions, retry when favorable
-10:30    Final reconciliation
+Timeline (relative to market open, e.g. 09:30 US / 10:00 ASX):
+open-15m Stage 1: Pre-market validation
+open     Adaptive strike selection (or Stage 2 fallback)
+open     TIER 1: Submit all orders (conservative)
+open+15m..open+60m  TIER 2: Monitor conditions, retry when favorable
+open+60m Final reconciliation
 
 Usage:
     scheduler = TwoTierExecutionScheduler(
@@ -29,13 +29,12 @@ Usage:
 
 import asyncio
 import os
-from datetime import date as date_type, datetime, time
+from datetime import date as date_type, datetime, time, timedelta
 from enum import Enum
-from zoneinfo import ZoneInfo
-
 from loguru import logger
 from rich.console import Console
 
+from src.config.exchange_profile import get_active_profile
 from src.data.opportunity_state import OpportunityState
 from src.services.execution_scheduler import ExecutionReport
 from src.services.fill_manager import FillManager
@@ -152,19 +151,32 @@ class TwoTierExecutionScheduler:
         self.automation_mode = automation_mode
         self.tier2_enabled = tier2_enabled
 
+        # Exchange-aware timezone and time defaults
+        profile = get_active_profile()
+        self._tz = profile.timezone
+        self._tz_label = profile.code  # "US" or "ASX" for display
+
+        # Derive default times from profile's regular_open
+        market_open = profile.regular_open
+        _open_dt = datetime.combine(date_type.today(), market_open)
+        _stage1_default = (_open_dt - timedelta(minutes=15)).time()
+        _tier2_start_default = (_open_dt + timedelta(minutes=15)).time()
+        _tier2_end_default = (_open_dt + timedelta(minutes=60)).time()
+        _reconcile_default = (_open_dt + timedelta(minutes=60)).time()
+
         # Track which order IDs have been saved to database (prevents duplicates)
         self._saved_order_ids: set[int] = set()
 
         # Load Tier 2 configuration from environment
-        self.tier2_window_start = self._parse_time(os.getenv("TIER2_WINDOW_START", "09:45"))
-        self.tier2_window_end = self._parse_time(os.getenv("TIER2_WINDOW_END", "10:30"))
+        self.tier2_window_start = self._parse_time(os.getenv("TIER2_WINDOW_START", _tier2_start_default.strftime("%H:%M")))
+        self.tier2_window_end = self._parse_time(os.getenv("TIER2_WINDOW_END", _tier2_end_default.strftime("%H:%M")))
         self.tier2_check_interval = int(os.getenv("TIER2_CHECK_INTERVAL", "300"))  # 5 minutes
         self.tier2_limit_adjustment = float(os.getenv("TIER2_LIMIT_ADJUSTMENT", "1.1"))
 
         # Execution timeline
-        self.stage1_time = self._parse_time(os.getenv("STAGE1_TIME", "09:15"))
-        self.tier1_time = self._parse_time(os.getenv("TIER1_EXECUTION_TIME", "09:30"))
-        self.reconciliation_time = self._parse_time(os.getenv("RECONCILIATION_TIME", "10:30"))
+        self.stage1_time = self._parse_time(os.getenv("STAGE1_TIME", _stage1_default.strftime("%H:%M")))
+        self.tier1_time = self._parse_time(os.getenv("TIER1_EXECUTION_TIME", market_open.strftime("%H:%M")))
+        self.reconciliation_time = self._parse_time(os.getenv("RECONCILIATION_TIME", _reconcile_default.strftime("%H:%M")))
 
         logger.info(
             f"TwoTierExecutionScheduler initialized:\n"
@@ -216,9 +228,9 @@ class TwoTierExecutionScheduler:
         if not ready_trades:
             logger.warning("No trades passed Stage 1 validation")
             return ExecutionReport(
-                execution_date=datetime.now(ZoneInfo("America/New_York")).date(),
-                started_at=datetime.now(ZoneInfo("America/New_York")),
-                completed_at=datetime.now(ZoneInfo("America/New_York")),
+                execution_date=datetime.now(self._tz).date(),
+                started_at=datetime.now(self._tz),
+                completed_at=datetime.now(self._tz),
                 dry_run=dry_run,
                 warnings=["No trades passed Stage 1"],
             )
@@ -255,9 +267,9 @@ class TwoTierExecutionScheduler:
             if not confirmed_trades:
                 logger.warning("No trades remain after adaptive strike selection")
                 return ExecutionReport(
-                    execution_date=datetime.now(ZoneInfo("America/New_York")).date(),
-                    started_at=datetime.now(ZoneInfo("America/New_York")),
-                    completed_at=datetime.now(ZoneInfo("America/New_York")),
+                    execution_date=datetime.now(self._tz).date(),
+                    started_at=datetime.now(self._tz),
+                    completed_at=datetime.now(self._tz),
                     dry_run=dry_run,
                     warnings=["All trades abandoned during strike selection"],
                 )
@@ -284,9 +296,9 @@ class TwoTierExecutionScheduler:
             if not confirmed_trades:
                 logger.warning("No trades confirmed after Stage 2")
                 return ExecutionReport(
-                    execution_date=datetime.now(ZoneInfo("America/New_York")).date(),
-                    started_at=datetime.now(ZoneInfo("America/New_York")),
-                    completed_at=datetime.now(ZoneInfo("America/New_York")),
+                    execution_date=datetime.now(self._tz).date(),
+                    started_at=datetime.now(self._tz),
+                    completed_at=datetime.now(self._tz),
                     dry_run=dry_run,
                     warnings=["No trades passed Stage 2"],
                 )
@@ -342,7 +354,7 @@ class TwoTierExecutionScheduler:
         ╚════════════════════════════════════════════════════════╝
 
         Trades Ready:    {len(staged)}
-        Current Time:    {datetime.now(ZoneInfo("America/New_York")).strftime('%H:%M:%S')} ET
+        Current Time:    {datetime.now(self._tz).strftime('%H:%M:%S')} {self._tz_label}
 
         Market Conditions:
           VIX:           {conditions.vix:.1f}
@@ -364,9 +376,9 @@ class TwoTierExecutionScheduler:
         if command == 'abort':
             logger.info("Execution aborted by user")
             return ExecutionReport(
-                execution_date=datetime.now(ZoneInfo("America/New_York")).date(),
-                started_at=datetime.now(ZoneInfo("America/New_York")),
-                completed_at=datetime.now(ZoneInfo("America/New_York")),
+                execution_date=datetime.now(self._tz).date(),
+                started_at=datetime.now(self._tz),
+                completed_at=datetime.now(self._tz),
                 dry_run=dry_run,
                 warnings=["Execution aborted by user"],
             )
@@ -397,9 +409,9 @@ class TwoTierExecutionScheduler:
 
             # Return empty report with errors
             return ExecutionReport(
-                execution_date=datetime.now(ZoneInfo("America/New_York")).date(),
-                started_at=datetime.now(ZoneInfo("America/New_York")),
-                completed_at=datetime.now(ZoneInfo("America/New_York")),
+                execution_date=datetime.now(self._tz).date(),
+                started_at=datetime.now(self._tz),
+                completed_at=datetime.now(self._tz),
                 dry_run=dry_run,
                 staged_count=len(staged),
                 warnings=[
@@ -536,9 +548,9 @@ class TwoTierExecutionScheduler:
 
             # Return empty report with errors
             return ExecutionReport(
-                execution_date=datetime.now(ZoneInfo("America/New_York")).date(),
-                started_at=datetime.now(ZoneInfo("America/New_York")),
-                completed_at=datetime.now(ZoneInfo("America/New_York")),
+                execution_date=datetime.now(self._tz).date(),
+                started_at=datetime.now(self._tz),
+                completed_at=datetime.now(self._tz),
                 dry_run=dry_run,
                 staged_count=len(staged),
                 warnings=[
@@ -572,9 +584,9 @@ class TwoTierExecutionScheduler:
         if dry_run:
             logger.info(f"DRY RUN: Would execute {len(staged)} trades")
             return ExecutionReport(
-                execution_date=datetime.now(ZoneInfo("America/New_York")).date(),
-                started_at=datetime.now(ZoneInfo("America/New_York")),
-                completed_at=datetime.now(ZoneInfo("America/New_York")),
+                execution_date=datetime.now(self._tz).date(),
+                started_at=datetime.now(self._tz),
+                completed_at=datetime.now(self._tz),
                 dry_run=True,
                 staged_count=len(staged),
             )
@@ -691,9 +703,9 @@ class TwoTierExecutionScheduler:
         )
 
         final_report = ExecutionReport(
-            execution_date=datetime.now(ZoneInfo("America/New_York")).date(),
+            execution_date=datetime.now(self._tz).date(),
             started_at=tier1_report.started_at,
-            completed_at=datetime.now(ZoneInfo("America/New_York")),
+            completed_at=datetime.now(self._tz),
             dry_run=False,
             staged_count=total_staged,
             executed_count=tier1_report.total_submitted,
@@ -721,11 +733,11 @@ class TwoTierExecutionScheduler:
             f"{self.tier2_window_start} to {self.tier2_window_end}"
         )
 
-        now = datetime.now(ZoneInfo("America/New_York"))
+        now = datetime.now(self._tz)
         window_end_dt = datetime.combine(
             now.date(),
             self.tier2_window_end,
-            tzinfo=ZoneInfo("America/New_York")
+            tzinfo=self._tz
         )
 
         # Get sample contracts for spread checking
@@ -735,7 +747,7 @@ class TwoTierExecutionScheduler:
             if pending.last_status in ('Submitted', 'PreSubmitted')
         ]
 
-        while datetime.now(ZoneInfo("America/New_York")) < window_end_dt:
+        while datetime.now(self._tz) < window_end_dt:
             # Check conditions
             conditions = await self.conditions.check_conditions(sample_contracts)
 
@@ -823,17 +835,17 @@ class TwoTierExecutionScheduler:
         return adjusted_count
 
     async def _wait_until_time(self, target: time, reason: str):
-        """Wait until a specific time (ET) with precise single sleep.
+        """Wait until a specific time in the exchange's local timezone.
 
         Args:
-            target: Target time (ET timezone)
+            target: Target time in the exchange's local timezone
             reason: Human-readable reason for waiting
         """
-        now = datetime.now(ZoneInfo("America/New_York"))
+        now = datetime.now(self._tz)
         target_dt = datetime.combine(
             now.date(),
             target,
-            tzinfo=ZoneInfo("America/New_York")
+            tzinfo=self._tz
         )
 
         if now >= target_dt:
@@ -842,7 +854,7 @@ class TwoTierExecutionScheduler:
         wait_seconds = (target_dt - now).total_seconds()
         logger.info(
             f"⏰ Waiting {wait_seconds:.0f}s until "
-            f"{target.strftime('%H:%M')} ET ({reason})"
+            f"{target.strftime('%H:%M')} {self._tz_label} ({reason})"
         )
 
         # Sleep in 5-second intervals so Ctrl+C can interrupt promptly

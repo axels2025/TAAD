@@ -741,7 +741,9 @@ class PositionMonitor:
             underlying_price = None
             try:
                 from ib_async import Stock
-                stock_contract = Stock(contract.symbol, "SMART", "USD")
+                from src.config.exchange_profile import get_active_profile
+                _profile = get_active_profile()
+                stock_contract = Stock(contract.symbol, _profile.ibkr_exchange, _profile.currency)
                 stock_qualified = self.ibkr_client.qualify_contract(stock_contract)
                 if stock_qualified:
                     stock_quote = self.ibkr_client.get_quote_sync(

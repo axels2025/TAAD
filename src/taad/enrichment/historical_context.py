@@ -92,23 +92,13 @@ def classify_market_regime(spy_change_pct: Optional[float], vix: float) -> str:
 
 
 def is_opex_week(on_date: date) -> bool:
-    """Check if date is in options expiration week (3rd Friday).
+    """Check if date is in options expiration week.
 
-    Mirrors MarketContextService._is_opex_week.
+    Delegates to the canonical implementation in market_context.py
+    which is exchange-aware (US: 3rd Friday, ASX: 3rd Thursday).
     """
-    cal = calendar.Calendar(firstweekday=calendar.SUNDAY)
-    fridays = [
-        d
-        for d in cal.itermonthdates(on_date.year, on_date.month)
-        if d.weekday() == 4 and d.month == on_date.month
-    ]
-    if len(fridays) < 3:
-        return False
-
-    third_friday = fridays[2]
-    week_start = third_friday - timedelta(days=third_friday.weekday())
-    week_end = week_start + timedelta(days=4)
-    return week_start <= on_date <= week_end
+    from src.services.market_context import is_opex_week as _is_opex_week
+    return _is_opex_week(on_date)
 
 
 def days_to_next_fomc(on_date: date) -> int:

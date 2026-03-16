@@ -13,35 +13,45 @@ from typing import Optional
 from ib_async import Stock, Index
 from loguru import logger
 
-from src.utils.timezone import us_trading_date
+from src.config.exchange_profile import get_active_profile
+from src.utils.timezone import trading_date
 
 
-def is_opex_week(today: Optional[date] = None) -> bool:
-    """Check if given date falls in options expiration week (week of 3rd Friday).
+def is_opex_week(today: Optional[date] = None, exchange: Optional[str] = None) -> bool:
+    """Check if given date falls in options expiration week.
+
+    US markets: week containing the 3rd Friday of the month.
+    ASX: week containing the 3rd Thursday of the month.
 
     Args:
-        today: Date to check. Defaults to current US trading date.
+        today: Date to check. Defaults to current trading date.
+        exchange: Exchange code ("US" or "ASX"). Defaults to active profile.
 
     Returns:
-        True if the date is within the Mon–Fri week containing the 3rd Friday.
+        True if the date is within the Mon–Fri week containing the expiry day.
     """
     if today is None:
-        today = us_trading_date()
+        today = trading_date()
+    if exchange is None:
+        exchange = get_active_profile().code
+
+    # US: 3rd Friday (weekday=4), ASX: 3rd Thursday (weekday=3)
+    expiry_weekday = 3 if exchange == "ASX" else 4
 
     cal = calendar.Calendar(firstweekday=calendar.SUNDAY)
-    fridays = [
+    expiry_days = [
         d
         for d in cal.itermonthdates(today.year, today.month)
-        if d.weekday() == 4 and d.month == today.month
+        if d.weekday() == expiry_weekday and d.month == today.month
     ]
 
-    if len(fridays) < 3:
+    if len(expiry_days) < 3:
         return False
 
-    third_friday = fridays[2]
+    third_expiry = expiry_days[2]
 
-    # Week of 3rd Friday: Monday through Friday
-    week_start = third_friday - timedelta(days=third_friday.weekday())
+    # Week of expiry day: Monday through Friday
+    week_start = third_expiry - timedelta(days=third_expiry.weekday())
     week_end = week_start + timedelta(days=4)
 
     return week_start <= today <= week_end
@@ -119,6 +129,7 @@ class MarketContextService:
             ibkr_client: IBKR client for market data
         """
         self.ibkr = ibkr_client
+        self._profile = get_active_profile()
 
     def capture_context(
         self, symbol: str, vix: float, spy_change_pct: Optional[float] = None
@@ -159,7 +170,7 @@ class MarketContextService:
 
         # Calendar data
         try:
-            today = us_trading_date()
+            today = trading_date()
             ctx.day_of_week = today.weekday()  # 0=Monday, 6=Sunday
             ctx.is_opex_week = self._is_opex_week(today)
             ctx.days_to_fomc = self._days_to_next_fomc(today)
@@ -171,9 +182,14 @@ class MarketContextService:
     def _capture_indices(self, ctx: MarketContext) -> None:
         """Capture QQQ and IWM prices and changes.
 
+        Only available for US markets — these ETFs don't exist on ASX.
+
         Args:
             ctx: MarketContext object to populate
         """
+        if self._profile.code != "US":
+            return
+
         # QQQ (Nasdaq 100 ETF)
         try:
             qqq = Stock("QQQ", "SMART", "USD")
@@ -208,7 +224,7 @@ class MarketContextService:
             Sector name or None if not available
         """
         try:
-            stock = Stock(symbol, "SMART", "USD")
+            stock = Stock(symbol, self._profile.ibkr_exchange, self._profile.currency)
             qualified = self.ibkr.ib.qualifyContracts(stock)
             if not qualified or qualified[0] is None:
                 return None
@@ -234,14 +250,16 @@ class MarketContextService:
     def _capture_sector_performance(self, ctx: MarketContext) -> None:
         """Capture sector ETF performance (1-day and 5-day).
 
+        Only available for US markets — SPDR sector ETFs don't exist on ASX.
+
         Args:
             ctx: MarketContext object to populate (must have sector_etf set)
         """
-        if not ctx.sector_etf:
+        if not ctx.sector_etf or self._profile.code != "US":
             return
 
         try:
-            etf = Stock(ctx.sector_etf, "SMART", "USD")
+            etf = Stock(ctx.sector_etf, self._profile.ibkr_exchange, self._profile.currency)
             data = self.ibkr.get_market_data(etf)
             if not data:
                 return

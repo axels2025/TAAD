@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from src.config.base import Config
+from src.config.exchange_profile import get_active_profile
 from src.execution.position_monitor import PositionMonitor
 from src.utils.timezone import us_trading_date
 from src.services.kill_switch import KillSwitch
@@ -29,15 +30,17 @@ from src.tools.ibkr_client import IBKRClient
 
 
 def _trading_date_utc_bounds(trading_dt: date) -> tuple[datetime, datetime]:
-    """Convert a US trading date to naive-UTC start/end boundaries.
+    """Convert a trading date to naive-UTC start/end boundaries.
+
+    Uses the active exchange profile's timezone (US Eastern, Australia/Sydney, etc.)
 
     Args:
-        trading_dt: The trading date (US Eastern)
+        trading_dt: The trading date in the exchange's local timezone
 
     Returns:
         (utc_start, utc_end) as naive UTC datetimes for DB queries
     """
-    et = ZoneInfo("America/New_York")
+    et = get_active_profile().timezone
     start_et = datetime.combine(trading_dt, datetime.min.time()).replace(tzinfo=et)
     end_et = datetime.combine(
         trading_dt + timedelta(days=1), datetime.min.time()

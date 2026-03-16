@@ -2,6 +2,8 @@
 # Based on WealthyOption / BigERN mechanical strategy
 # Reference: docs/research/spx-options-trading-rulebook-2026-02-17.md
 
+exchange: US    # US or ASX
+
 instrument:
   default_symbol: XSP            # SPX, XSP, or SPY
   contracts: 1                    # Default contracts per trade

@@ -17,20 +17,21 @@ from ib_async import Option
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy
+from src.config.exchange_profile import get_active_profile
 from src.utils.calc import fmt_pct
-from src.utils.timezone import us_trading_date
+from src.utils.timezone import trading_date
 from src.tools.ibkr_client import IBKRClient
 from src.tools.scanner_cache import ScannerCache
 from src.utils.market_data import safe_bid_ask, safe_price
 
 
-# Curated list of liquid option underlyings
+# Curated list of liquid option underlyings (US market)
 # These are chosen for:
 # - High option liquidity
 # - Tight bid-ask spreads
 # - Standard options (not mini)
 # - Multiple sectors for diversification
-LIQUID_UNIVERSE = [
+LIQUID_UNIVERSE_US = [
     # Major Indices
     "SPY", "QQQ", "IWM", "DIA",
 
@@ -65,7 +66,25 @@ LIQUID_UNIVERSE = [
 ]
 
 # Remove duplicates while preserving order
-LIQUID_UNIVERSE = list(dict.fromkeys(LIQUID_UNIVERSE))
+LIQUID_UNIVERSE_US = list(dict.fromkeys(LIQUID_UNIVERSE_US))
+
+# ASX liquid options universe (from exchange profile)
+LIQUID_UNIVERSE_ASX = [
+    "BHP", "CBA", "CSL", "NAB", "WBC", "ANZ", "WES", "WOW",
+    "MQG", "FMG", "RIO", "TLS", "WDS", "ALL", "GMG", "TCL",
+    "REA", "COL", "SHL", "QBE", "STO", "ORG", "JHX", "CPU",
+    "MIN", "TWE", "AGL", "BXB", "NCM", "NST", "S32", "IAG",
+    "SUN", "MPL", "AMC", "ORI", "ASX", "XRO", "CAR", "IEL",
+]
+
+# Exchange-keyed registry
+LIQUID_UNIVERSES: dict[str, list[str]] = {
+    "US": LIQUID_UNIVERSE_US,
+    "ASX": LIQUID_UNIVERSE_ASX,
+}
+
+# Backward-compatible alias
+LIQUID_UNIVERSE = LIQUID_UNIVERSE_US
 
 
 class EfficientOptionScanner:
@@ -110,7 +129,9 @@ class EfficientOptionScanner:
         self.ibkr_client = ibkr_client
         self.config = config or BaselineStrategy.from_env()
         self.cache = cache or ScannerCache()
-        self.universe = universe or LIQUID_UNIVERSE
+        self.universe = universe or LIQUID_UNIVERSES.get(
+            get_active_profile().code, LIQUID_UNIVERSE_US
+        )
 
         logger.info(
             f"Initialized EfficientOptionScanner with {len(self.universe)} symbols"
@@ -587,7 +608,7 @@ class EfficientOptionScanner:
         candidates = []
 
         # Filter expirations by DTE
-        today = us_trading_date()
+        today = trading_date()
         min_date = today + timedelta(days=min_dte)
         # Use a far future date if max_dte is unbounded
         max_date = (
