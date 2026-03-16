@@ -1069,6 +1069,7 @@ class TestPostTradeMarginVerification:
         result = risk_governor.verify_post_trade_margin(symbol="AAPL")
 
         assert result.is_healthy
+        assert not result.verification_failed
         assert result.available_funds == 80000.0
         assert result.excess_liquidity == 50000.0
         assert result.net_liquidation == 100000.0
@@ -1141,16 +1142,22 @@ class TestPostTradeMarginVerification:
         # (200000 - 60000) / 200000 * 100 = 70%
         assert abs(result.margin_utilization_pct - 70.0) < 0.01
 
-    def test_verification_failure_does_not_halt(
+    def test_verification_failure_does_not_halt_but_flags_unknown(
         self, risk_governor, mock_ibkr_client
     ):
-        """Test that API failure during verification does not halt trading."""
+        """Test that API failure during verification does not halt trading.
+
+        Fail-open: is_healthy=True to avoid blocking position closes,
+        but verification_failed=True so callers/dashboard know the state
+        is UNKNOWN, not actually safe.
+        """
         mock_ibkr_client.get_account_summary.side_effect = Exception("Connection lost")
 
         result = risk_governor.verify_post_trade_margin(symbol="AAPL")
 
-        assert result.is_healthy  # Don't halt on verification failure
-        assert "Verification failed" in result.warning
+        assert result.is_healthy  # Fail-open: don't halt
+        assert result.verification_failed  # But flag that state is unknown
+        assert "VERIFICATION FAILED" in result.warning
         assert not risk_governor.is_halted()
 
     def test_empty_symbol_context(

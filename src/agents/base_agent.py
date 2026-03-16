@@ -63,6 +63,11 @@ class BaseAgent:
         if api_key is None:
             config = get_config()
             api_key = config.anthropic_api_key
+        if not api_key:
+            raise ValueError(
+                "Anthropic API key required for AI agent features. "
+                "Set ANTHROPIC_API_KEY in your .env file."
+            )
         self.client = Anthropic(api_key=api_key)
         self.model = model
         self.max_retries = max_retries

@@ -127,7 +127,10 @@ class Config(BaseSettings):
     ibkr_account: str | None = Field(default=None)
 
     # Anthropic API
-    anthropic_api_key: str = Field(description="Anthropic API key for Claude")
+    anthropic_api_key: str | None = Field(
+        default=None,
+        description="Anthropic API key for Claude (only required for AI agent features)",
+    )
 
     # Database
     database_url: str = Field(
@@ -253,12 +256,21 @@ class Config(BaseSettings):
 
     @field_validator("anthropic_api_key")
     @classmethod
-    def validate_api_key(cls, v: str) -> str:
-        """Validate Anthropic API key format."""
-        if not v or v == "your_key_here":
-            raise ValueError("Valid Anthropic API key required")
+    def validate_api_key(cls, v: str | None) -> str | None:
+        """Validate Anthropic API key format when provided.
+
+        Returns None if key is not set — execution-only paths (nakedtrader,
+        scanner, risk governor) don't need Claude. Validation happens at
+        point-of-use in BaseAgent.__init__().
+        """
+        if v is None:
+            return None
+        if v == "your_key_here" or v.strip() == "":
+            return None  # Treat placeholder/empty as unset
         if not v.startswith("sk-ant-"):
-            raise ValueError("Invalid Anthropic API key format")
+            raise ValueError(
+                "Invalid Anthropic API key format (must start with 'sk-ant-')"
+            )
         return v
 
     @field_validator("log_level")

@@ -134,28 +134,39 @@ class TestConfig:
         assert isinstance(learning, LearningConfig)
         assert learning.enabled is True
 
-    def test_api_key_validation(self) -> None:
-        """Test API key validation."""
-        # Invalid API key format
+    def test_api_key_validation_rejects_invalid_format(self) -> None:
+        """Test that an invalid API key format is rejected."""
         reset_config()
         os.environ["ANTHROPIC_API_KEY"] = "invalid-key"
         with pytest.raises(ValidationError):
             Config()
 
-        # Reset and test missing API key
+    def test_api_key_missing_is_allowed(self) -> None:
+        """Test that missing API key doesn't block Config loading.
+
+        Execution-only paths (nakedtrader, scanner, risk governor) don't
+        need Claude. The key is validated at point-of-use in BaseAgent.
+        """
         reset_config()
         if "ANTHROPIC_API_KEY" in os.environ:
             del os.environ["ANTHROPIC_API_KEY"]
 
-        # This should raise validation error for missing required field
-        try:
-            Config()
-            # If we get here, API key validation might not be working as expected
-            # This is acceptable for now as it's from environment
-            assert True
-        except ValidationError:
-            # This is the expected behavior
-            assert True
+        config = Config(_env_file=None)
+        assert config.anthropic_api_key is None
+
+    def test_api_key_placeholder_treated_as_unset(self) -> None:
+        """Test that placeholder values are treated as None."""
+        reset_config()
+        os.environ["ANTHROPIC_API_KEY"] = "your_key_here"
+        config = Config(_env_file=None)
+        assert config.anthropic_api_key is None
+
+    def test_api_key_valid_format_accepted(self) -> None:
+        """Test that a valid sk-ant- key is accepted."""
+        reset_config()
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test123456789"
+        config = Config()
+        assert config.anthropic_api_key == "sk-ant-test123456789"
 
     def test_log_level_validation(self) -> None:
         """Test log level validation."""

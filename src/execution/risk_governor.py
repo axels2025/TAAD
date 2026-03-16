@@ -77,8 +77,13 @@ class PostTradeMarginResult:
         excess_liquidity: IBKR ExcessLiquidity (margin call proximity)
         net_liquidation: Net liquidation value
         margin_utilization_pct: Current margin utilization percentage
-        is_healthy: True if excess liquidity > 10% of net liquidation
+        is_healthy: True if excess liquidity > 10% of net liquidation.
+            Also True when verification fails (to avoid false halt — see
+            verification_failed for disambiguation).
         warning: Warning message if approaching danger
+        verification_failed: True if margin data could not be retrieved.
+            When True, is_healthy is artificially True (fail-open to avoid
+            blocking position closes), but the state is UNKNOWN, not safe.
     """
 
     available_funds: float
@@ -87,6 +92,7 @@ class PostTradeMarginResult:
     margin_utilization_pct: float
     is_healthy: bool
     warning: str = ""
+    verification_failed: bool = False
 
 
 class RiskGovernor:
@@ -1238,14 +1244,24 @@ class RiskGovernor:
             return result
 
         except Exception as e:
-            logger.error(f"Post-trade margin verification failed: {e}", exc_info=True)
+            # CRITICAL: We just filled a trade but cannot verify margin state.
+            # We keep is_healthy=True (fail-open) to avoid halting — a false halt
+            # would prevent closing positions, potentially making things worse.
+            # But this MUST be visible: log at CRITICAL and flag for dashboard.
+            context = f" after {symbol} fill" if symbol else ""
+            logger.critical(
+                f"POST-TRADE MARGIN VERIFICATION FAILED{context}: {e} — "
+                f"margin state is UNKNOWN. Manual review required.",
+                exc_info=True,
+            )
             return PostTradeMarginResult(
                 available_funds=0,
                 excess_liquidity=0,
                 net_liquidation=0,
                 margin_utilization_pct=0,
-                is_healthy=True,  # Don't halt on verification failure
-                warning=f"Verification failed: {e}",
+                is_healthy=True,  # Fail-open: don't halt on verification failure
+                warning=f"VERIFICATION FAILED: {e} — margin state unknown",
+                verification_failed=True,
             )
 
     def _reset_daily_counters_if_needed(self) -> None:
