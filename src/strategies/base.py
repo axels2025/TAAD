@@ -48,6 +48,7 @@ class TradeOpportunity:
     margin_required: float = 0.0
     margin_efficiency_pct: float = 0.0
     margin_efficiency_ratio: str = ""
+    spread_pct: float | None = None
 
     def calculate_margin_efficiency(self) -> None:
         """Calculate margin efficiency ratio and percentage.

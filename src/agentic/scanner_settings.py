@@ -123,6 +123,10 @@ class RiskGovernorSettings(BaseModel):
         default=-500.0, le=0.0,
         description="Max loss per position before stop loss ($)",
     )
+    max_spread_pct: float = Field(
+        default=0.10, ge=0.0, le=1.0,
+        description="Max bid-ask spread as fraction of mid price (0.10 = 10%)",
+    )
 
 
 class ScannerScanSettings(BaseModel):
