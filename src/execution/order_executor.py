@@ -454,15 +454,14 @@ class OrderExecutor:
             f"{opportunity.symbol} ${opportunity.strike} {opportunity.option_type}"
         )
 
-        import asyncio
-        trade = asyncio.run(self.ibkr_client.place_order(
+        trade = self.ibkr_client.place_order_sync(
             qualified,
             order,
             reason=f"Trade opportunity {opportunity.symbol}"
-        ))
+        )
 
         # Wait for order to be submitted
-        asyncio.run(self.ibkr_client.sleep(2))
+        self.ibkr_client.wait(2)
 
         # Check order status
         if trade.orderStatus.status in ("PreSubmitted", "Submitted"):
@@ -648,11 +647,10 @@ class OrderExecutor:
                 return False
 
             # Cancel the order
-            import asyncio
-            success = asyncio.run(self.ibkr_client.cancel_order(
+            success = self.ibkr_client.cancel_order_sync(
                 order_id,
                 reason="Manual cancellation"
-            ))
+            )
             if success:
                 logger.info(f"✓ Order {order_id} cancelled")
             return success

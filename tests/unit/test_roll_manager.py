@@ -197,8 +197,8 @@ class TestFindRollTarget:
         mock_quote.bid = 0.40
         mock_quote.last = None
 
-        with patch("asyncio.run", return_value=mock_quote):
-            target = roll_manager._find_roll_target(position)
+        roll_manager.ibkr_client.get_quote_sync.return_value = mock_quote
+        target = roll_manager._find_roll_target(position)
 
         assert target is not None
         assert target.new_premium_estimate == 0.40

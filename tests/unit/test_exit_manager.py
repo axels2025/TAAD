@@ -549,10 +549,9 @@ class TestExitPriority:
 class TestExecuteExit:
     """Test exit execution."""
 
-    @patch("src.execution.exit_manager.time.sleep")
     @patch("src.data.database.get_db_session")
     def test_execute_exit_success(
-        self, mock_get_db_session, mock_sleep, exit_manager, mock_position_monitor, mock_ibkr_client
+        self, mock_get_db_session, exit_manager, mock_position_monitor, mock_ibkr_client
     ):
         """Test successful exit execution."""
         # Mock database session to avoid real DB queries
@@ -579,15 +578,13 @@ class TestExecuteExit:
 
         mock_position_monitor.update_position.return_value = position
 
-        # Mock successful order placement via ib.placeOrder (sync)
+        # Mock successful order placement via place_order_sync
         mock_trade = Mock()
         mock_trade.order.orderId = 123
         mock_trade.orderStatus.status = "Filled"
         mock_trade.orderStatus.avgFillPrice = 0.26
 
-        mock_ibkr_client.ib.placeOrder = Mock(return_value=mock_trade)
-        mock_ibkr_client.ensure_connected = Mock()
-        mock_ibkr_client._validate_order = Mock()
+        mock_ibkr_client.place_order_sync.return_value = mock_trade
 
         # Create exit decision
         decision = ExitDecision(
@@ -623,10 +620,9 @@ class TestExecuteExit:
         assert not result.success
         assert result.error_message == "Position not found"
 
-    @patch("src.execution.exit_manager.time.sleep")
     @patch("src.data.database.get_db_session")
     def test_execute_exit_order_rejected(
-        self, mock_get_db_session, mock_sleep, exit_manager, mock_position_monitor, mock_ibkr_client
+        self, mock_get_db_session, exit_manager, mock_position_monitor, mock_ibkr_client
     ):
         """Test exit when order is rejected."""
         # Mock database session to avoid real DB queries
@@ -652,14 +648,12 @@ class TestExecuteExit:
 
         mock_position_monitor.update_position.return_value = position
 
-        # Mock rejected order via ib.placeOrder (sync)
+        # Mock rejected order via place_order_sync
         mock_trade = Mock()
         mock_trade.orderStatus.status = "Cancelled"
         mock_trade.orderStatus.whyHeld = "Rejected"
 
-        mock_ibkr_client.ib.placeOrder = Mock(return_value=mock_trade)
-        mock_ibkr_client.ensure_connected = Mock()
-        mock_ibkr_client._validate_order = Mock()
+        mock_ibkr_client.place_order_sync.return_value = mock_trade
 
         decision = ExitDecision(
             should_exit=True,
@@ -700,9 +694,7 @@ class TestExecuteExit:
         )
 
         mock_position_monitor.update_position.return_value = position
-        mock_ibkr_client.ib.placeOrder = Mock(side_effect=Exception("Connection error"))
-        mock_ibkr_client.ensure_connected = Mock()
-        mock_ibkr_client._validate_order = Mock()
+        mock_ibkr_client.place_order_sync.side_effect = Exception("Connection error")
 
         decision = ExitDecision(
             should_exit=True,

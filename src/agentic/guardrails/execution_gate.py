@@ -494,7 +494,7 @@ class ExecutionGate:
             qualified = ib.qualifyContracts(vix_contract)
             if qualified and qualified[0].conId:
                 ticker = ib.reqMktData(qualified[0], "", False, False)
-                ib.sleep(2)
+                ibkr_client.wait(2)
                 if ticker.last is not None and ticker.last > 0:
                     live_vix = ticker.last
                 ib.cancelMktData(qualified[0])
@@ -509,7 +509,7 @@ class ExecutionGate:
                 qualified = ib.qualifyContracts(spy_contract)
                 if qualified and qualified[0].conId:
                     ticker = ib.reqMktData(qualified[0], "", False, False)
-                    ib.sleep(2)
+                    ibkr_client.wait(2)
                     if ticker.last is not None and ticker.last > 0:
                         live_spy = ticker.last
                     ib.cancelMktData(qualified[0])

@@ -645,9 +645,8 @@ class PositionMonitor:
 
             # Get market data using wrapper
             # Use 5-second timeout to allow sufficient time for market data to arrive
-            import asyncio
             import math
-            quote = asyncio.run(self.ibkr_client.get_quote(qualified_contract, timeout=5.0))
+            quote = self.ibkr_client.get_quote_sync(qualified_contract, timeout=5.0)
 
             # Look up actual entry premium from database Trade record.
             # IBKR's avgCost is mark-to-market (changes daily) — NOT the
@@ -745,8 +744,8 @@ class PositionMonitor:
                 stock_contract = Stock(contract.symbol, "SMART", "USD")
                 stock_qualified = self.ibkr_client.qualify_contract(stock_contract)
                 if stock_qualified:
-                    stock_quote = asyncio.run(
-                        self.ibkr_client.get_quote(stock_qualified, timeout=5.0)
+                    stock_quote = self.ibkr_client.get_quote_sync(
+                        stock_qualified, timeout=5.0
                     )
                     if stock_quote.is_valid:
                         if is_valid(stock_quote.last):

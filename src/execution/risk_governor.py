@@ -1040,7 +1040,7 @@ class RiskGovernor:
         try:
             # Request fresh open orders data (don't rely on cache)
             self.ibkr_client.ib.reqOpenOrders()
-            self.ibkr_client.ib.sleep(1.0)  # Wait for data to populate
+            self.ibkr_client.wait(1.0)  # Wait for data to populate
 
             open_orders = self.ibkr_client.ib.openOrders()
 

@@ -1550,6 +1550,237 @@ class IBKRClient:
 
         return await self.ib.qualifyContractsAsync(*contracts)
 
+    # ═════════════════════════════════════════════════════════════════════════
+    # SYNC WRAPPER METHODS
+    #
+    # Synchronous versions of the async order/quote methods above.
+    # Use these from sync callers (CLI commands, ExitManager, RiskGovernor)
+    # instead of bridging with asyncio.run().  Under ib_async migration,
+    # these will become the primary async methods and callers will add await.
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def place_order_sync(
+        self,
+        contract: Contract,
+        order: Order,
+        reason: str = "",
+    ) -> Trade:
+        """Place order synchronously with audit logging and error handling.
+
+        Sync equivalent of place_order(). Use from non-async contexts
+        (CLI commands, ExitManager, etc.) instead of asyncio.run(place_order()).
+
+        Args:
+            contract: Qualified contract
+            order: Order object (LimitOrder, MarketOrder, etc.)
+            reason: Human-readable reason for placement
+
+        Returns:
+            Trade object from ib_insync
+
+        Raises:
+            Exception: If order placement fails
+        """
+        self.ensure_connected()
+        self._validate_order(order)
+
+        audit = OrderAuditEntry(
+            timestamp=datetime.now(),
+            action="PLACE",
+            symbol=contract.symbol,
+            order_type=order.orderType if hasattr(order, 'orderType') else type(order).__name__,
+            quantity=order.totalQuantity,
+            limit_price=getattr(order, 'lmtPrice', None),
+            reason=reason,
+        )
+
+        try:
+            trade = self.ib.placeOrder(contract, order)
+            audit.order_id = trade.order.orderId
+            audit.status = "SUBMITTED"
+            logger.info(
+                f"Order placed: {contract.symbol} {order.action} x{order.totalQuantity} "
+                f"@ ${getattr(order, 'lmtPrice', 'MKT')}"
+                + (f" ({reason})" if reason else "")
+            )
+            return trade
+
+        except Exception as e:
+            audit.status = "FAILED"
+            audit.error = str(e)
+            logger.error(f"Order failed: {contract.symbol} - {e}")
+            raise
+
+        finally:
+            self._order_audit_log.append(audit)
+
+    def cancel_order_sync(self, order_id: int, reason: str = "") -> bool:
+        """Cancel order synchronously with retry logic.
+
+        Sync equivalent of cancel_order(). Uses ib.sleep() between retries
+        instead of asyncio.sleep().
+
+        Args:
+            order_id: IBKR order ID to cancel
+            reason: Human-readable reason for cancellation
+
+        Returns:
+            True if cancellation successful, False otherwise
+        """
+        self.ensure_connected()
+
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            try:
+                order = Order()
+                order.orderId = order_id
+                self.ib.cancelOrder(order)
+
+                logger.info(f"Order {order_id} cancelled: {reason}")
+                return True
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    self.ib.sleep(0.2)
+                else:
+                    logger.error(
+                        f"Failed to cancel order {order_id} after {max_retries} attempts: {e}"
+                    )
+                    return False
+
+        return False
+
+    def modify_order_sync(
+        self,
+        trade: Trade,
+        new_limit: float,
+        reason: str = "",
+    ) -> Trade:
+        """Modify order limit price synchronously.
+
+        Sync equivalent of modify_order().
+
+        Args:
+            trade: Existing trade object
+            new_limit: New limit price
+            reason: Human-readable reason for modification
+
+        Returns:
+            Updated Trade object
+        """
+        self.ensure_connected()
+
+        old_limit = trade.order.lmtPrice
+        trade.order.lmtPrice = new_limit
+
+        audit = OrderAuditEntry(
+            timestamp=datetime.now(),
+            action="MODIFY",
+            symbol=trade.contract.symbol,
+            order_type=trade.order.orderType if hasattr(trade.order, 'orderType') else type(trade.order).__name__,
+            quantity=trade.order.totalQuantity,
+            limit_price=new_limit,
+            order_id=trade.order.orderId,
+            status="MODIFIED",
+            reason=reason,
+        )
+        self._order_audit_log.append(audit)
+
+        result = self.ib.placeOrder(trade.contract, trade.order)
+        logger.info(
+            f"Order {trade.order.orderId} modified: ${old_limit:.2f} → ${new_limit:.2f}"
+            + (f" ({reason})" if reason else "")
+        )
+
+        return result
+
+    def get_quote_sync(
+        self,
+        contract: Contract,
+        timeout: float | None = None,
+    ) -> Quote:
+        """Get live quote synchronously with event-driven timeout.
+
+        Sync equivalent of get_quote(). Uses ib.sleep() for polling instead
+        of asyncio.sleep(). Cancels market data subscription after each call.
+
+        Args:
+            contract: Contract to get quote for
+            timeout: Maximum wait time in seconds (default from env QUOTE_FETCH_TIMEOUT_SECONDS)
+
+        Returns:
+            Quote object with bid/ask or invalid quote if timeout
+        """
+        self.ensure_connected()
+
+        timeout = timeout or float(os.getenv("QUOTE_FETCH_TIMEOUT_SECONDS", "0.5"))
+
+        ticker = self.ib.reqMktData(contract, '', False, False)
+
+        try:
+            start = time.time()
+            while (time.time() - start) < timeout:
+                if self._is_valid_quote(ticker):
+                    bid = ticker.bid if (ticker.bid is not None and not math.isnan(ticker.bid) and ticker.bid > 0) else 0
+                    ask = ticker.ask if (ticker.ask is not None and not math.isnan(ticker.ask) and ticker.ask > 0) else 0
+                    last = ticker.last if (ticker.last is not None and not math.isnan(ticker.last)) else 0
+                    return Quote(
+                        bid=bid,
+                        ask=ask,
+                        last=last,
+                        volume=ticker.volume,
+                        timestamp=datetime.now(),
+                        is_valid=True,
+                        reason="",
+                    )
+                self.ib.sleep(0.05)  # Check every 50ms, processes IB callbacks
+
+            # Timeout — try frozen/close fallback before giving up
+            last_val = ticker.last if (ticker.last is not None and not math.isnan(ticker.last) and ticker.last > 0) else 0
+            close_val = getattr(ticker, "close", None)
+            close_val = close_val if (close_val is not None and not math.isnan(close_val) and close_val > 0) else 0
+
+            if close_val > 0:
+                return Quote(
+                    bid=close_val, ask=close_val,
+                    last=last_val or close_val,
+                    timestamp=datetime.now(),
+                    is_valid=True,
+                    reason="frozen_close",
+                )
+            if last_val > 0:
+                return Quote(
+                    bid=last_val, ask=last_val,
+                    last=last_val,
+                    timestamp=datetime.now(),
+                    is_valid=True,
+                    reason="last_price",
+                )
+
+            return Quote(
+                bid=0,
+                ask=0,
+                is_valid=False,
+                reason=f"Timeout after {timeout}s",
+            )
+        finally:
+            try:
+                self.ib.cancelMktData(contract)
+            except Exception:
+                pass
+
+    def wait(self, seconds: float) -> None:
+        """Sync sleep that processes IB callbacks.
+
+        Use instead of time.sleep() or asyncio.run(client.sleep()) to ensure
+        IB callbacks (order status updates, fills) are processed during waits.
+
+        Args:
+            seconds: Number of seconds to sleep
+        """
+        self.ib.sleep(seconds)
+
     def _validate_order(self, order: Order) -> None:
         """Pre-flight order validation.
 

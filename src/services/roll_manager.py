@@ -242,11 +242,7 @@ class RollManager:
                 return None
 
             # Get quote
-            import asyncio
-
-            quote = asyncio.run(
-                self.ibkr_client.get_quote(qualified, timeout=5.0)
-            )
+            quote = self.ibkr_client.get_quote_sync(qualified, timeout=5.0)
 
             # Determine new premium from bid (we're selling)
             new_premium = None

@@ -753,21 +753,21 @@ class ExecutionScheduler:
             )
             order.tif = "DAY"
 
-            trade = asyncio.run(self.ibkr_client.place_order(
+            trade = self.ibkr_client.place_order_sync(
                 qualified,
                 order,
                 reason=f"Staged trade {opportunity.symbol} (legacy path)"
-            ))
+            )
             order_id = trade.order.orderId
             order_type = "LIMIT (legacy)"
 
         # Wait for initial submission
-        asyncio.run(self.ibkr_client.sleep(2))
+        self.ibkr_client.wait(2)
 
         # Monitor for fill with adjustments
         while adjustments <= self.config.max_price_adjustments:
             # Wait for configured fill time
-            asyncio.run(self.ibkr_client.sleep(self.config.fill_wait_seconds))
+            self.ibkr_client.wait(self.config.fill_wait_seconds)
 
             # Check if filled
             if trade.orderStatus.status == "Filled":
@@ -803,11 +803,11 @@ class ExecutionScheduler:
                 )
 
                 # Cancel existing order
-                asyncio.run(self.ibkr_client.cancel_order(
+                self.ibkr_client.cancel_order_sync(
                     trade.order.orderId,
                     reason=f"Price adjustment {adjustments + 1}"
-                ))
-                asyncio.run(self.ibkr_client.sleep(1))
+                )
+                self.ibkr_client.wait(1)
 
                 # Place new order with adjusted price
                 current_limit = new_limit
@@ -818,14 +818,14 @@ class ExecutionScheduler:
                 )
                 order.tif = "DAY"
 
-                trade = asyncio.run(self.ibkr_client.place_order(
+                trade = self.ibkr_client.place_order_sync(
                     qualified,
                     order,
                     reason=f"Price adjustment {adjustments + 1} for {opportunity.symbol}"
-                ))
+                )
                 order_id = trade.order.orderId
                 adjustments += 1
-                asyncio.run(self.ibkr_client.sleep(2))
+                self.ibkr_client.wait(2)
             else:
                 # Max adjustments reached, leave order working
                 logger.info("  Max adjustments reached, leaving order working")

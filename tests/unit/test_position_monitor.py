@@ -142,14 +142,13 @@ def _setup_db_and_ibkr_mocks(
     # Mock qualify_contract to return the contract itself
     mock_ibkr_client.qualify_contract.side_effect = lambda c: c
 
-    # Mock get_quote to return our Quote object
-    # get_quote is async, called via asyncio.run()
-    async def fake_get_quote(contract, timeout=None):
+    # Mock get_quote_sync to return our Quote object (sync, no asyncio.run)
+    def fake_get_quote_sync(contract, timeout=None):
         # Return stock quote for Stock contracts, option quote otherwise
         if mock_stock_quote_obj and hasattr(contract, 'secType') and getattr(contract, 'secType', None) == 'STK':
             return mock_stock_quote_obj
         return mock_quote_obj
-    mock_ibkr_client.get_quote.side_effect = fake_get_quote
+    mock_ibkr_client.get_quote_sync.side_effect = fake_get_quote_sync
 
     # Build mock database session
     mock_session = MagicMock()
@@ -459,9 +458,7 @@ class TestUpdatePosition:
         mock_ibkr_client.get_positions.return_value = [mock_ib_position]
         mock_ibkr_client.qualify_contract.side_effect = lambda c: c
 
-        async def fake_get_quote(contract, timeout=None):
-            return mock_quote
-        mock_ibkr_client.get_quote.side_effect = fake_get_quote
+        mock_ibkr_client.get_quote_sync.side_effect = lambda contract, timeout=None: mock_quote
 
         position_id = "AAPL_200.0_20260130_P"
         status = position_monitor.update_position(position_id)

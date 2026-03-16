@@ -44,12 +44,11 @@ def get_trades_without_snapshots(session, open_only=True):
 
 def get_stock_price(ibkr_client, symbol):
     """Get current stock price for a symbol."""
-    import asyncio
     contract = ibkr_client.get_stock_contract(symbol)
     qualified = ibkr_client.qualify_contract(contract)
     if not qualified:
         return None
-    quote = asyncio.run(ibkr_client.get_quote(qualified, timeout=5.0))
+    quote = ibkr_client.get_quote_sync(qualified, timeout=5.0)
     if quote.last and quote.last > 0:
         return quote.last
     if quote.bid and quote.ask:

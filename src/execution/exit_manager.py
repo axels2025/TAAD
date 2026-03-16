@@ -8,7 +8,6 @@ This module handles automated exits based on:
 - Exit reason logging
 """
 
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -334,17 +333,9 @@ class ExitManager:
                 f"{position_status.option_type}"
             )
 
-            # Use the sync IB API directly. The async wrapper
-            # ibkr_client.place_order() cannot be called via asyncio.run()
-            # when the daemon's event loop is already running (deadlocks
-            # because ib_insync is bound to the main event loop).
-            self.ibkr_client.ensure_connected()
-            self.ibkr_client._validate_order(order)
-            trade = self.ibkr_client.ib.placeOrder(qualified, order)
-            logger.info(
-                f"Order placed: {qualified.symbol} {order.action} "
-                f"x{order.totalQuantity} @ ${getattr(order, 'lmtPrice', 'MKT')}"
-                f" ({decision.exit_type.upper()} exit)"
+            trade = self.ibkr_client.place_order_sync(
+                qualified, order,
+                reason=f"{decision.exit_type.upper()} exit: {decision.reason}",
             )
 
             # Record that we placed an exit order for this position
@@ -375,7 +366,7 @@ class ExitManager:
             logger.info(f"Waiting up to {max_wait_seconds}s for order to fill...")
 
             for i in range(max_wait_seconds):
-                time.sleep(check_interval)
+                self.ibkr_client.wait(check_interval)
 
                 # Log current status for debugging
                 if i == 0 or i % 5 == 0:  # Log every 5 seconds
@@ -487,11 +478,10 @@ class ExitManager:
                     f"Order stuck in PendingSubmit after {max_wait_seconds}s - "
                     f"cancelling order {trade.order.orderId}"
                 )
-                try:
-                    self.ibkr_client.ib.cancelOrder(trade.order)
-                    logger.info(f"Cancelled order {trade.order.orderId}")
-                except Exception as e:
-                    logger.warning(f"Failed to cancel order: {e}")
+                self.ibkr_client.cancel_order_sync(
+                    trade.order.orderId,
+                    reason="Stuck in PendingSubmit, retrying",
+                )
 
                 # Clear the exit order tracking so retry is not blocked
                 self._exit_orders_placed.pop(position_id, None)
@@ -506,7 +496,10 @@ class ExitManager:
                         action="BUY", totalQuantity=order.totalQuantity,
                     )
                     market_order.tif = "DAY"
-                    retry_trade = self.ibkr_client.ib.placeOrder(qualified, market_order)
+                    retry_trade = self.ibkr_client.place_order_sync(
+                        qualified, market_order,
+                        reason=f"MARKET retry: {decision.reason}",
+                    )
 
                     self._exit_orders_placed[position_id] = (
                         retry_trade.order.orderId, decision.reason,
@@ -514,7 +507,7 @@ class ExitManager:
 
                     # Wait up to 30s for market order to fill
                     for _ in range(30):
-                        self.ibkr_client.ib.sleep(1)
+                        self.ibkr_client.wait(1)
                         retry_status = retry_trade.orderStatus.status
                         if retry_status == "Filled":
                             exit_price = retry_trade.orderStatus.avgFillPrice
@@ -674,9 +667,9 @@ class ExitManager:
 
         # Process pending IB events so order statuses are current
         try:
-            self.ibkr_client.ib.sleep(0.5)
+            self.ibkr_client.wait(0.5)
         except Exception as e:
-            logger.debug(f"ib.sleep during pending exit check: {e}")
+            logger.debug(f"wait() during pending exit check: {e}")
 
         results = {}
         ib_trades = self.ibkr_client.get_trades()
