@@ -956,6 +956,7 @@ def trade(
                 confidence=opp.get("confidence", 0.75),
                 reasoning=opp.get("reasoning", "Trade opportunity"),
                 margin_required=opp["margin_required"],
+                spread_pct=opp.get("spread_pct"),
             )
 
             # Validate with strategy config

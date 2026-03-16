@@ -1654,3 +1654,59 @@ class TestEquityStatePersistence:
         mtime2 = equity_file.stat().st_mtime
 
         assert mtime1 == mtime2
+
+
+class TestSpreadCheck:
+    """Test bid-ask spread risk check."""
+
+    def test_spread_within_limit_passes(self, risk_governor):
+        """Spread under the limit should be approved."""
+        opp = TradeOpportunity(
+            symbol="AAPL", strike=200.0,
+            expiration=datetime.now() + timedelta(days=10),
+            option_type="PUT", premium=0.50, contracts=1,
+            otm_pct=0.15, dte=10, stock_price=235.0, trend="uptrend",
+            margin_required=1000.0, spread_pct=0.05,
+        )
+        result = risk_governor._check_spread(opp)
+        assert result.approved
+        assert result.limit_name == "spread"
+
+    def test_spread_exceeds_limit_rejected(self, risk_governor):
+        """Spread above the limit should be rejected."""
+        opp = TradeOpportunity(
+            symbol="AAPL", strike=200.0,
+            expiration=datetime.now() + timedelta(days=10),
+            option_type="PUT", premium=0.50, contracts=1,
+            otm_pct=0.15, dte=10, stock_price=235.0, trend="uptrend",
+            margin_required=1000.0, spread_pct=0.25,
+        )
+        result = risk_governor._check_spread(opp)
+        assert not result.approved
+        assert "25.0%" in result.reason
+        assert result.limit_name == "spread"
+
+    def test_spread_none_skips_check(self, risk_governor):
+        """When spread_pct is None (e.g. manual trade), check should pass."""
+        opp = TradeOpportunity(
+            symbol="AAPL", strike=200.0,
+            expiration=datetime.now() + timedelta(days=10),
+            option_type="PUT", premium=0.50, contracts=1,
+            otm_pct=0.15, dte=10, stock_price=235.0, trend="uptrend",
+            margin_required=1000.0,
+        )
+        assert opp.spread_pct is None
+        result = risk_governor._check_spread(opp)
+        assert result.approved
+
+    def test_spread_exactly_at_limit_passes(self, risk_governor):
+        """Spread exactly at the limit should pass (not strictly greater)."""
+        opp = TradeOpportunity(
+            symbol="AAPL", strike=200.0,
+            expiration=datetime.now() + timedelta(days=10),
+            option_type="PUT", premium=0.50, contracts=1,
+            otm_pct=0.15, dte=10, stock_price=235.0, trend="uptrend",
+            margin_required=1000.0, spread_pct=risk_governor.MAX_SPREAD_PCT,
+        )
+        result = risk_governor._check_spread(opp)
+        assert result.approved

@@ -6,6 +6,7 @@ This module enforces risk limits and circuit breakers:
 - Max positions (10)
 - Max positions per day (10)
 - Max sector concentration (30%)
+- Max bid-ask spread (10% of mid)
 - Max margin utilization (80%)
 - Emergency shutdown capability
 """
@@ -159,6 +160,7 @@ class RiskGovernor:
         self.MAX_MARGIN_PER_TRADE_PCT = rg.max_margin_per_trade_pct
         self.MAX_WEEKLY_LOSS_PCT = rg.max_weekly_loss_pct
         self.MAX_DRAWDOWN_PCT = rg.max_drawdown_pct
+        self.MAX_SPREAD_PCT = rg.max_spread_pct
         self.MIN_EXCESS_LIQUIDITY_PCT = 0.10  # Safety invariant — keep hardcoded
 
         # Weekly/drawdown tracking (persisted to JSON file)
@@ -183,6 +185,7 @@ class RiskGovernor:
         logger.info(f"  Max Margin/Trade: {self.MAX_MARGIN_PER_TRADE_PCT:.0%} of NetLiq")
         logger.info(f"  Max Weekly Loss: {self.MAX_WEEKLY_LOSS_PCT:.0%}")
         logger.info(f"  Max Drawdown: {self.MAX_DRAWDOWN_PCT:.0%}")
+        logger.info(f"  Max Spread: {self.MAX_SPREAD_PCT:.0%} of mid")
         logger.info(f"  Earnings check: Enabled")
 
     def pre_trade_check(self, opportunity: TradeOpportunity) -> RiskLimitCheck:
@@ -196,7 +199,8 @@ class RiskGovernor:
         5. Max positions not exceeded
         6. Max positions per day not exceeded
         7. Sector concentration within limits
-        8. Margin utilization within limits
+        8. Bid-ask spread within limits
+        9. Margin utilization within limits
 
         Args:
             opportunity: Trade opportunity to check
@@ -265,7 +269,12 @@ class RiskGovernor:
         if not sector_check.approved:
             return sector_check
 
-        # Check 8: Margin utilization
+        # Check 8: Bid-ask spread
+        spread_check = self._check_spread(opportunity)
+        if not spread_check.approved:
+            return spread_check
+
+        # Check 9: Margin utilization
         margin_check = self._check_margin_utilization(opportunity)
         if not margin_check.approved:
             return margin_check
@@ -818,6 +827,50 @@ class RiskGovernor:
             current_value=concentration * 100,
             limit_value=self.MAX_SECTOR_CONCENTRATION * 100,
             utilization_pct=(concentration / self.MAX_SECTOR_CONCENTRATION) * 100,
+        )
+
+    def _check_spread(self, opportunity: TradeOpportunity) -> RiskLimitCheck:
+        """Check bid-ask spread is within acceptable limits.
+
+        Rejects options with wide spreads to avoid slippage on illiquid
+        contracts. Skips the check when spread data is unavailable (e.g.
+        manual trades entered without bid/ask).
+        """
+        spread = opportunity.spread_pct
+        if spread is None:
+            return RiskLimitCheck(
+                approved=True,
+                reason="Spread data unavailable — skipping check",
+                limit_name="spread",
+                current_value=0.0,
+                limit_value=self.MAX_SPREAD_PCT,
+                utilization_pct=0.0,
+            )
+
+        if spread > self.MAX_SPREAD_PCT:
+            logger.warning(
+                f"Spread too wide for {opportunity.symbol}: "
+                f"{spread:.1%} > {self.MAX_SPREAD_PCT:.0%} limit"
+            )
+            return RiskLimitCheck(
+                approved=False,
+                reason=(
+                    f"Bid-ask spread {spread:.1%} exceeds "
+                    f"{self.MAX_SPREAD_PCT:.0%} limit"
+                ),
+                limit_name="spread",
+                current_value=spread,
+                limit_value=self.MAX_SPREAD_PCT,
+                utilization_pct=(spread / self.MAX_SPREAD_PCT) * 100,
+            )
+
+        return RiskLimitCheck(
+            approved=True,
+            reason=f"Spread {spread:.1%} within {self.MAX_SPREAD_PCT:.0%} limit",
+            limit_name="spread",
+            current_value=spread,
+            limit_value=self.MAX_SPREAD_PCT,
+            utilization_pct=(spread / self.MAX_SPREAD_PCT) * 100,
         )
 
     def _check_margin_utilization(
