@@ -139,6 +139,33 @@ class TestRiskGovernorInitialization:
         """Test last reset date is set to today (US Eastern)."""
         assert risk_governor._last_reset_date == us_trading_date()
 
+    def test_settings_hot_reload_on_pre_trade_check(
+        self, risk_governor, sample_opportunity, monkeypatch
+    ):
+        """Test that risk limits are re-read from YAML when TTL expires."""
+        from src.agentic.scanner_settings import ScannerSettings, RiskGovernorSettings
+
+        # Initial value from real YAML
+        original = risk_governor.MAX_MARGIN_UTILIZATION
+
+        # Patch load_scanner_settings to return a different value
+        custom = ScannerSettings(
+            risk_governor=RiskGovernorSettings(max_margin_utilization=0.99),
+        )
+        monkeypatch.setattr(
+            "src.agentic.scanner_settings.load_scanner_settings",
+            lambda *a, **kw: custom,
+        )
+
+        # TTL hasn't expired yet — value unchanged
+        risk_governor.pre_trade_check(sample_opportunity)
+        assert risk_governor.MAX_MARGIN_UTILIZATION == original
+
+        # Force TTL expiry
+        risk_governor._settings_loaded_at = 0.0
+        risk_governor.pre_trade_check(sample_opportunity)
+        assert risk_governor.MAX_MARGIN_UTILIZATION == 0.99
+
 
 class TestTradingHalt:
     """Test trading halt functionality."""

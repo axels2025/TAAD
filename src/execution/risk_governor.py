@@ -12,6 +12,7 @@ This module enforces risk limits and circuit breakers:
 """
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -153,23 +154,11 @@ class RiskGovernor:
         self._account_health_cache: dict | None = None
         self._last_health_check: datetime | None = None
 
-        # Risk limits — prefer scanner_settings.yaml (hot-reloadable), fall back to .env
-        from src.agentic.scanner_settings import load_scanner_settings
-
-        scanner = load_scanner_settings()
-        rg = scanner.risk_governor
-        budget = scanner.budget
-
-        self.MAX_DAILY_LOSS_PCT = rg.max_daily_loss_pct
-        self.MAX_POSITION_LOSS = rg.max_position_loss
-        self.MAX_POSITIONS = budget.max_positions
-        self.MAX_POSITIONS_PER_DAY = budget.max_positions_per_day
-        self.MAX_SECTOR_CONCENTRATION = rg.max_sector_concentration
-        self.MAX_MARGIN_UTILIZATION = rg.max_margin_utilization
-        self.MAX_MARGIN_PER_TRADE_PCT = rg.max_margin_per_trade_pct
-        self.MAX_WEEKLY_LOSS_PCT = rg.max_weekly_loss_pct
-        self.MAX_DRAWDOWN_PCT = rg.max_drawdown_pct
-        self.MAX_SPREAD_PCT = rg.max_spread_pct
+        # Risk limits from scanner_settings.yaml — hot-reloaded every
+        # SETTINGS_RELOAD_INTERVAL_SECONDS at the top of pre_trade_check().
+        self.SETTINGS_RELOAD_INTERVAL_SECONDS = 30
+        self._settings_loaded_at: float = 0.0
+        self._apply_scanner_settings()
         self.MIN_EXCESS_LIQUIDITY_PCT = 0.10  # Safety invariant — keep hardcoded
 
         # Weekly/drawdown tracking (persisted to JSON file)
@@ -197,6 +186,36 @@ class RiskGovernor:
         logger.info(f"  Max Spread: {self.MAX_SPREAD_PCT:.0%} of mid")
         logger.info(f"  Earnings check: Enabled")
 
+    def _apply_scanner_settings(self) -> None:
+        """Load risk limits from scanner_settings.yaml and update instance attrs."""
+        from src.agentic.scanner_settings import load_scanner_settings
+
+        scanner = load_scanner_settings()
+        rg = scanner.risk_governor
+        budget = scanner.budget
+
+        self.MAX_DAILY_LOSS_PCT = rg.max_daily_loss_pct
+        self.MAX_POSITION_LOSS = rg.max_position_loss
+        self.MAX_POSITIONS = budget.max_positions
+        self.MAX_POSITIONS_PER_DAY = budget.max_positions_per_day
+        self.MAX_SECTOR_CONCENTRATION = rg.max_sector_concentration
+        self.MAX_MARGIN_UTILIZATION = rg.max_margin_utilization
+        self.MAX_MARGIN_PER_TRADE_PCT = rg.max_margin_per_trade_pct
+        self.MAX_WEEKLY_LOSS_PCT = rg.max_weekly_loss_pct
+        self.MAX_DRAWDOWN_PCT = rg.max_drawdown_pct
+        self.MAX_SPREAD_PCT = rg.max_spread_pct
+        self._settings_loaded_at = time.monotonic()
+
+    def _reload_settings_if_stale(self) -> None:
+        """Re-read scanner_settings.yaml if the TTL has expired.
+
+        Called at the top of pre_trade_check() so dashboard changes to
+        risk limits take effect within SETTINGS_RELOAD_INTERVAL_SECONDS
+        without restarting the process.
+        """
+        if time.monotonic() - self._settings_loaded_at >= self.SETTINGS_RELOAD_INTERVAL_SECONDS:
+            self._apply_scanner_settings()
+
     def pre_trade_check(self, opportunity: TradeOpportunity) -> RiskLimitCheck:
         """Check all risk limits before placing trade.
 
@@ -223,6 +242,9 @@ class RiskGovernor:
             ...     logger.warning(f"Trade rejected: {check.reason}")
         """
         logger.debug(f"Pre-trade risk check for {opportunity.symbol}...")
+
+        # Hot-reload risk limits from YAML if stale (dashboard changes)
+        self._reload_settings_if_stale()
 
         # Reset daily counter if new day
         self._reset_daily_counters_if_needed()
