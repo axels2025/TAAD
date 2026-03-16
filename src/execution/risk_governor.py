@@ -10,8 +10,10 @@ This module enforces risk limits and circuit breakers:
 - Emergency shutdown capability
 """
 
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -111,6 +113,7 @@ class RiskGovernor:
         position_monitor: PositionMonitor,
         config: Config,
         kill_switch: KillSwitch | None = None,
+        equity_state_file: Path | str | None = None,
     ):
         """Initialize risk governor.
 
@@ -119,6 +122,7 @@ class RiskGovernor:
             position_monitor: Position monitor instance
             config: System configuration
             kill_switch: Optional KillSwitch instance. Created automatically if None.
+            equity_state_file: Path to equity state JSON file. None uses default.
         """
         self.ibkr_client = ibkr_client
         self.position_monitor = position_monitor
@@ -157,10 +161,17 @@ class RiskGovernor:
         self.MAX_DRAWDOWN_PCT = rg.max_drawdown_pct
         self.MIN_EXCESS_LIQUIDITY_PCT = 0.10  # Safety invariant — keep hardcoded
 
-        # Weekly/drawdown tracking
+        # Weekly/drawdown tracking (persisted to JSON file)
+        self._equity_state_file = (
+            Path(equity_state_file)
+            if equity_state_file
+            else Path("data/risk_governor_equity.json")
+        )
+        self._equity_state_file.parent.mkdir(parents=True, exist_ok=True)
         self._week_start_equity: float = 0.0
         self._week_start_date: datetime | None = None
         self._peak_equity: float = 0.0
+        self._load_equity_state()
 
         logger.info("Initialized RiskGovernor with limits:")
         logger.info(f"  Max Daily Loss: {self.MAX_DAILY_LOSS_PCT:.1%}")
@@ -509,6 +520,51 @@ class RiskGovernor:
             logger.error(f"Failed to load today's trade count: {e}")
             return 0
 
+    def _load_equity_state(self) -> None:
+        """Load weekly/drawdown equity baselines from JSON file.
+
+        Survives process restarts. Falls back to defaults (0.0/None) if
+        file is missing or corrupt — the checks will re-seed from current equity.
+        """
+        if not self._equity_state_file.exists():
+            return
+
+        try:
+            with open(self._equity_state_file) as f:
+                data = json.load(f)
+
+            self._week_start_equity = float(data.get("week_start_equity", 0.0))
+            self._peak_equity = float(data.get("peak_equity", 0.0))
+
+            week_start_str = data.get("week_start_date")
+            if week_start_str:
+                self._week_start_date = datetime.fromisoformat(week_start_str)
+
+            logger.info(
+                f"Loaded equity state: week_start=${self._week_start_equity:,.0f}, "
+                f"peak=${self._peak_equity:,.0f}"
+            )
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+            logger.warning(f"Corrupt equity state file, using defaults: {e}")
+
+    def _save_equity_state(self) -> None:
+        """Persist weekly/drawdown equity baselines to JSON file."""
+        try:
+            data = {
+                "week_start_equity": self._week_start_equity,
+                "week_start_date": (
+                    self._week_start_date.isoformat()
+                    if self._week_start_date
+                    else None
+                ),
+                "peak_equity": self._peak_equity,
+                "updated_at": datetime.now().isoformat(),
+            }
+            with open(self._equity_state_file, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save equity state: {e}")
+
     def _check_weekly_loss_limit(self) -> RiskLimitCheck:
         """Check weekly loss circuit breaker.
 
@@ -541,6 +597,7 @@ class RiskGovernor:
         ):
             self._week_start_equity = current_equity
             self._week_start_date = now
+            self._save_equity_state()
             logger.info(f"Weekly equity reset: ${current_equity:,.0f}")
 
         weekly_pnl_pct = (
@@ -594,8 +651,11 @@ class RiskGovernor:
                 utilization_pct=0.0,
             )
 
-        # Track peak equity
+        # Track peak equity (persist only when it changes)
+        old_peak = self._peak_equity
         self._peak_equity = max(self._peak_equity, current_equity)
+        if self._peak_equity != old_peak:
+            self._save_equity_state()
 
         drawdown_pct = (current_equity - self._peak_equity) / self._peak_equity
 

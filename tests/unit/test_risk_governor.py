@@ -3,6 +3,7 @@
 Tests risk limit enforcement and circuit breakers.
 """
 
+import json
 import os
 import tempfile
 from datetime import datetime, timedelta
@@ -1468,3 +1469,188 @@ class TestDailyLossWithRealizedPnL:
         assert status["daily_pnl_realized"] == 100.0
         assert status["daily_pnl_unrealized"] == 25.0
         assert status["daily_pnl"] == 125.0
+
+
+class TestEquityStatePersistence:
+    """Test that weekly/drawdown equity baselines survive process restarts."""
+
+    def _make_governor(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path,
+        equity_file_name="equity.json",
+    ):
+        """Helper to create a RiskGovernor with isolated equity state file."""
+        ks = KillSwitch(halt_file=tmp_path / "ks.json", register_signals=False)
+        equity_file = tmp_path / equity_file_name
+        with patch(
+            "src.execution.risk_governor.RiskGovernor._load_trades_today_from_db",
+            return_value=0,
+        ):
+            return RiskGovernor(
+                ibkr_client=mock_ibkr_client,
+                position_monitor=mock_position_monitor,
+                config=config,
+                kill_switch=ks,
+                equity_state_file=equity_file,
+            ), equity_file
+
+    def test_equity_state_persisted_to_file(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path
+    ):
+        """Weekly and drawdown checks persist equity baselines to JSON file."""
+        governor, equity_file = self._make_governor(
+            mock_ibkr_client, mock_position_monitor, config, tmp_path
+        )
+
+        # Trigger weekly reset (first run, _week_start_equity == 0)
+        governor._check_weekly_loss_limit()
+        # Trigger peak update (first run, _peak_equity == 0)
+        governor._check_max_drawdown()
+
+        assert equity_file.exists()
+        data = json.loads(equity_file.read_text())
+        assert data["week_start_equity"] == 100000.0
+        assert data["peak_equity"] == 100000.0
+        assert data["week_start_date"] is not None
+
+    def test_equity_state_loaded_on_init(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path
+    ):
+        """Constructor loads persisted equity baselines from JSON file."""
+        equity_file = tmp_path / "equity.json"
+        equity_file.write_text(json.dumps({
+            "week_start_equity": 98000.0,
+            "week_start_date": "2026-03-10T09:30:00",
+            "peak_equity": 105000.0,
+        }))
+
+        ks = KillSwitch(halt_file=tmp_path / "ks.json", register_signals=False)
+        with patch(
+            "src.execution.risk_governor.RiskGovernor._load_trades_today_from_db",
+            return_value=0,
+        ):
+            governor = RiskGovernor(
+                ibkr_client=mock_ibkr_client,
+                position_monitor=mock_position_monitor,
+                config=config,
+                kill_switch=ks,
+                equity_state_file=equity_file,
+            )
+
+        assert governor._week_start_equity == 98000.0
+        assert governor._peak_equity == 105000.0
+        assert governor._week_start_date == datetime.fromisoformat("2026-03-10T09:30:00")
+
+    def test_weekly_loss_survives_restart(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path
+    ):
+        """After restart, week_start_equity from file triggers weekly limit."""
+        equity_file = tmp_path / "equity.json"
+        equity_file.write_text(json.dumps({
+            "week_start_equity": 100000.0,
+            "week_start_date": datetime.now().isoformat(),  # Not Monday
+            "peak_equity": 100000.0,
+        }))
+
+        # Current equity dropped to $94,000 (-6%, exceeds -5% limit)
+        mock_ibkr_client.get_account_summary.return_value = {
+            "NetLiquidation": 94000.0,
+            "AvailableFunds": 70000.0,
+            "BuyingPower": 150000.0,
+            "ExcessLiquidity": 40000.0,
+        }
+
+        ks = KillSwitch(halt_file=tmp_path / "ks.json", register_signals=False)
+        with patch(
+            "src.execution.risk_governor.RiskGovernor._load_trades_today_from_db",
+            return_value=0,
+        ):
+            governor = RiskGovernor(
+                ibkr_client=mock_ibkr_client,
+                position_monitor=mock_position_monitor,
+                config=config,
+                kill_switch=ks,
+                equity_state_file=equity_file,
+            )
+
+        result = governor._check_weekly_loss_limit()
+
+        assert not result.approved
+        assert result.limit_name == "weekly_loss"
+        assert governor.is_halted()
+
+    def test_drawdown_survives_restart(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path
+    ):
+        """After restart, peak_equity from file triggers drawdown limit."""
+        equity_file = tmp_path / "equity.json"
+        equity_file.write_text(json.dumps({
+            "week_start_equity": 100000.0,
+            "week_start_date": datetime.now().isoformat(),
+            "peak_equity": 100000.0,
+        }))
+
+        # Current equity dropped to $89,000 (-11%, exceeds -10% limit)
+        mock_ibkr_client.get_account_summary.return_value = {
+            "NetLiquidation": 89000.0,
+            "AvailableFunds": 60000.0,
+            "BuyingPower": 120000.0,
+            "ExcessLiquidity": 30000.0,
+        }
+
+        ks = KillSwitch(halt_file=tmp_path / "ks.json", register_signals=False)
+        with patch(
+            "src.execution.risk_governor.RiskGovernor._load_trades_today_from_db",
+            return_value=0,
+        ):
+            governor = RiskGovernor(
+                ibkr_client=mock_ibkr_client,
+                position_monitor=mock_position_monitor,
+                config=config,
+                kill_switch=ks,
+                equity_state_file=equity_file,
+            )
+
+        result = governor._check_max_drawdown()
+
+        assert not result.approved
+        assert result.limit_name == "max_drawdown"
+        assert governor.is_halted()
+
+    def test_corrupt_equity_file_falls_back_to_zero(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path
+    ):
+        """Corrupt JSON file falls back to defaults without crashing."""
+        equity_file = tmp_path / "equity.json"
+        equity_file.write_text("not valid json {{{")
+
+        governor, _ = self._make_governor(
+            mock_ibkr_client, mock_position_monitor, config, tmp_path,
+            equity_file_name="equity.json",
+        )
+
+        assert governor._week_start_equity == 0.0
+        assert governor._peak_equity == 0.0
+        assert governor._week_start_date is None
+
+    def test_peak_equity_only_saves_on_change(
+        self, mock_ibkr_client, mock_position_monitor, config, tmp_path
+    ):
+        """File is not rewritten when peak equity doesn't change."""
+        governor, equity_file = self._make_governor(
+            mock_ibkr_client, mock_position_monitor, config, tmp_path
+        )
+
+        # First call: sets peak to 100k, writes file
+        governor._check_max_drawdown()
+        assert equity_file.exists()
+        mtime1 = equity_file.stat().st_mtime
+
+        # Brief pause to ensure mtime would differ
+        import time
+        time.sleep(0.05)
+
+        # Second call: equity still 100k, peak unchanged, no write
+        governor._check_max_drawdown()
+        mtime2 = equity_file.stat().st_mtime
+
+        assert mtime1 == mtime2
