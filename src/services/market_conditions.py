@@ -24,10 +24,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from ib_async import Contract
+from src.broker.types import Contract
 from loguru import logger
 
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 @dataclass
@@ -88,7 +88,7 @@ class MarketConditionMonitor:
             await asyncio.sleep(300)  # Wait 5 minutes, check again
     """
 
-    def __init__(self, ibkr_client: IBKRClient):
+    def __init__(self, ibkr_client: BrokerClient):
         """Initialize market condition monitor.
 
         Args:

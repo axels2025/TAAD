@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from ib_async import LimitOrder, MarketOrder, Order
+from src.broker.types import LimitOrder, MarketOrder, Order
 from loguru import logger
 
 from src.utils.position_key import generate_trade_id
@@ -32,7 +32,7 @@ from src.data.repositories import TradeRepository
 from src.execution.risk_governor import RiskGovernor
 from src.services.market_calendar import MarketCalendar, MarketSession
 from src.strategies.base import TradeOpportunity
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 class OrderStatus(Enum):
@@ -118,7 +118,7 @@ class OrderExecutor:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         config: Config,
         trade_repository: TradeRepository | None = None,
         dry_run: bool = True,

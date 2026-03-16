@@ -14,7 +14,7 @@ Key features:
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from src.broker.protocols import BrokerClient
 
 from loguru import logger
 
@@ -201,27 +201,6 @@ class PortfolioPlan:
         return any(t.margin_source == "estimated" for t in self.trades)
 
 
-class IBKRClientProtocol(Protocol):
-    """Protocol for IBKR client dependency injection."""
-
-    def get_account_summary(self) -> dict | None:
-        """Get account summary including NLV."""
-        ...
-
-    def get_actual_margin(self, contract, quantity: int = 1) -> float | None:
-        """Get actual margin via whatIfOrder."""
-        ...
-
-    def get_option_contract(
-        self, symbol: str, strike: float, expiration: str, right: str
-    ):
-        """Create an option contract."""
-        ...
-
-    def qualify_contract(self, contract) -> list:
-        """Qualify a contract with IBKR."""
-        ...
-
 
 class PortfolioBuilder:
     """Build an optimal portfolio of naked put trades within margin constraints.
@@ -245,7 +224,7 @@ class PortfolioBuilder:
 
     def __init__(
         self,
-        ibkr_client: IBKRClientProtocol | None = None,
+        ibkr_client: BrokerClient | None = None,
         config: PortfolioConfig | None = None,
         db_session = None,
     ):
@@ -606,7 +585,7 @@ class PortfolioBuilder:
                 f"Retrying margin for {len(failed_indices)} candidates "
                 f"that failed first attempt..."
             )
-            self.ibkr_client.ib.sleep(1.0)  # Let IBKR settle
+            self.ibkr_client.wait(1.0)  # Let IBKR settle
 
             for i in failed_indices:
                 actual_margin = self._get_single_margin(updated_candidates[i])
@@ -641,7 +620,7 @@ class PortfolioBuilder:
                         score=old.score,
                         source=old.source,
                     )
-                self.ibkr_client.ib.sleep(0.2)  # Pace retries
+                self.ibkr_client.wait(0.2)  # Pace retries
 
         actual_count = sum(1 for c in updated_candidates if c.margin_actual)
         logger.info(

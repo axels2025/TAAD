@@ -39,12 +39,11 @@ def mock_ibkr_client():
     client.place_order = AsyncMock()
     client.cancel_order = AsyncMock()
     client.sleep = AsyncMock()
-    # RapidFireExecutor.__init__ does: self.client.ib.orderStatusEvent += handler
-    # Mock needs __iadd__ support on the orderStatusEvent attribute
+    # RapidFireExecutor.__init__ does: self.client.order_status_event += handler
+    # Mock needs __iadd__ support on the order_status_event property
     order_status_event = Mock()
     order_status_event.__iadd__ = Mock(return_value=order_status_event)
-    client.ib = Mock()
-    client.ib.orderStatusEvent = order_status_event
+    client.order_status_event = order_status_event
     return client
 
 
@@ -224,8 +223,8 @@ class TestEventDrivenMonitoring:
         mock_ibkr_client,
     ):
         """Test that orderStatusEvent callback is registered."""
-        # Verify callback was registered on ib.orderStatusEvent
-        assert mock_ibkr_client.ib.orderStatusEvent.__iadd__.called
+        # Verify callback was registered on order_status_event
+        assert mock_ibkr_client.order_status_event.__iadd__.called
 
     @pytest.mark.asyncio
     async def test_on_order_status_updates_pending(
@@ -616,7 +615,7 @@ class TestCleanup:
         )
 
         # Enable -= operator on mock event
-        order_status_event = mock_ibkr_client.ib.orderStatusEvent
+        order_status_event = mock_ibkr_client.order_status_event
         order_status_event.__isub__ = Mock(return_value=order_status_event)
 
         rapid_fire_executor.cleanup()
@@ -629,7 +628,7 @@ class TestCleanup:
         mock_ibkr_client,
     ):
         """Test that cleanup() removes the orderStatusEvent handler."""
-        order_status_event = mock_ibkr_client.ib.orderStatusEvent
+        order_status_event = mock_ibkr_client.order_status_event
         order_status_event.__isub__ = Mock(return_value=order_status_event)
 
         rapid_fire_executor.cleanup()

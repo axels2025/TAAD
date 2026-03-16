@@ -284,7 +284,7 @@ class EntrySnapshotService:
         import os
         import time as time_mod
 
-        ticker = self.ibkr.ib.reqMktData(qualified_contract, "", False, False)
+        ticker = self.ibkr.subscribe_market_data(qualified_contract)
 
         # Poll until modelGreeks arrive or timeout
         greeks_timeout = float(os.getenv("SNAPSHOT_GREEKS_TIMEOUT", "5.0"))
@@ -292,7 +292,7 @@ class EntrySnapshotService:
         start = time_mod.time()
 
         while (time_mod.time() - start) < greeks_timeout:
-            self.ibkr.ib.sleep(poll_interval)
+            self.ibkr.wait(poll_interval)
 
             # Greeks are the slowest to arrive — break early when they're ready
             if (
@@ -349,7 +349,7 @@ class EntrySnapshotService:
             snapshot.volume_oi_ratio = snapshot.option_volume / snapshot.open_interest
 
         # Cancel subscription
-        self.ibkr.ib.cancelMktData(qualified_contract)
+        self.ibkr.cancel_market_data(qualified_contract)
 
     def _capture_volatility_data(
         self,

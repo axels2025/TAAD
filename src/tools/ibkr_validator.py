@@ -11,11 +11,11 @@ Provides IBKR-based option enrichment and validation utilities:
 from datetime import datetime, timedelta
 from typing import Optional
 
-from ib_async import Option
+from src.broker.types import Option
 from loguru import logger
 
 from src.utils.timezone import us_trading_date
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 from src.utils.market_data import safe_bid_ask
 
 
@@ -28,7 +28,7 @@ class IBKRValidator:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
     ):
         """Initialize IBKR validator.
 
@@ -78,7 +78,7 @@ class IBKRValidator:
                 currency="USD",
             )
 
-            qualified = self.ibkr_client.ib.qualifyContracts(contract)
+            qualified = self.ibkr_client.qualify_contracts_batch(contract)
             if not qualified or not qualified[0].conId:
                 logger.debug(
                     f"{symbol} ${strike} {expiration}: Contract qualification failed - "
@@ -86,8 +86,8 @@ class IBKRValidator:
                 )
                 return None
 
-            ticker = self.ibkr_client.ib.reqMktData(qualified[0], snapshot=True)
-            self.ibkr_client.ib.sleep(2.5)  # Increased for delayed data to populate
+            ticker = self.ibkr_client.subscribe_market_data(qualified[0], snapshot=True)
+            self.ibkr_client.wait(2.5)  # Increased for delayed data to populate
 
             bid, ask = safe_bid_ask(ticker)
 
@@ -112,7 +112,7 @@ class IBKRValidator:
                     "Contract may be illiquid."
                 )
 
-            self.ibkr_client.ib.cancelMktData(qualified[0])
+            self.ibkr_client.cancel_market_data(qualified[0])
 
             if bid is None or ask is None:
                 return None
@@ -154,7 +154,7 @@ class IBKRValidator:
                 currency="USD",
             )
 
-            qualified = self.ibkr_client.ib.qualifyContracts(contract)
+            qualified = self.ibkr_client.qualify_contracts_batch(contract)
             if not qualified or not qualified[0].conId:
                 logger.debug(f"Could not qualify contract for {symbol} ${strike}")
                 return None
@@ -215,14 +215,12 @@ class IBKRValidator:
             if not qualified:
                 return "unknown"
 
-            bars = self.ibkr_client.ib.reqHistoricalData(
+            bars = self.ibkr_client.get_historical_bars(
                 qualified,
-                endDateTime="",
-                durationStr="30 D",
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
+                duration="30 D",
+                bar_size="1 day",
+                what_to_show="TRADES",
+                use_rth=True,
             )
 
             if not bars or len(bars) < 20:
@@ -262,14 +260,12 @@ class IBKRValidator:
                 return None
 
             # Request 1 year of historical implied volatility
-            bars = self.ibkr_client.ib.reqHistoricalData(
+            bars = self.ibkr_client.get_historical_bars(
                 qualified,
-                endDateTime="",
-                durationStr="1 Y",
-                barSizeSetting="1 day",
-                whatToShow="OPTION_IMPLIED_VOLATILITY",
-                useRTH=True,
-                formatDate=1,
+                duration="1 Y",
+                bar_size="1 day",
+                what_to_show="OPTION_IMPLIED_VOLATILITY",
+                use_rth=True,
             )
 
             if not bars or len(bars) < 20:
@@ -365,8 +361,8 @@ class IBKRValidator:
                 return None
 
             # Step 3: Get real-time option quotes (snapshot mode)
-            ticker = self.ibkr_client.ib.reqMktData(qualified, "", True, False)
-            self.ibkr_client.ib.sleep(2)  # Wait for data
+            ticker = self.ibkr_client.subscribe_market_data(qualified, snapshot=True)
+            self.ibkr_client.wait(2)  # Wait for data
 
             bid = ticker.bid if ticker.bid and ticker.bid > 0 else None
             ask = ticker.ask if ticker.ask and ticker.ask > 0 else None
@@ -380,7 +376,7 @@ class IBKRValidator:
                 if hasattr(ticker.modelGreeks, "impliedVol"):
                     iv = ticker.modelGreeks.impliedVol
 
-            self.ibkr_client.ib.cancelMktData(qualified)
+            self.ibkr_client.cancel_market_data(qualified)
 
             # Determine pricing source
             pricing_source = "live"

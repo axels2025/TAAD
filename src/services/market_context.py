@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from ib_async import Stock, Index
+from src.broker.types import Stock, Index
 from loguru import logger
 
 from src.config.exchange_profile import get_active_profile
@@ -225,13 +225,13 @@ class MarketContextService:
         """
         try:
             stock = Stock(symbol, self._profile.ibkr_exchange, self._profile.currency)
-            qualified = self.ibkr.ib.qualifyContracts(stock)
+            qualified = self.ibkr.qualify_contracts_batch(stock)
             if not qualified or qualified[0] is None:
                 return None
 
             # Request fundamental data (includes sector)
             contract = qualified[0]
-            fundamentals = self.ibkr.ib.reqFundamentalData(contract, "ReportsFinSummary")
+            fundamentals = self.ibkr.get_fundamental_data(contract, report_type="ReportsFinSummary")
 
             # Parse XML to extract sector (simplified - may need more robust parsing)
             if fundamentals and "<sector>" in fundamentals.lower():
@@ -275,14 +275,12 @@ class MarketContextService:
             # Need to qualify for reqHistoricalData
             qualified = self.ibkr.qualify_contract(etf)
             if qualified:
-                bars = self.ibkr.ib.reqHistoricalData(
+                bars = self.ibkr.get_historical_bars(
                     qualified,
-                    endDateTime="",
-                    durationStr="10 D",
-                    barSizeSetting="1 day",
-                    whatToShow="TRADES",
-                    useRTH=True,
-                    formatDate=1,
+                    duration="10 D",
+                    bar_size="1 day",
+                    what_to_show="TRADES",
+                    use_rth=True,
                 )
 
                 if bars and len(bars) >= 5:

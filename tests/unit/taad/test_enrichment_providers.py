@@ -100,7 +100,7 @@ class TestIBKRHistoricalProvider:
     def test_disconnected_client_returns_none(self):
         """Disconnected IBKR client should return None."""
         mock_client = MagicMock()
-        mock_client.ib.isConnected.return_value = False
+        mock_client.is_connected.return_value = False
 
         provider = IBKRHistoricalProvider(ibkr_client=mock_client)
         assert provider.get_stock_bar("AAPL", date(2025, 1, 15)) is None

@@ -35,17 +35,12 @@ def _make_ibkr_client():
     # get_margin_requirement() returns None by default
     client.get_margin_requirement.return_value = None
 
-    # ib sub-object
-    client.ib = MagicMock()
-    # qualifyContracts returns empty list (nothing qualified) so
+    # qualify_contract returns None (nothing qualified) so
     # _qualify_option_contract returns None and _capture_option_data is skipped.
-    client.ib.qualifyContracts.return_value = []
-    client.ib.reqMktData.return_value = Mock()
-    client.ib.sleep.return_value = None
-    client.ib.cancelMktData.return_value = None
-
-    # reqHistoricalData returns empty list (no historical bars)
-    client.ib.reqHistoricalData.return_value = []
+    client.qualify_contract.return_value = None
+    client.subscribe_market_data.return_value = Mock()
+    client.wait.return_value = None
+    client.cancel_market_data.return_value = None
 
     return client
 
@@ -225,8 +220,8 @@ class TestCaptureOptionData:
             captured_at=datetime.now(),
         )
         mock_contract = Mock()
-        mock_ibkr_client.ib.reqMktData.return_value = mock_option_ticker
-        mock_ibkr_client.ib.sleep.return_value = None
+        mock_ibkr_client.subscribe_market_data.return_value = mock_option_ticker
+        mock_ibkr_client.wait.return_value = None
 
         # Act — market closed so Greeks path is skipped, but pricing is captured
         entry_service._capture_option_data(snapshot, mock_contract, market_is_open=False)
@@ -262,8 +257,8 @@ class TestCaptureOptionData:
         mock_ticker.volume = 0
 
         mock_contract = Mock()
-        mock_ibkr_client.ib.reqMktData.return_value = mock_ticker
-        mock_ibkr_client.ib.sleep.return_value = None
+        mock_ibkr_client.subscribe_market_data.return_value = mock_ticker
+        mock_ibkr_client.wait.return_value = None
 
         # Act
         entry_service._capture_option_data(snapshot, mock_contract, market_is_open=False)
@@ -290,8 +285,8 @@ class TestCaptureOptionData:
             captured_at=datetime.now(),
         )
         mock_contract = Mock()
-        mock_ibkr_client.ib.reqMktData.return_value = mock_option_ticker
-        mock_ibkr_client.ib.sleep.return_value = None
+        mock_ibkr_client.subscribe_market_data.return_value = mock_option_ticker
+        mock_ibkr_client.wait.return_value = None
 
         # Act — market open, Greeks should be captured
         entry_service._capture_option_data(snapshot, mock_contract, market_is_open=True)
@@ -329,8 +324,8 @@ class TestCaptureOptionData:
         mock_ticker.volume = 0
 
         mock_contract = Mock()
-        mock_ibkr_client.ib.reqMktData.return_value = mock_ticker
-        mock_ibkr_client.ib.sleep.return_value = None
+        mock_ibkr_client.subscribe_market_data.return_value = mock_ticker
+        mock_ibkr_client.wait.return_value = None
 
         # Act — market open but no Greeks available
         entry_service._capture_option_data(snapshot, mock_contract, market_is_open=True)
@@ -359,8 +354,8 @@ class TestCaptureOptionData:
             captured_at=datetime.now(),
         )
         mock_contract = Mock()
-        mock_ibkr_client.ib.reqMktData.return_value = mock_option_ticker
-        mock_ibkr_client.ib.sleep.return_value = None
+        mock_ibkr_client.subscribe_market_data.return_value = mock_option_ticker
+        mock_ibkr_client.wait.return_value = None
 
         # Act
         entry_service._capture_option_data(snapshot, mock_contract, market_is_open=False)
@@ -395,8 +390,8 @@ class TestCaptureVolatilityData:
             captured_at=datetime.now(),
         )
         mock_contract = Mock()
-        mock_ibkr_client.ib.reqMktData.return_value = mock_option_ticker
-        mock_ibkr_client.ib.sleep.return_value = None
+        mock_ibkr_client.subscribe_market_data.return_value = mock_option_ticker
+        mock_ibkr_client.wait.return_value = None
 
         # Act - _capture_option_data sets IV from modelGreeks.impliedVol
         entry_service._capture_option_data(snapshot, mock_contract, market_is_open=True)

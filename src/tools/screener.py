@@ -7,11 +7,11 @@ price, volume, and trend analysis to find candidates for the strategy.
 from typing import Literal
 
 import pandas as pd
-from ib_async import Stock
+from src.broker.types import Stock
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 from src.tools.stock_universe import StockUniverseManager
 
 
@@ -39,7 +39,7 @@ class StockScreener:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         config: BaselineStrategy | None = None,
         universe_manager: StockUniverseManager | None = None,
     ):
@@ -330,14 +330,13 @@ class StockScreener:
             DataFrame with OHLCV data or None
         """
         try:
-            bars = self.ibkr_client.ib.reqHistoricalData(
+            bars = self.ibkr_client.get_historical_bars(
                 contract,
-                endDateTime="",
-                durationStr=f"{days} D",
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
+                duration=f"{days} D",
+                bar_size="1 day",
+                what_to_show="TRADES",
+                use_rth=True,
+                end_date_time="",
             )
 
             if not bars:
@@ -403,8 +402,8 @@ class StockScreener:
         """
         try:
             # Request fundamental data
-            fundamentals = self.ibkr_client.ib.reqFundamentalData(
-                contract, reportType="ReportSnapshot"
+            fundamentals = self.ibkr_client.get_fundamental_data(
+                contract, report_type="ReportSnapshot"
             )
 
             if fundamentals:

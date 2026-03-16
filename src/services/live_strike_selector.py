@@ -414,11 +414,10 @@ class LiveStrikeSelector:
                 logger.debug(f"{symbol}: Could not qualify stock contract")
                 return []
 
-            chains = self.client.ib.reqSecDefOptParams(
+            chains = self.client.get_option_chain_definitions(
                 qualified.symbol,
-                "",
-                qualified.secType,
-                qualified.conId,
+                sec_type=qualified.secType,
+                con_id=qualified.conId,
             )
 
             if not chains:
@@ -544,7 +543,7 @@ class LiveStrikeSelector:
         tickers: dict[float, any] = {}
         for strike, contract in qualified_map.items():
             try:
-                ticker = self.client.ib.reqMktData(contract, "", False, False)
+                ticker = self.client.subscribe_market_data(contract)
                 tickers[strike] = (ticker, contract)
             except Exception as e:
                 logger.debug(f"{symbol} ${strike}: reqMktData failed: {e}")
@@ -556,7 +555,7 @@ class LiveStrikeSelector:
         greeks_timeout = float(os.getenv("GREEKS_WAIT_TIMEOUT", "5.0"))
         wait_iterations = int(greeks_timeout / 0.5)
         for _ in range(wait_iterations):
-            self.client.ib.sleep(0.5)
+            self.client.wait(0.5)
 
             # Check if all tickers have Greeks
             all_have_greeks = all(
@@ -626,7 +625,7 @@ class LiveStrikeSelector:
                 logger.debug(f"{symbol} ${strike}: Error reading Greeks: {e}")
             finally:
                 try:
-                    self.client.ib.cancelMktData(contract)
+                    self.client.cancel_market_data(contract)
                 except Exception:
                     pass
 

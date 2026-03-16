@@ -13,13 +13,15 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 
-from ib_async import Contract, LimitOrder, TagValue
+from ib_async import TagValue
+from src.broker.types import Contract, LimitOrder
 from loguru import logger
 
 from src.services.limit_price_calculator import LimitPriceCalculator
 from src.services.market_calendar import MarketCalendar, MarketSession
 from src.services.premarket_validator import StagedOpportunity
-from src.tools.ibkr_client import IBKRClient, Quote
+from src.broker.protocols import BrokerClient
+from src.tools.ibkr_client import Quote
 
 
 class OrderStatus(Enum):
@@ -135,7 +137,7 @@ class AdaptiveOrderExecutor:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         limit_calc: LimitPriceCalculator,
     ):
         """Initialize the adaptive order executor.

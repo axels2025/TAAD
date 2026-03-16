@@ -431,7 +431,7 @@ class FillManager:
                 outsideRth=False,
             )
 
-            trade = self.client.ib.placeOrder(pending.contract, order)
+            trade = self.client.place_order_sync(pending.contract, order, reason="fill_manager")
             await self.client.sleep(0.2)
 
             if trade and trade.order.orderId:
@@ -521,7 +521,7 @@ class FillManager:
                 outsideRth=False,
             )
 
-            trade = self.client.ib.placeOrder(pending.contract, order)
+            trade = self.client.place_order_sync(pending.contract, order, reason="fill_manager")
             await self.client.sleep(0.2)
 
             if trade and trade.order.orderId:

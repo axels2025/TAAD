@@ -18,9 +18,9 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Protocol
+from src.broker.protocols import BrokerClient
 
-from ib_async import LimitOrder
+from src.broker.types import LimitOrder
 from loguru import logger
 
 from src.services.adaptive_order_executor import AdaptiveOrderExecutor
@@ -207,31 +207,6 @@ class ExecutionReport:
         return self.filled_count / self.executed_count
 
 
-class IBKRClientProtocol(Protocol):
-    """Protocol for IBKR client dependency injection."""
-
-    def get_stock_price(self, symbol: str) -> float | None:
-        """Get current stock price."""
-        ...
-
-    def get_option_quote(
-        self, symbol: str, strike: float, expiration: str, right: str
-    ) -> dict | None:
-        """Get option quote."""
-        ...
-
-    def place_order(self, contract, order) -> int | None:
-        """Place an order."""
-        ...
-
-    def get_order_status(self, order_id: int) -> dict | None:
-        """Get order status."""
-        ...
-
-    def cancel_order(self, order_id: int) -> bool:
-        """Cancel an order."""
-        ...
-
 
 class ExecutionScheduler:
     """Orchestrate automated trade execution at market open.
@@ -250,7 +225,7 @@ class ExecutionScheduler:
 
     def __init__(
         self,
-        ibkr_client: IBKRClientProtocol | None = None,
+        ibkr_client: BrokerClient | None = None,
         validator: PremarketValidator | None = None,
         limit_calculator: LimitPriceCalculator | None = None,
         adaptive_executor: AdaptiveOrderExecutor | None = None,

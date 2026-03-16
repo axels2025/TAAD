@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from ib_async import LimitOrder, MarketOrder
+from src.broker.types import LimitOrder, MarketOrder
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy
@@ -21,7 +21,7 @@ from src.execution.position_monitor import PositionMonitor, PositionStatus
 from src.utils.calc import calc_pnl, calc_pnl_pct
 from src.utils.position_key import _normalize_right, position_key_from_trade
 from src.utils.timezone import us_eastern_now
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 def round_to_penny(price: float) -> float:
@@ -107,7 +107,7 @@ class ExitManager:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         position_monitor: PositionMonitor,
         config: BaselineStrategy,
         dry_run: bool = False,

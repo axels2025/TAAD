@@ -13,14 +13,14 @@ This is how successful scanners like Barchart work.
 from datetime import datetime, timedelta
 from typing import Literal, Optional
 
-from ib_async import Option
+from src.broker.types import Option
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy
 from src.config.exchange_profile import get_active_profile
 from src.utils.calc import fmt_pct
 from src.utils.timezone import trading_date
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 from src.tools.scanner_cache import ScannerCache
 from src.utils.market_data import safe_bid_ask, safe_price
 
@@ -113,7 +113,7 @@ class EfficientOptionScanner:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         config: BaselineStrategy | None = None,
         cache: ScannerCache | None = None,
         universe: list[str] | None = None,
@@ -330,11 +330,10 @@ class EfficientOptionScanner:
             if not qualified_stock:
                 return None
 
-            chains = self.ibkr_client.ib.reqSecDefOptParams(
+            chains = self.ibkr_client.get_option_chain_definitions(
                 qualified_stock.symbol,
-                "",
-                qualified_stock.secType,
-                qualified_stock.conId,
+                sec_type=qualified_stock.secType,
+                con_id=qualified_stock.conId,
             )
 
             if not chains:
@@ -378,14 +377,13 @@ class EfficientOptionScanner:
                 return None
 
             # Get recent bars
-            bars = self.ibkr_client.ib.reqHistoricalData(
+            bars = self.ibkr_client.get_historical_bars(
                 qualified,
-                endDateTime="",
-                durationStr="30 D",
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
+                duration="30 D",
+                bar_size="1 day",
+                what_to_show="TRADES",
+                use_rth=True,
+                end_date_time="",
             )
 
             if not bars or len(bars) < 20:
@@ -449,7 +447,7 @@ class EfficientOptionScanner:
 
             # Batch qualify
             try:
-                qualified_contracts = self.ibkr_client.ib.qualifyContracts(*contracts)
+                qualified_contracts = self.ibkr_client.qualify_contracts_batch(*contracts)
 
                 # Match qualified contracts back to candidates
                 for j, qualified_contract in enumerate(qualified_contracts):
@@ -496,8 +494,8 @@ class EfficientOptionScanner:
                 contract = option["contract"]
 
                 # Request market data snapshot (avoid competing live sessions)
-                ticker = self.ibkr_client.ib.reqMktData(contract, snapshot=True)
-                self.ibkr_client.ib.sleep(1.5)  # Brief wait for data
+                ticker = self.ibkr_client.subscribe_market_data(contract, snapshot=True)
+                self.ibkr_client.wait(1.5)  # Brief wait for data
 
                 # Extract premium (NaN-safe)
                 bid, ask = safe_bid_ask(ticker)
@@ -508,7 +506,7 @@ class EfficientOptionScanner:
                     premium = safe_price(ticker)
 
                 # Cancel market data
-                self.ibkr_client.ib.cancelMktData(contract)
+                self.ibkr_client.cancel_market_data(contract)
 
                 if premium and premium > 0:
                     option_copy = option.copy()

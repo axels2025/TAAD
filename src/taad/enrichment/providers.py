@@ -271,7 +271,7 @@ class IBKRHistoricalProvider(HistoricalDataProvider):
         if self.ibkr is None:
             return False
         try:
-            return self.ibkr.ib.isConnected()
+            return self.ibkr.is_connected()
         except Exception:
             return False
 
@@ -284,18 +284,17 @@ class IBKRHistoricalProvider(HistoricalDataProvider):
             from ib_async import Stock
 
             stock = Stock(symbol, "SMART", "USD")
-            qualified = self.ibkr.ib.qualifyContracts(stock)
+            qualified = self.ibkr.qualify_contracts_batch(stock)
             if not qualified or qualified[0] is None:
                 return None
 
-            bars = self.ibkr.ib.reqHistoricalData(
+            bars = self.ibkr.get_historical_bars(
                 qualified[0],
-                endDateTime=on_date.strftime("%Y%m%d 23:59:59"),
-                durationStr="5 D",
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
+                end_date_time=on_date.strftime("%Y%m%d 23:59:59"),
+                duration="5 D",
+                bar_size="1 day",
+                what_to_show="TRADES",
+                use_rth=True,
             )
 
             if not bars:
@@ -330,19 +329,18 @@ class IBKRHistoricalProvider(HistoricalDataProvider):
             from ib_async import Stock
 
             stock = Stock(symbol, "SMART", "USD")
-            qualified = self.ibkr.ib.qualifyContracts(stock)
+            qualified = self.ibkr.qualify_contracts_batch(stock)
             if not qualified or qualified[0] is None:
                 return None
 
             duration = f"{lookback_days + 30} D"
-            bars = self.ibkr.ib.reqHistoricalData(
+            bars = self.ibkr.get_historical_bars(
                 qualified[0],
-                endDateTime=end_date.strftime("%Y%m%d 23:59:59"),
-                durationStr=duration,
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
+                end_date_time=end_date.strftime("%Y%m%d 23:59:59"),
+                duration=duration,
+                bar_size="1 day",
+                what_to_show="TRADES",
+                use_rth=True,
             )
 
             if not bars:
@@ -373,18 +371,17 @@ class IBKRHistoricalProvider(HistoricalDataProvider):
             from ib_async import Index
 
             vix = Index("VIX", "CBOE")
-            qualified = self.ibkr.ib.qualifyContracts(vix)
+            qualified = self.ibkr.qualify_contracts_batch(vix)
             if not qualified or qualified[0] is None:
                 return None
 
-            bars = self.ibkr.ib.reqHistoricalData(
+            bars = self.ibkr.get_historical_bars(
                 qualified[0],
-                endDateTime=on_date.strftime("%Y%m%d 23:59:59"),
-                durationStr="5 D",
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
+                end_date_time=on_date.strftime("%Y%m%d 23:59:59"),
+                duration="5 D",
+                bar_size="1 day",
+                what_to_show="TRADES",
+                use_rth=True,
             )
 
             if bars:

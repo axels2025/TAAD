@@ -1973,6 +1973,254 @@ class IBKRClient:
         """
         await asyncio.sleep(seconds)
 
+    # ═════════════════════════════════════════════════════════════════════════
+    # WRAPPER METHODS (Eliminate direct .ib.* access in consumer code)
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def get_option_chain_definitions(
+        self,
+        underlying_symbol: str,
+        sec_type: str = "",
+        exchange: str = "",
+        con_id: int = 0,
+    ) -> list:
+        """Get available option chain definitions (expirations and strikes).
+
+        Wraps ib.reqSecDefOptParams(). Returns a list of
+        OptionChain objects with .exchange, .underlyingConId,
+        .tradingClass, .multiplier, .expirations (set), .strikes (set).
+
+        Args:
+            underlying_symbol: Underlying symbol (e.g. "AAPL", "SPX")
+            sec_type: Security type filter (e.g. "STK", "IND")
+            exchange: Exchange filter (e.g. "SMART", "CBOE")
+            con_id: Underlying contract ID (0 = any)
+
+        Returns:
+            List of OptionChain namedtuples from ib_async
+        """
+        self.ensure_connected()
+        try:
+            chains = self.ib.reqSecDefOptParams(
+                underlying_symbol, exchange, sec_type, con_id,
+            )
+            return chains if chains else []
+        except Exception as e:
+            logger.error(f"Error getting option chain definitions for {underlying_symbol}: {e}")
+            return []
+
+    def qualify_contracts_batch(self, *contracts: Contract) -> list:
+        """Qualify multiple contracts in a single request.
+
+        Wraps ib.qualifyContracts(). More efficient than calling
+        qualify_contract() in a loop. Returns results in the same
+        positional order as inputs (important for zip-based callers).
+
+        Args:
+            *contracts: One or more Contract objects to qualify
+
+        Returns:
+            List of Contract objects in same order as input.
+            Failed qualifications appear as the original unqualified contract
+            (with conId == 0).
+        """
+        self.ensure_connected()
+        try:
+            return self.ib.qualifyContracts(*contracts)
+        except Exception as e:
+            logger.error(f"Error qualifying {len(contracts)} contracts: {e}")
+            return []
+
+    def subscribe_market_data(
+        self,
+        contract: Contract,
+        generic_tick_list: str = "",
+        snapshot: bool = False,
+        regulatory_snapshot: bool = False,
+    ):
+        """Subscribe to streaming market data for a contract.
+
+        Wraps ib.reqMktData(). Returns a Ticker object that updates
+        in real-time. Caller must cancel with cancel_market_data() when done.
+
+        Args:
+            contract: Qualified contract
+            generic_tick_list: Comma-separated generic tick types
+            snapshot: Request a one-time snapshot
+            regulatory_snapshot: Request regulatory snapshot
+
+        Returns:
+            Ticker object from ib_async (updates in-place)
+        """
+        self.ensure_connected()
+        return self.ib.reqMktData(
+            contract, generic_tick_list, snapshot, regulatory_snapshot,
+        )
+
+    def cancel_market_data(self, contract: Contract) -> None:
+        """Cancel a market data subscription.
+
+        Wraps ib.cancelMktData(). Safe to call even if no subscription exists.
+
+        Args:
+            contract: Contract whose market data to cancel
+        """
+        try:
+            self.ib.cancelMktData(contract)
+        except Exception:
+            pass
+
+    def get_historical_bars(
+        self,
+        contract: Contract,
+        duration: str = "30 D",
+        bar_size: str = "1 day",
+        what_to_show: str = "TRADES",
+        use_rth: bool = True,
+        end_date_time: str = "",
+    ) -> list:
+        """Get historical bar data for a contract.
+
+        Wraps ib.reqHistoricalData().
+
+        Args:
+            contract: Qualified contract
+            duration: Duration string (e.g. "30 D", "1 Y")
+            bar_size: Bar size (e.g. "1 day", "1 hour", "5 mins")
+            what_to_show: Data type (TRADES, MIDPOINT, BID, ASK, etc.)
+            use_rth: Regular trading hours only
+            end_date_time: End date (empty string = now)
+
+        Returns:
+            List of BarData objects from ib_async
+        """
+        self.ensure_connected()
+        try:
+            bars = self.ib.reqHistoricalData(
+                contract,
+                endDateTime=end_date_time,
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow=what_to_show,
+                useRTH=use_rth,
+            )
+            return bars if bars else []
+        except Exception as e:
+            logger.error(f"Error getting historical bars for {contract.symbol}: {e}")
+            return []
+
+    def get_fundamental_data(
+        self,
+        contract: Contract,
+        report_type: str = "ReportsFinSummary",
+    ) -> str | None:
+        """Get fundamental data for a contract.
+
+        Wraps ib.reqFundamentalData().
+
+        Args:
+            contract: Qualified stock contract
+            report_type: Report type — ReportsFinSummary, ReportsOwnership,
+                         ReportSnapshot, ReportsFinStatements, RESC, CalendarReport
+
+        Returns:
+            XML string with fundamental data, or None on error
+        """
+        self.ensure_connected()
+        try:
+            return self.ib.reqFundamentalData(contract, report_type)
+        except Exception as e:
+            logger.error(f"Error getting fundamental data for {contract.symbol}: {e}")
+            return None
+
+    def what_if_order(self, contract: Contract, order: Order):
+        """Get what-if order analysis (margin, commission estimates).
+
+        Wraps ib.whatIfOrder(). Does NOT place an actual order.
+
+        Args:
+            contract: Qualified contract
+            order: Order to simulate
+
+        Returns:
+            OrderState object with initMarginChange, maintMarginChange,
+            commission, etc. — or None on error
+        """
+        self.ensure_connected()
+        try:
+            return self.ib.whatIfOrder(contract, order)
+        except Exception as e:
+            logger.error(f"Error in whatIfOrder for {contract.symbol}: {e}")
+            return None
+
+    def get_open_trades(self) -> list:
+        """Get all currently open trades (orders with active status).
+
+        Wraps ib.openTrades(). Unlike get_trades() which returns all
+        session trades, this returns only trades with open orders.
+
+        Returns:
+            List of Trade objects with active orders
+        """
+        self.ensure_connected()
+        return self.ib.openTrades()
+
+    def get_completed_orders(self, api_only: bool = False) -> list:
+        """Request completed orders from IBKR server.
+
+        Wraps ib.reqCompletedOrders(). Returns orders that have been
+        fully filled, cancelled, or otherwise completed.
+
+        Args:
+            api_only: If True, only return API-submitted orders
+
+        Returns:
+            List of Trade objects for completed orders
+        """
+        self.ensure_connected()
+        try:
+            return self.ib.reqCompletedOrders(apiOnly=api_only)
+        except Exception as e:
+            logger.error(f"Error getting completed orders: {e}")
+            return []
+
+    def request_open_orders(self) -> list:
+        """Request and return all open orders.
+
+        Wraps ib.reqOpenOrders() + ib.openOrders(). The request forces
+        a refresh from TWS, then returns the cached result.
+
+        Returns:
+            List of Order objects currently open
+        """
+        self.ensure_connected()
+        try:
+            self.ib.reqOpenOrders()
+            self.ib.sleep(0.5)
+            return self.ib.openOrders()
+        except Exception as e:
+            logger.error(f"Error getting open orders: {e}")
+            return []
+
+    def get_contract_details_raw(self, contract: Contract) -> list:
+        """Get raw contract details from IBKR.
+
+        Wraps ib.reqContractDetails(). Returns the full list of
+        ContractDetails objects.
+
+        Args:
+            contract: Contract to look up
+
+        Returns:
+            List of ContractDetails objects
+        """
+        self.ensure_connected()
+        try:
+            return self.ib.reqContractDetails(contract) or []
+        except Exception as e:
+            logger.error(f"Error getting contract details: {e}")
+            return []
+
     # ─────────────────────────────────────────────────────────────────────────
     # EVENT ACCESS (Direct access for callbacks)
     # ─────────────────────────────────────────────────────────────────────────

@@ -11,7 +11,7 @@ from loguru import logger
 from src.config.baseline_strategy import BaselineStrategy
 from src.utils.market_data import safe_bid_ask, safe_price
 from src.utils.timezone import us_trading_date
-from src.tools.ibkr_client import IBKRClient
+from src.broker.protocols import BrokerClient
 
 
 class OptionsFinder:
@@ -38,7 +38,7 @@ class OptionsFinder:
 
     def __init__(
         self,
-        ibkr_client: IBKRClient,
+        ibkr_client: BrokerClient,
         config: BaselineStrategy | None = None,
     ):
         """Initialize options finder.
@@ -70,11 +70,10 @@ class OptionsFinder:
             list: Available option chains
         """
         try:
-            chains = self.ibkr_client.ib.reqSecDefOptParams(
+            chains = self.ibkr_client.get_option_chain_definitions(
                 stock_contract.symbol,
-                "",
-                stock_contract.secType,
-                stock_contract.conId,
+                sec_type=stock_contract.secType,
+                con_id=stock_contract.conId,
             )
 
             if chains:
@@ -212,8 +211,8 @@ class OptionsFinder:
                 return None
 
             # Request market data (snapshot mode to avoid competing sessions)
-            ticker = self.ibkr_client.ib.reqMktData(qualified, snapshot=True)
-            self.ibkr_client.ib.sleep(2)
+            ticker = self.ibkr_client.subscribe_market_data(qualified, snapshot=True)
+            self.ibkr_client.wait(2)
 
             # Extract premium (NaN-safe)
             bid, ask = safe_bid_ask(ticker)
@@ -224,7 +223,7 @@ class OptionsFinder:
                 premium = safe_price(ticker)
 
             # Cancel market data
-            self.ibkr_client.ib.cancelMktData(qualified)
+            self.ibkr_client.cancel_market_data(qualified)
 
             if not premium or premium <= 0:
                 logger.debug(f"No valid premium for {symbol} {strike}{right}")
