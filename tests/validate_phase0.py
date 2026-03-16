@@ -123,8 +123,8 @@ def test_configuration():
         # Test invalid values (should fail)
         try:
             from pydantic import ValidationError
-            from src.config.base import RiskLimits
-            invalid = RiskLimits(max_daily_loss=0.5)  # Should be negative
+            from src.agentic.scanner_settings import RiskGovernorSettings
+            invalid = RiskGovernorSettings(max_daily_loss_pct=0.5)  # Should be negative
             console.print(f"[red]  ✗ Validation not working![/red]")
             return False
         except Exception:

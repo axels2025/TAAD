@@ -164,7 +164,7 @@ class RiskGovernor:
         self.MAX_POSITION_LOSS = rg.max_position_loss
         self.MAX_POSITIONS = budget.max_positions
         self.MAX_POSITIONS_PER_DAY = budget.max_positions_per_day
-        self.MAX_SECTOR_CONCENTRATION = config.risk_limits.max_sector_concentration
+        self.MAX_SECTOR_CONCENTRATION = rg.max_sector_concentration
         self.MAX_MARGIN_UTILIZATION = rg.max_margin_utilization
         self.MAX_MARGIN_PER_TRADE_PCT = rg.max_margin_per_trade_pct
         self.MAX_WEEKLY_LOSS_PCT = rg.max_weekly_loss_pct

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.config.base import Config, IBKRConfig, LearningConfig, RiskLimits, reset_config
+from src.config.base import Config, IBKRConfig, LearningConfig, reset_config
 from src.config.baseline_strategy import BaselineStrategy, ExitRules
 
 
@@ -40,25 +40,27 @@ class TestIBKRConfig:
             IBKRConfig(port=99999)  # Too high
 
 
-class TestRiskLimits:
-    """Tests for risk limits configuration."""
+class TestRiskGovernorSettings:
+    """Tests for risk governor settings (scanner_settings.yaml)."""
 
     def test_default_values(self) -> None:
-        """Test default risk limit values."""
-        limits = RiskLimits()
-        assert limits.max_daily_loss == -0.02
-        assert limits.max_position_loss == -500.0
-        assert limits.max_sector_concentration == 0.30
+        """Test default risk governor settings values."""
+        from src.agentic.scanner_settings import RiskGovernorSettings
+        settings = RiskGovernorSettings()
+        assert settings.max_daily_loss_pct == -0.02
+        assert settings.max_position_loss == -500.0
+        assert settings.max_sector_concentration == 0.30
+        assert settings.max_margin_utilization == 0.80
+        assert settings.max_spread_pct == 0.10
 
     def test_validation(self) -> None:
-        """Test risk limit validation."""
-        # Valid values
-        limits = RiskLimits(max_daily_loss=-0.05, max_sector_concentration=0.40)
-        assert limits.max_daily_loss == -0.05
+        """Test risk governor settings validation."""
+        from src.agentic.scanner_settings import RiskGovernorSettings
+        settings = RiskGovernorSettings(max_daily_loss_pct=-0.05, max_sector_concentration=0.40)
+        assert settings.max_daily_loss_pct == -0.05
 
-        # Invalid values
         with pytest.raises(ValidationError):
-            RiskLimits(max_daily_loss=0.05)  # Must be negative
+            RiskGovernorSettings(max_daily_loss_pct=0.05)  # Must be negative
 
 
 class TestLearningConfig:
@@ -119,13 +121,6 @@ class TestConfig:
         assert isinstance(ibkr, IBKRConfig)
         assert ibkr.host == "127.0.0.1"
         assert ibkr.port == 7497
-
-    def test_risk_limits_property(self) -> None:
-        """Test risk limits property."""
-        config = Config()
-        limits = config.risk_limits
-        assert isinstance(limits, RiskLimits)
-        assert limits.max_daily_loss == -0.02
 
     def test_learning_property(self) -> None:
         """Test learning configuration property."""

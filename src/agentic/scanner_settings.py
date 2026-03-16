@@ -127,6 +127,10 @@ class RiskGovernorSettings(BaseModel):
         default=0.10, ge=0.0, le=1.0,
         description="Max bid-ask spread as fraction of mid price (0.10 = 10%)",
     )
+    max_sector_concentration: float = Field(
+        default=0.30, ge=0.05, le=1.0,
+        description="Max fraction of positions in any single sector (0.30 = 30%)",
+    )
 
 
 class ScannerScanSettings(BaseModel):

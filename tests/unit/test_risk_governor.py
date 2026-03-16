@@ -41,10 +41,12 @@ def mock_ibkr_client():
     """Create mock IBKR client."""
     client = MagicMock(spec=IBKRClient)
 
-    # Mock account summary
+    # Mock account summary — AvailableFunds must be high enough that
+    # margin utilization stays under scanner_settings.yaml's limit (50%).
+    # Utilization = (BuyingPower - AvailableFunds + trade_margin) / BuyingPower
     client.get_account_summary.return_value = {
         "NetLiquidation": 100000.0,
-        "AvailableFunds": 80000.0,
+        "AvailableFunds": 180000.0,
         "BuyingPower": 200000.0,
         "ExcessLiquidity": 50000.0,
     }
@@ -81,13 +83,15 @@ def test_kill_switch(tmp_path):
 
 
 @pytest.fixture
-def risk_governor(mock_ibkr_client, mock_position_monitor, config, test_kill_switch):
-    """Create RiskGovernor instance."""
+def risk_governor(mock_ibkr_client, mock_position_monitor, config, test_kill_switch, tmp_path):
+    """Create RiskGovernor instance with isolated equity state file."""
+    equity_file = tmp_path / "test_equity_state.json"
     return RiskGovernor(
         ibkr_client=mock_ibkr_client,
         position_monitor=mock_position_monitor,
         config=config,
         kill_switch=test_kill_switch,
+        equity_state_file=equity_file,
     )
 
 
@@ -115,13 +119,19 @@ class TestRiskGovernorInitialization:
     """Test RiskGovernor initialization."""
 
     def test_initialization(self, risk_governor, config):
-        """Test RiskGovernor initializes correctly from Config values."""
-        assert risk_governor.MAX_DAILY_LOSS_PCT == config.max_daily_loss
-        assert risk_governor.MAX_POSITION_LOSS == config.max_position_loss
-        assert risk_governor.MAX_POSITIONS == config.max_positions
-        assert risk_governor.MAX_POSITIONS_PER_DAY == config.max_positions_per_day
-        assert risk_governor.MAX_SECTOR_CONCENTRATION == config.risk_limits.max_sector_concentration
-        assert risk_governor.MAX_MARGIN_UTILIZATION == config.max_margin_utilization
+        """Test RiskGovernor initializes from scanner_settings.yaml (single source of truth)."""
+        from src.agentic.scanner_settings import load_scanner_settings
+        scanner = load_scanner_settings()
+        rg = scanner.risk_governor
+        budget = scanner.budget
+
+        assert risk_governor.MAX_DAILY_LOSS_PCT == rg.max_daily_loss_pct
+        assert risk_governor.MAX_POSITION_LOSS == rg.max_position_loss
+        assert risk_governor.MAX_POSITIONS == budget.max_positions
+        assert risk_governor.MAX_POSITIONS_PER_DAY == budget.max_positions_per_day
+        assert risk_governor.MAX_SECTOR_CONCENTRATION == rg.max_sector_concentration
+        assert risk_governor.MAX_MARGIN_UTILIZATION == rg.max_margin_utilization
+        assert risk_governor.MAX_SPREAD_PCT == rg.max_spread_pct
         assert not risk_governor._trading_halted
         assert risk_governor._trades_today == 0
 
@@ -429,7 +439,7 @@ class TestMaxPositionsPerDay:
 
     def test_max_trades_per_day_not_reached(self, risk_governor, sample_opportunity):
         """Test trade approved when daily trades below limit."""
-        risk_governor._trades_today = 5  # 5 trades today (limit is 10)
+        risk_governor._trades_today = 5
 
         result = risk_governor.pre_trade_check(sample_opportunity)
 
@@ -437,7 +447,7 @@ class TestMaxPositionsPerDay:
 
     def test_max_trades_per_day_reached(self, risk_governor, sample_opportunity):
         """Test trade rejected when at daily trade limit."""
-        risk_governor._trades_today = 10  # At limit
+        risk_governor._trades_today = risk_governor.MAX_POSITIONS_PER_DAY  # At limit
 
         result = risk_governor.pre_trade_check(sample_opportunity)
 
@@ -502,7 +512,7 @@ class TestMarginUtilization:
     def test_margin_utilization_too_high(
         self, risk_governor, mock_ibkr_client, sample_opportunity
     ):
-        """Test trade rejected when margin utilization would exceed 80%."""
+        """Test trade rejected when margin utilization exceeds scanner_settings limit."""
         # Set buying power and available funds to trigger high utilization
         # Available funds is sufficient but utilization would be too high
         mock_ibkr_client.get_account_summary.return_value = {
@@ -514,7 +524,7 @@ class TestMarginUtilization:
 
         # Trade requires $1,000
         # Current used: 40000 (100000 - 60000)
-        # After trade: 41000 / 100000 = 41% (should pass)
+        # After trade: 41000 / 100000 = 41% (should pass under 50% limit)
         # Per-trade cap: 10% of 500k = $50k (not triggered)
 
         result = risk_governor.pre_trade_check(sample_opportunity)
@@ -522,9 +532,9 @@ class TestMarginUtilization:
         # Should pass with current settings
         assert result.approved
 
-        # Now test with trade requiring more margin that would push utilization over 80%
+        # Now test with trade requiring more margin that would push utilization over limit
         sample_opportunity.margin_required = 45000.0
-        # After trade: (40000 + 45000) / 100000 = 85% > 80%
+        # After trade: (40000 + 45000) / 100000 = 85% > 50% limit
         # Per-trade cap: $45k < $50k (not triggered)
 
         result = risk_governor.pre_trade_check(sample_opportunity)
@@ -611,20 +621,20 @@ class TestWhatIfMarginVerification:
         """Test WhatIf margin can trigger utilization percentage rejection."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 500000.0,
-            "AvailableFunds": 60000.0,
+            "AvailableFunds": 90000.0,
             "BuyingPower": 100000.0,
             "ExcessLiquidity": 50000.0,
         }
-        # Estimate $1,000 (utilization 41% — passes)
-        # WhatIf $25,000 (utilization 65,000/100,000 = 65% — passes)
+        # Estimate $1,000 (utilization (10k+5k)/100k = 15% — passes under 50% limit)
+        # WhatIf $5,000 → utilization (10k+5k)/100k = 15% — passes
         # Per-trade cap: 10% of 500k = $50k (not triggered)
         sample_opportunity.margin_required = 1000.0
-        mock_ibkr_client.get_margin_requirement.return_value = 25000.0
+        mock_ibkr_client.get_margin_requirement.return_value = 5000.0
 
         result = risk_governor.pre_trade_check(sample_opportunity)
         assert result.approved
 
-        # WhatIf $45,000 (utilization 85,000/100,000 = 85% > 80% — rejected)
+        # WhatIf $45,000 → utilization (10k+45k)/100k = 55% > 50% limit — rejected
         # Per-trade cap: $45k < $50k (not triggered)
         mock_ibkr_client.get_margin_requirement.return_value = 45000.0
 
@@ -661,7 +671,7 @@ class TestPerTradeMarginCap:
         # NetLiq=100k, cap=10%, margin=$1k — well within cap
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 50000.0,
         }
@@ -698,7 +708,7 @@ class TestPerTradeMarginCap:
         # NetLiq=100k, cap=10%=$10k, margin=$10k — exactly at cap
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 50000.0,
         }
@@ -727,19 +737,26 @@ class TestPerTradeMarginCap:
         assert not result.approved
         assert result.limit_name == "per_trade_margin_cap"
 
-    def test_custom_cap_from_env(
-        self, mock_ibkr_client, mock_position_monitor, sample_opportunity,
-        monkeypatch, test_kill_switch,
+    def test_custom_cap_from_yaml(
+        self, mock_ibkr_client, mock_position_monitor, config, sample_opportunity,
+        monkeypatch, test_kill_switch, tmp_path,
     ):
-        """Test per-trade cap is configurable via environment variable."""
-        monkeypatch.setenv("MAX_MARGIN_PER_TRADE_PCT", "0.05")
+        """Test per-trade cap is configurable via scanner_settings.yaml."""
+        from src.agentic.scanner_settings import ScannerSettings, RiskGovernorSettings
 
-        from src.config.base import Config, reset_config
-        reset_config()
-        custom_config = Config()
+        custom_settings = ScannerSettings(
+            risk_governor=RiskGovernorSettings(max_margin_per_trade_pct=0.05),
+        )
+        monkeypatch.setattr(
+            "src.agentic.scanner_settings.load_scanner_settings",
+            lambda *args, **kwargs: custom_settings,
+        )
+
+        equity_file = tmp_path / "test_equity_state.json"
         governor = RiskGovernor(
-            mock_ibkr_client, mock_position_monitor, custom_config,
+            mock_ibkr_client, mock_position_monitor, config,
             kill_switch=test_kill_switch,
+            equity_state_file=equity_file,
         )
 
         assert governor.MAX_MARGIN_PER_TRADE_PCT == 0.05
@@ -747,7 +764,7 @@ class TestPerTradeMarginCap:
         # NetLiq=100k, cap=5%=$5k, margin=$6k — exceeds 5% cap
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 50000.0,
         }
@@ -1061,7 +1078,7 @@ class TestPostTradeMarginVerification:
         """Test healthy margin state returns is_healthy=True."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 50000.0,
         }
@@ -1070,7 +1087,7 @@ class TestPostTradeMarginVerification:
 
         assert result.is_healthy
         assert not result.verification_failed
-        assert result.available_funds == 80000.0
+        assert result.available_funds == 180000.0
         assert result.excess_liquidity == 50000.0
         assert result.net_liquidation == 100000.0
         assert result.warning == ""
@@ -1166,7 +1183,7 @@ class TestPostTradeMarginVerification:
         """Test verification works without symbol context."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 50000.0,
         }
@@ -1183,7 +1200,7 @@ class TestAccountHealthCache:
         """First call fetches from IBKR and populates cache."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "ExcessLiquidity": 50000.0,
             "MaintMarginReq": 20000.0,
         }
@@ -1191,7 +1208,7 @@ class TestAccountHealthCache:
         result = risk_governor.check_account_health()
 
         assert result["NetLiquidation"] == 100000.0
-        assert result["AvailableFunds"] == 80000.0
+        assert result["AvailableFunds"] == 180000.0
         assert result["ExcessLiquidity"] == 50000.0
         assert result["healthy"] is True
         mock_ibkr_client.get_account_summary.assert_called_once()
@@ -1200,7 +1217,7 @@ class TestAccountHealthCache:
         """Second call within 5 minutes uses cache, no IBKR call."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "ExcessLiquidity": 50000.0,
             "MaintMarginReq": 20000.0,
         }
@@ -1215,7 +1232,7 @@ class TestAccountHealthCache:
         """Call after 5+ minutes refreshes from IBKR."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "ExcessLiquidity": 50000.0,
             "MaintMarginReq": 20000.0,
         }
@@ -1248,7 +1265,7 @@ class TestAccountHealthCache:
         """_check_margin_utilization uses cached account summary."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 50000.0,
         }
@@ -1315,7 +1332,7 @@ class TestWeeklyLossLimit:
 
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 50000.0,
         }
@@ -1374,7 +1391,7 @@ class TestMaxDrawdown:
 
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 50000.0,
         }
@@ -1393,7 +1410,7 @@ class TestExcessLiquidity:
         """ExcessLiquidity < 10% of NLV rejects trade."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 8000.0,  # 8% < 10%
         }
@@ -1409,7 +1426,7 @@ class TestExcessLiquidity:
         """ExcessLiquidity > 20% of NLV passes without warning."""
         mock_ibkr_client.get_account_summary.return_value = {
             "NetLiquidation": 100000.0,
-            "AvailableFunds": 80000.0,
+            "AvailableFunds": 180000.0,
             "BuyingPower": 200000.0,
             "ExcessLiquidity": 25000.0,  # 25% > 20%
         }

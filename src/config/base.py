@@ -22,49 +22,6 @@ class IBKRConfig(BaseModel):
     )
 
 
-class RiskLimits(BaseModel):
-    """Risk management limits and circuit breakers."""
-
-    max_daily_loss: float = Field(
-        default=-0.02,
-        ge=-1.0,
-        le=0.0,
-        description="Maximum daily loss before circuit breaker (as percentage)",
-    )
-    max_position_loss: float = Field(
-        default=-500.0,
-        le=0.0,
-        description="Maximum loss per position before stop loss ($)",
-    )
-    max_portfolio_var_95: float = Field(
-        default=0.10,
-        ge=0.0,
-        le=1.0,
-        description="Maximum portfolio Value at Risk (95% confidence)",
-    )
-    max_sector_concentration: float = Field(
-        default=0.30,
-        ge=0.0,
-        le=1.0,
-        description="Maximum exposure to any single sector",
-    )
-    max_correlation: float = Field(
-        default=0.70,
-        ge=-1.0,
-        le=1.0,
-        description="Maximum correlation between positions",
-    )
-    max_margin_utilization: float = Field(
-        default=0.80,
-        ge=0.0,
-        le=1.0,
-        description="Maximum margin utilization allowed",
-    )
-    max_positions_per_day: int = Field(
-        default=10, ge=1, le=100, description="Maximum new positions per day"
-    )
-
-
 class LearningConfig(BaseModel):
     """Self-learning engine configuration."""
 
@@ -141,9 +98,6 @@ class Config(BaseSettings):
     # Trading Settings
     paper_trading: bool = Field(default=True, description="Paper trading mode")
 
-    # Risk Limits
-    max_daily_loss: float = Field(default=-0.02)
-    max_position_loss: float = Field(default=-500.0)
     max_position_size: float = Field(
         default=5000.0, description="Maximum $ per position"
     )
@@ -167,9 +121,6 @@ class Config(BaseSettings):
     # --- Position Limits ---
     max_positions: int = Field(
         default=10, ge=1, description="Maximum number of open positions"
-    )
-    max_positions_per_day: int = Field(
-        default=10, ge=1, description="Maximum new positions per day"
     )
     max_sector_count: int = Field(
         default=3, ge=1, description="Maximum positions in any single sector"
@@ -195,32 +146,6 @@ class Config(BaseSettings):
     )
     max_price_adjustments: int = Field(
         default=2, ge=0, description="Maximum number of price adjustments"
-    )
-
-    # --- Risk Governor (previously hardcoded) ---
-    max_margin_per_trade_pct: float = Field(
-        default=0.10,
-        ge=0.0,
-        le=1.0,
-        description="Max margin per single trade as % of net liquidation",
-    )
-    max_margin_utilization: float = Field(
-        default=0.80,
-        ge=0.0,
-        le=1.0,
-        description="Maximum margin utilization allowed",
-    )
-    max_weekly_loss_pct: float = Field(
-        default=-0.05,
-        ge=-1.0,
-        le=0.0,
-        description="Maximum weekly loss before circuit breaker",
-    )
-    max_drawdown_pct: float = Field(
-        default=-0.10,
-        ge=-1.0,
-        le=0.0,
-        description="Maximum peak-to-trough drawdown before circuit breaker",
     )
 
     # Learning Settings
@@ -291,16 +216,6 @@ class Config(BaseSettings):
             port=self.ibkr_port,
             client_id=self.ibkr_client_id,
             account=self.ibkr_account,
-        )
-
-    @property
-    def risk_limits(self) -> RiskLimits:
-        """Get risk limit configuration."""
-        return RiskLimits(
-            max_daily_loss=self.max_daily_loss,
-            max_position_loss=self.max_position_loss,
-            max_margin_utilization=self.max_margin_utilization,
-            max_positions_per_day=self.max_positions_per_day,
         )
 
     @property

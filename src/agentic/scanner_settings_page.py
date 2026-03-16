@@ -202,6 +202,8 @@ const SECTIONS = [
       { key: 'max_weekly_loss_pct', label: 'Max Weekly Loss', desc: 'Circuit breaker: max weekly loss as fraction (-0.05 = -5%)', type: 'number', min: -1.0, max: 0, step: 0.01 },
       { key: 'max_drawdown_pct', label: 'Max Drawdown', desc: 'Circuit breaker: max peak-to-trough drawdown (-0.10 = -10%)', type: 'number', min: -1.0, max: 0, step: 0.01 },
       { key: 'max_position_loss', label: 'Max Position Loss ($)', desc: 'Stop loss per position in dollars (negative, e.g. -500)', type: 'number', max: 0, step: 50 },
+      { key: 'max_spread_pct', label: 'Max Bid-Ask Spread', desc: 'Max spread as fraction of mid price (0.10 = 10%)', type: 'number', min: 0.0, max: 1.0, step: 0.01 },
+      { key: 'max_sector_concentration', label: 'Max Sector Concentration', desc: 'Max fraction of positions in one sector (0.30 = 30%)', type: 'number', min: 0.05, max: 1.0, step: 0.05 },
     ],
   },
   {

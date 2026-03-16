@@ -32,6 +32,8 @@ risk_governor:
   max_weekly_loss_pct: -0.05
   max_drawdown_pct: -0.1
   max_position_loss: -2000.0
+  max_spread_pct: 0.10
+  max_sector_concentration: 0.30
 earnings:
   enabled: true
   additional_otm_pct: 0.15

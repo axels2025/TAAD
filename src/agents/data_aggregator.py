@@ -483,15 +483,18 @@ class DataAggregator:
         """Get current strategy configuration parameters."""
         try:
             from src.config.base import get_config
+            from src.agentic.scanner_settings import load_scanner_settings
             config = get_config()
+            scanner = load_scanner_settings()
+            rg = scanner.risk_governor
             return ConfigSnapshot(parameters={
                 "paper_trading": config.paper_trading,
-                "max_positions": config.max_positions,
+                "max_positions": scanner.budget.max_positions,
                 "premium_min": config.premium_min,
                 "premium_max": config.premium_max,
                 "premium_target": config.premium_target,
-                "max_daily_loss": config.max_daily_loss,
-                "max_margin_utilization": config.max_margin_utilization,
+                "max_daily_loss_pct": rg.max_daily_loss_pct,
+                "max_margin_utilization": rg.max_margin_utilization,
                 "learning_enabled": config.learning_enabled,
                 "experiment_allocation": config.experiment_allocation,
             })
