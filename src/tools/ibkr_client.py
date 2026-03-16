@@ -928,8 +928,7 @@ class IBKRClient:
     def is_market_open(self, exchange: str = "NYSE") -> dict:
         """Check if market is currently open for trading.
 
-        Uses IBKR's contract details to get actual trading hours and
-        compares against current time.
+        Delegates to MarketCalendar (holiday-aware, no IBKR API call).
 
         Args:
             exchange: Exchange to check (NYSE, NASDAQ, CBOE, etc.)
@@ -937,9 +936,9 @@ class IBKRClient:
         Returns:
             dict with keys:
                 - is_open: bool - True if market is currently open
-                - status: str - "open", "closed", "pre_market", "after_hours"
-                - next_open: str - Next market open time (ISO format)
-                - next_close: str - Next market close time (ISO format)
+                - status: str - "open", "closed", "pre_market", "after_hours", etc.
+                - next_open: str - Next market open time
+                - next_close: str - Next market close time
 
         Example:
             >>> status = client.is_market_open()
@@ -948,89 +947,22 @@ class IBKRClient:
             >>> else:
             ...     print(f"Market closed. Opens at {status['next_open']}")
         """
-        self.ensure_connected()
-
         try:
-            from datetime import datetime, time
-            import pytz
+            from src.services.market_calendar import MarketCalendar
 
-            # Create a simple stock contract for the exchange
-            from ib_async import Stock
-            contract = Stock("SPY", exchange, "USD")
+            cal = MarketCalendar()
+            session = cal.get_current_session()
+            next_open = cal.next_market_open()
+            next_close = cal.next_market_close()
 
-            # Get contract details which include trading hours
-            details = self.ib.reqContractDetails(contract)
+            fmt = "%Y-%m-%d %H:%M %Z"
 
-            if not details:
-                logger.warning(f"Could not get market hours for {exchange}")
-                return {
-                    "is_open": None,
-                    "status": "unknown",
-                    "next_open": None,
-                    "next_close": None,
-                }
-
-            # Extract trading hours from first result
-            detail = details[0]
-            trading_hours = detail.tradingHours
-            liquid_hours = detail.liquidHours
-
-            # Get current time in ET (market timezone)
-            et_tz = pytz.timezone("America/New_York")
-            now_et = datetime.now(et_tz)
-            current_time = now_et.time()
-            current_weekday = now_et.weekday()  # 0=Monday, 6=Sunday
-
-            # Regular trading hours (approximate - actual varies by exchange)
-            market_open_time = time(9, 30)
-            market_close_time = time(16, 0)
-            pre_market_start = time(4, 0)
-            after_hours_end = time(20, 0)
-
-            # Check if weekend
-            if current_weekday >= 5:  # Saturday or Sunday
-                return {
-                    "is_open": False,
-                    "status": "closed_weekend",
-                    "next_open": "Monday 09:30 ET",
-                    "next_close": "Monday 16:00 ET",
-                }
-
-            # Check if during regular hours
-            if market_open_time <= current_time <= market_close_time:
-                return {
-                    "is_open": True,
-                    "status": "open",
-                    "next_open": now_et.strftime("%Y-%m-%d 09:30 ET"),
-                    "next_close": now_et.strftime("%Y-%m-%d 16:00 ET"),
-                }
-
-            # Check if pre-market
-            elif pre_market_start <= current_time < market_open_time:
-                return {
-                    "is_open": False,
-                    "status": "pre_market",
-                    "next_open": now_et.strftime("%Y-%m-%d 09:30 ET"),
-                    "next_close": now_et.strftime("%Y-%m-%d 16:00 ET"),
-                }
-
-            # Check if after-hours
-            elif market_close_time < current_time <= after_hours_end:
-                return {
-                    "is_open": False,
-                    "status": "after_hours",
-                    "next_open": (now_et.replace(hour=9, minute=30) + pytz.timezone("America/New_York").localize(datetime.now()).utcoffset()).strftime("%Y-%m-%d 09:30 ET"),
-                    "next_close": now_et.strftime("%Y-%m-%d 16:00 ET"),
-                }
-
-            # Market closed overnight
-            else:
-                return {
-                    "is_open": False,
-                    "status": "closed",
-                    "next_open": now_et.strftime("%Y-%m-%d 09:30 ET"),
-                    "next_close": now_et.strftime("%Y-%m-%d 16:00 ET"),
-                }
+            return {
+                "is_open": cal.is_market_open(),
+                "status": session.value,
+                "next_open": next_open.strftime(fmt),
+                "next_close": next_close.strftime(fmt),
+            }
 
         except Exception as e:
             logger.error(f"Error checking market hours: {e}")
