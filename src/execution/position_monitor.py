@@ -319,8 +319,8 @@ class PositionMonitor:
                 ib_pos = ibkr_map.get(key)
 
                 if ib_pos:
-                    # Have IBKR data - get current pricing
-                    status = self._get_position_status(ib_pos)
+                    # Have IBKR data - get current pricing (pass trade to avoid re-lookup)
+                    status = self._get_position_status(ib_pos, trade=trade)
                     if status:
                         position_statuses.append(status)
                 else:
@@ -628,11 +628,13 @@ class PositionMonitor:
 
         return alerts
 
-    def _get_position_status(self, ib_position) -> PositionStatus | None:
+    def _get_position_status(self, ib_position, trade=None) -> PositionStatus | None:
         """Get current status for an IBKR position.
 
         Args:
             ib_position: IBKR position object
+            trade: Optional Trade record from DB (avoids redundant lookup
+                   when caller already has it, e.g. get_all_positions).
 
         Returns:
             PositionStatus: Position status or None
@@ -657,18 +659,19 @@ class PositionMonitor:
             # actual fill price.  Using it causes wildly wrong P&L values
             # (e.g. -982% when avgCost drifts to near-zero).
             entry_premium = None
+            trade_record = trade  # Use caller-provided trade if available
             position_id = self._get_position_id(ib_position)
-            if self.trade_repository:
+            if trade_record is None and self.trade_repository:
                 try:
                     from src.execution.exit_manager import ExitManager
 
-                    trade = ExitManager._find_trade_by_position_id(
+                    trade_record = ExitManager._find_trade_by_position_id(
                         self.trade_repository.session, position_id
                     )
-                    if trade and trade.entry_premium and trade.entry_premium > 0:
-                        entry_premium = trade.entry_premium
                 except Exception as e:
                     logger.debug(f"Trade lookup for entry premium failed: {e}")
+            if trade_record and trade_record.entry_premium and trade_record.entry_premium > 0:
+                entry_premium = trade_record.entry_premium
 
             # Fallback to avgCost only if no Trade record found
             if entry_premium is None:
@@ -730,8 +733,10 @@ class PositionMonitor:
             today = us_trading_date()
             dte = (exp_date - today).days
 
-            # Calculate days held (would need trade entry date from database)
-            days_held = 0  # Placeholder
+            # Calculate days held from database entry_date
+            days_held = 0
+            if trade_record and trade_record.entry_date:
+                days_held = (today - trade_record.entry_date.date()).days
 
             # Get Greeks (if available from quote)
             # Note: Greeks require live market data subscription

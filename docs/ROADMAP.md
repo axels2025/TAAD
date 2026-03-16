@@ -120,6 +120,28 @@ Not about rushing or being reckless. A good decision now beats a perfect decisio
 
 ### 🟢 MEDIUM PRIORITY
 
+#### Persist RiskGovernor Equity State to Database
+**Status:** Planned
+**Date Added:** 2026-03-16
+**Effort:** Medium (1-2 hours)
+**Value:** More resilient circuit breaker state — survives container restarts and `data/` cleanup
+
+**Problem Solved:**
+- `week_start_equity`, `peak_equity`, and `week_start_date` are stored in a JSON file (`data/risk_governor_equity.json`)
+- If the file is lost (container restart, `data/` cleanup), the governor re-initializes from current account summary
+- A stale `peak_equity` after file loss could trigger a false drawdown halt, or miss a real one
+- No audit trail of equity progression over time
+
+**Implementation:**
+1. Add `risk_governor_state` table (or columns on existing table) via `_apply_schema_migrations()`
+2. Replace `_load_equity_state()` / `_save_equity_state()` to use SQLAlchemy
+3. Keep JSON file as a fallback read path for migration from existing deployments
+4. Add test for load/save/roundtrip
+
+**Current Mitigation:** The JSON approach works and self-heals — governor tracks new highs from live account data if the file is missing. Only needed for containerized deployments or environments where file persistence is unreliable.
+
+---
+
 #### Phase 8: Portfolio Optimization
 **Status:** Planned (optional — validate core system first)
 **Date Added:** 2026-02-23

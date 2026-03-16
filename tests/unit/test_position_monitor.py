@@ -446,6 +446,24 @@ class TestPositionStatus:
 
         assert position.dte == 10
 
+    @patch("src.data.database.get_db_session")
+    def test_days_held_from_trade_entry_date(
+        self, mock_get_db, position_monitor, mock_ibkr_client, mock_ib_position, mock_quote
+    ):
+        """Test days_held is calculated from Trade.entry_date, not hardcoded to 0."""
+        entry_date = datetime.now() - timedelta(days=5)
+        mock_trade = _make_mock_trade(entry_date=entry_date)
+        mock_session = _setup_db_and_ibkr_mocks(
+            mock_ibkr_client, [mock_ib_position], [mock_trade], mock_quote
+        )
+        mock_get_db.return_value.__enter__ = Mock(return_value=mock_session)
+        mock_get_db.return_value.__exit__ = Mock(return_value=False)
+
+        positions = position_monitor.get_all_positions()
+
+        assert len(positions) == 1
+        assert positions[0].days_held == (us_trading_date() - entry_date.date()).days
+
 
 class TestUpdatePosition:
     """Test updating specific position."""
