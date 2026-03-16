@@ -5,6 +5,7 @@ and save them directly to the database.
 """
 
 import os
+import secrets
 from datetime import datetime
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from src.tools.manual_trade_entry import ManualTradeEntry
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-in-production")
+app.secret_key = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32)
 
 # Initialize database
 init_database()
