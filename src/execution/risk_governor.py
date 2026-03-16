@@ -448,6 +448,8 @@ class RiskGovernor:
 
         daily_pnl_pct = total_pnl / account_value if account_value > 0 else 0
 
+        # Both values are negative: e.g. -0.03 <= -0.02 → True → HALT.
+        # Config enforces MAX_DAILY_LOSS_PCT ≤ 0 via Pydantic (le=0.0).
         if daily_pnl_pct <= self.MAX_DAILY_LOSS_PCT:
             # Trigger circuit breaker
             self.emergency_halt(

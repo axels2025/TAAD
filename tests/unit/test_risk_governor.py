@@ -269,6 +269,100 @@ class TestDailyLossLimit:
         assert "Daily loss limit exceeded" in risk_governor._halt_reason
 
 
+class TestDailyLossBoundaryConditions:
+    """Boundary tests for daily loss circuit breaker.
+
+    The comparison uses negative sign convention:
+        daily_pnl_pct <= MAX_DAILY_LOSS_PCT  (both negative)
+    e.g. MAX_DAILY_LOSS_PCT = -0.02 means -2% loss limit.
+        -0.0201 <= -0.02 → True  → HALT
+        -0.0199 <= -0.02 → False → PASS
+        -0.0200 <= -0.02 → True  → HALT (at-limit triggers)
+    """
+
+    def _make_positions(self, total_pnl: float):
+        """Helper to create a single position with given total PnL."""
+        return [
+            PositionStatus(
+                position_id="POS1",
+                symbol="AAPL",
+                strike=200.0,
+                option_type="P",
+                expiration_date="20260219",
+                contracts=1,
+                entry_premium=1.00,
+                current_premium=1.00,
+                current_pnl=total_pnl,
+                current_pnl_pct=0.0,
+                days_held=1,
+                dte=5,
+            )
+        ]
+
+    def test_loss_just_beyond_limit_triggers_halt(
+        self, risk_governor, mock_position_monitor
+    ):
+        """Test -2.01% triggers circuit breaker (limit is -2.00%)."""
+        # -$2,010 on $100k account = -2.01%
+        mock_position_monitor.get_all_positions.return_value = self._make_positions(
+            -2010.0
+        )
+
+        result = risk_governor._check_daily_loss_limit()
+
+        assert not result.approved
+        assert result.limit_name == "daily_loss"
+        assert risk_governor.is_halted()
+
+    def test_loss_just_within_limit_passes(
+        self, risk_governor, mock_position_monitor
+    ):
+        """Test -1.99% does NOT trigger circuit breaker (limit is -2.00%)."""
+        # -$1,990 on $100k account = -1.99%
+        mock_position_monitor.get_all_positions.return_value = self._make_positions(
+            -1990.0
+        )
+
+        result = risk_governor._check_daily_loss_limit()
+
+        assert result.approved
+        assert result.limit_name == "daily_loss"
+        assert not risk_governor.is_halted()
+
+    def test_loss_exactly_at_limit_triggers_halt(
+        self, risk_governor, mock_position_monitor
+    ):
+        """Test -2.00% exactly triggers circuit breaker (<=, not <)."""
+        # -$2,000 on $100k account = -2.00% exactly
+        mock_position_monitor.get_all_positions.return_value = self._make_positions(
+            -2000.0
+        )
+
+        result = risk_governor._check_daily_loss_limit()
+
+        assert not result.approved
+        assert result.limit_name == "daily_loss"
+        assert risk_governor.is_halted()
+
+    def test_zero_pnl_passes(self, risk_governor, mock_position_monitor):
+        """Test zero PnL passes (no loss)."""
+        mock_position_monitor.get_all_positions.return_value = self._make_positions(0.0)
+
+        result = risk_governor._check_daily_loss_limit()
+
+        assert result.approved
+
+    def test_positive_pnl_passes(self, risk_governor, mock_position_monitor):
+        """Test positive PnL (profit) passes."""
+        mock_position_monitor.get_all_positions.return_value = self._make_positions(
+            5000.0
+        )
+
+        result = risk_governor._check_daily_loss_limit()
+
+        assert result.approved
+
+
 class TestMaxPositions:
     """Test maximum positions limit."""
 
