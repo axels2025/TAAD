@@ -4616,7 +4616,7 @@ def reconcile_positions(
             if closed_trades:
                 # Fetch historical executions to verify entry premiums
                 try:
-                    ib_executions = ibkr_client.get_historical_executions(days_back=30)
+                    ib_executions = ibkr_client.get_session_fills(days_back=30)
 
                     # Build entry orders lookup (SLD = Sell to Open)
                     entry_orders = {}
@@ -4856,7 +4856,7 @@ def reconcile_positions(
                 try:
                     # Get historical executions from IBKR (last 7 days)
                     console.print("  [dim]Requesting historical executions from IBKR (last 7 days)...[/dim]")
-                    ib_executions = ibkr_client.get_historical_executions(days_back=7)
+                    ib_executions = ibkr_client.get_session_fills(days_back=7)
                     console.print(f"  [dim]Found {len(ib_executions)} executions[/dim]\n")
 
                     # Build lookup by symbol/strike/expiration for both entries and exits

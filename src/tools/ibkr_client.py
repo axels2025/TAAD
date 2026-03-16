@@ -1839,7 +1839,7 @@ class IBKRClient:
         logger.info(f"reqExecutions returned {len(fills)} fills")
         return fills
 
-    def get_historical_executions(self, days_back: int = 7) -> list:
+    def get_session_fills(self, days_back: int = 7) -> list:
         """Get fills from the current API session, optionally filtered by date.
 
         NOTE: This only returns fills from the current API session (ib.fills()).
@@ -1853,7 +1853,7 @@ class IBKRClient:
             List of Fill objects from the current session only
 
         Example:
-            >>> fills = client.get_historical_executions(days_back=7)
+            >>> fills = client.get_session_fills(days_back=7)
             >>> for fill in fills:
             ...     print(f"{fill.time}: {fill.execution.side} @ ${fill.execution.avgPrice}")
         """
