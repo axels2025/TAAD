@@ -7,7 +7,7 @@ price, volume, and trend analysis to find candidates for the strategy.
 from typing import Literal
 
 import pandas as pd
-from ib_insync import Stock
+from ib_async import Stock
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy

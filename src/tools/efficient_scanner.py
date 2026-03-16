@@ -13,7 +13,7 @@ This is how successful scanners like Barchart work.
 from datetime import datetime, timedelta
 from typing import Literal, Optional
 
-from ib_insync import Option
+from ib_async import Option
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy

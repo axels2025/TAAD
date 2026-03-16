@@ -409,7 +409,7 @@ class ActionExecutor:
             )
 
             # Call execute_exit directly on the main thread.
-            # It MUST run on the same thread as the ib_insync event loop
+            # It MUST run on the same thread as the ib_async event loop
             # to avoid deadlocks with asyncio.run() in a separate thread.
             result = self.exit_manager.execute_exit(position_id, exit_decision)
 

@@ -156,7 +156,7 @@ def test_ibkr_connection():
         console.print(f"  ✓ Connected to IBKR")
 
         # Test market data for SPY
-        from ib_insync import Stock
+        from ib_async import Stock
         spy = Stock("SPY", "SMART", "USD")
         client.ib.qualifyContracts(spy)
 
@@ -169,7 +169,7 @@ def test_ibkr_connection():
             console.print(f"[yellow]  ⚠ No market data (market closed?)[/yellow]")
 
         # Test options chain
-        from ib_insync import Option
+        from ib_async import Option
         expiry = (datetime.now() + timedelta(days=14)).strftime("%Y%m%d")
         option = Option("SPY", expiry, 450, "P", "SMART")
 

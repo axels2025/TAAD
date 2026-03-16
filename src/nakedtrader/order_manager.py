@@ -2,13 +2,13 @@
 
 Places IBKR native parent-child bracket orders: a SELL parent with a
 profit-take BUY child (and optional stop-loss BUY child). Uses the
-ib_insync synchronous placeOrder pattern. Exchange-aware via config profile.
+ib_async synchronous placeOrder pattern. Exchange-aware via config profile.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 
-from ib_insync import LimitOrder, Option, Order
+from ib_async import LimitOrder, Option, Order
 from loguru import logger
 
 from src.nakedtrader.config import NakedTraderConfig

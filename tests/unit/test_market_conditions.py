@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
-from ib_insync import Contract
+from ib_async import Contract
 
 from src.services.market_conditions import MarketConditionMonitor, MarketConditions
 from src.tools.ibkr_client import Quote

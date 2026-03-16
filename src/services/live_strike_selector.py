@@ -405,7 +405,7 @@ class LiveStrikeSelector:
             Sorted list of available strikes, or empty list
         """
         try:
-            from ib_insync import Stock
+            from ib_async import Stock
 
             stock_contract = Stock(symbol, "SMART", "USD")
             qualified = self.client.qualify_contract(stock_contract)

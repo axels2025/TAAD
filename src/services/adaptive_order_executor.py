@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 
-from ib_insync import Contract, LimitOrder, TagValue
+from ib_async import Contract, LimitOrder, TagValue
 from loguru import logger
 
 from src.services.limit_price_calculator import LimitPriceCalculator

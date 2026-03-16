@@ -411,7 +411,7 @@ class PremarketValidator:
         if self.ibkr_client:
             try:
                 # Try to get option chain and detect actual interval
-                from ib_insync import Stock
+                from ib_async import Stock
 
                 stock_contract = Stock(symbol, "SMART", "USD")
                 qualified = self.ibkr_client.qualify_contract(stock_contract)

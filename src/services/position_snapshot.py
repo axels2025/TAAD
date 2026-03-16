@@ -8,7 +8,7 @@ Greeks changes, and path data for learning engine analysis.
 from datetime import date, datetime
 from typing import List, Optional
 
-from ib_insync import Index, Stock
+from ib_async import Index, Stock
 from loguru import logger
 from sqlalchemy.orm import Session
 
@@ -143,7 +143,7 @@ class PositionSnapshotService:
 
             # Qualify contract
             qualified = self.ibkr.ib.qualifyContracts(contract)
-            if not qualified:
+            if not qualified or qualified[0] is None:
                 logger.warning(f"Could not qualify contract for trade {trade.id}")
                 return None
 

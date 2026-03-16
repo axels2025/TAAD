@@ -11,7 +11,7 @@ Provides IBKR-based option enrichment and validation utilities:
 from datetime import datetime, timedelta
 from typing import Optional
 
-from ib_insync import Option
+from ib_async import Option
 from loguru import logger
 
 from src.utils.timezone import us_trading_date
@@ -142,7 +142,7 @@ class IBKRValidator:
             Actual margin in dollars, or None if unavailable
         """
         try:
-            from ib_insync import Option
+            from ib_async import Option
 
             exp_formatted = expiration.replace("-", "")  # Convert to YYYYMMDD
             contract = Option(

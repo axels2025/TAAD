@@ -47,7 +47,7 @@ Dependency Management: requirements.txt
 
 #### Trading & Market Data
 ```python
-ib_insync==0.9.86          # Interactive Brokers API (primary)
+ib_async>=2.1.0            # Interactive Brokers API (primary, community fork of ib_insync)
 pandas==2.2.0              # Data manipulation
 numpy==1.26.4              # Numerical computation
 ```

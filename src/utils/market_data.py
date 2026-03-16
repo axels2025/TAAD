@@ -29,7 +29,7 @@ def safe_price(ticker) -> float | None:
     """Extract best available price from ticker: last -> mid -> close.
 
     Args:
-        ticker: ib_insync Ticker object
+        ticker: ib_async Ticker object
 
     Returns:
         Best available price, or None if no valid data
@@ -47,7 +47,7 @@ def safe_bid_ask(ticker) -> tuple[float | None, float | None]:
     """Extract NaN-safe bid/ask from ticker.
 
     Args:
-        ticker: ib_insync Ticker object
+        ticker: ib_async Ticker object
 
     Returns:
         Tuple of (bid, ask) — either may be None if invalid
@@ -65,7 +65,7 @@ def safe_field(ticker, field: str) -> float | None:
     None and NaN.
 
     Args:
-        ticker: ib_insync Ticker object
+        ticker: ib_async Ticker object
         field: Attribute name (e.g. "volume", "openInterest", "open")
 
     Returns:

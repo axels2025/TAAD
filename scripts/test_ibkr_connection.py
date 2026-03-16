@@ -17,7 +17,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv
-from ib_insync import IB, util
+from ib_async import IB, util
 from rich.console import Console
 from rich.table import Table
 
@@ -113,7 +113,7 @@ def test_connection():
         console.print("[cyan]Testing market data access...[/cyan]")
 
         # Request SPY data as test
-        from ib_insync import Stock
+        from ib_async import Stock
         spy = Stock("SPY", "SMART", "USD")
         ib.qualifyContracts(spy)
 

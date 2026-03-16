@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from ib_insync import Stock, Index
+from ib_async import Stock, Index
 from loguru import logger
 
 from src.utils.timezone import us_trading_date
@@ -210,7 +210,7 @@ class MarketContextService:
         try:
             stock = Stock(symbol, "SMART", "USD")
             qualified = self.ibkr.ib.qualifyContracts(stock)
-            if not qualified:
+            if not qualified or qualified[0] is None:
                 return None
 
             # Request fundamental data (includes sector)

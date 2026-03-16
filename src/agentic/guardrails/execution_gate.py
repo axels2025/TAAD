@@ -469,9 +469,9 @@ class ExecutionGate:
         )
 
     def _fetch_live_data(self, ibkr_client) -> tuple[float, float]:
-        """Fetch live VIX and SPY from IBKR using sync ib_insync calls.
+        """Fetch live VIX and SPY from IBKR using sync ib_async calls.
 
-        Uses the synchronous ib_insync API directly (qualifyContracts + reqMktData
+        Uses the synchronous ib_async API directly (qualifyContracts + reqMktData
         + sleep) rather than going through async MarketConditionMonitor. This avoids
         the event loop deadlock that occurs when trying to run async code from a
         sync method while the daemon's asyncio loop is already running.
@@ -482,7 +482,7 @@ class ExecutionGate:
         Returns:
             Tuple of (live_vix, live_spy)
         """
-        from ib_insync import Index, Stock
+        from ib_async import Index, Stock
 
         ib = ibkr_client.ib
         live_vix = 20.0  # conservative default
@@ -492,7 +492,7 @@ class ExecutionGate:
         try:
             vix_contract = Index("VIX", "CBOE")
             qualified = ib.qualifyContracts(vix_contract)
-            if qualified and qualified[0].conId:
+            if qualified and qualified[0] is not None and qualified[0].conId:
                 ticker = ib.reqMktData(qualified[0], "", False, False)
                 ibkr_client.wait(2)
                 if ticker.last is not None and ticker.last > 0:
@@ -507,7 +507,7 @@ class ExecutionGate:
             if get_active_profile().code == "US":
                 spy_contract = Stock("SPY", "SMART", "USD")
                 qualified = ib.qualifyContracts(spy_contract)
-                if qualified and qualified[0].conId:
+                if qualified and qualified[0] is not None and qualified[0].conId:
                     ticker = ib.reqMktData(qualified[0], "", False, False)
                     ibkr_client.wait(2)
                     if ticker.last is not None and ticker.last > 0:

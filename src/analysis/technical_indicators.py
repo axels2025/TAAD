@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
 
-from ib_insync import Stock
+from ib_async import Stock
 from loguru import logger
 
 
@@ -166,7 +166,7 @@ class TechnicalIndicatorCalculator:
             stock = Stock(symbol, "SMART", "USD")
             qualified = self.ibkr.ib.qualifyContracts(stock)
 
-            if not qualified:
+            if not qualified or qualified[0] is None:
                 logger.debug(f"Could not qualify contract for {symbol}")
                 return None
 

@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 try:
-    from ib_insync import IB, Index, Option, ScannerSubscription, Stock, TagValue, util
+    from ib_async import IB, Index, Option, ScannerSubscription, Stock, TagValue, util
 
     IB_AVAILABLE = True
 except ImportError:
@@ -224,7 +224,7 @@ class IBKRScannerService:
                     Safe to always enable — no downside during market hours.
         """
         if not IB_AVAILABLE:
-            raise ImportError("ib_insync not installed. Run: pip install ib_insync")
+            raise ImportError("ib_async not installed. Run: pip install ib_async")
 
         util.patchAsyncio()
         self._ib = IB()
@@ -853,7 +853,7 @@ class IBKRScannerService:
                         )
                         continue
 
-                    from ib_insync import MarketOrder
+                    from ib_async import MarketOrder
 
                     order = MarketOrder("SELL", 1)
                     wif = self._ib.whatIfOrder(qualified[0], order)

@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from ib_insync import Contract
+from ib_async import Contract
 from loguru import logger
 
 from src.tools.ibkr_client import IBKRClient
@@ -213,7 +213,7 @@ class MarketConditionMonitor:
             Current VIX value, or 20.0 (conservative default) if unavailable
         """
         try:
-            from ib_insync import Index
+            from ib_async import Index
 
             vix_contract = Index("VIX", "CBOE")
             qualified = await self.client.qualify_contracts_async(vix_contract)
@@ -257,7 +257,7 @@ class MarketConditionMonitor:
             return 0.0
 
         try:
-            from ib_insync import Stock
+            from ib_async import Stock
 
             spy_contract = Stock("SPY", "SMART", "USD")
             qualified = await self.client.qualify_contracts_async(spy_contract)

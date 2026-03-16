@@ -34,7 +34,7 @@ def ibkr_config():
 
 @pytest.fixture
 def mock_ib():
-    """Fixture for mocked ib_insync IB object."""
+    """Fixture for mocked ib_async IB object."""
     ib = Mock()
     ib.isConnected.return_value = True
     ib.placeOrder = Mock()
@@ -67,7 +67,7 @@ def mock_contract():
 @pytest.fixture
 def mock_order():
     """Fixture for a mock order."""
-    from ib_insync import LimitOrder
+    from ib_async import LimitOrder
 
     order = LimitOrder(action="SELL", totalQuantity=5, lmtPrice=0.45)
     order.tif = "DAY"
@@ -446,7 +446,7 @@ class TestAuditLog:
         mock_contract = Mock()
         mock_contract.symbol = "AAPL"
 
-        from ib_insync import LimitOrder
+        from ib_async import LimitOrder
 
         order = LimitOrder(action="SELL", totalQuantity=5, lmtPrice=0.45)
 

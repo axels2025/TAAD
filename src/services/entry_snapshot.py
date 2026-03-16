@@ -445,7 +445,7 @@ class EntrySnapshotService:
         Args:
             snapshot: Snapshot object to populate
         """
-        from ib_insync import Stock, Index
+        from ib_async import Stock, Index
 
         # Get SPY data
         try:

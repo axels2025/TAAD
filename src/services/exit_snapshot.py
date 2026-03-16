@@ -8,7 +8,7 @@ path statistics, and derived learning features.
 from datetime import datetime
 from typing import Optional
 
-from ib_insync import Index, Stock
+from ib_async import Index, Stock
 from loguru import logger
 from sqlalchemy.orm import Session
 
@@ -171,7 +171,7 @@ class ExitSnapshotService:
 
         # Qualify and get data
         qualified = self.ibkr.ib.qualifyContracts(contract)
-        if qualified:
+        if qualified and qualified[0] is not None:
             ticker = self.ibkr.ib.reqMktData(qualified[0], "", False, False)
             self.ibkr.ib.sleep(2)
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from ib_insync import LimitOrder, MarketOrder, Order
+from ib_async import LimitOrder, MarketOrder, Order
 from loguru import logger
 
 from src.utils.position_key import generate_trade_id

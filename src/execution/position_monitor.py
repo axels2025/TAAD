@@ -12,7 +12,7 @@ This module monitors open positions with:
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from ib_insync import Option
+from ib_async import Option
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy
@@ -740,7 +740,7 @@ class PositionMonitor:
             # Get current underlying stock price (for drop detection)
             underlying_price = None
             try:
-                from ib_insync import Stock
+                from ib_async import Stock
                 stock_contract = Stock(contract.symbol, "SMART", "USD")
                 stock_qualified = self.ibkr_client.qualify_contract(stock_contract)
                 if stock_qualified:

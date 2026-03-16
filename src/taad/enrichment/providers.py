@@ -281,11 +281,11 @@ class IBKRHistoricalProvider(HistoricalDataProvider):
             return None
 
         try:
-            from ib_insync import Stock
+            from ib_async import Stock
 
             stock = Stock(symbol, "SMART", "USD")
             qualified = self.ibkr.ib.qualifyContracts(stock)
-            if not qualified:
+            if not qualified or qualified[0] is None:
                 return None
 
             bars = self.ibkr.ib.reqHistoricalData(
@@ -327,11 +327,11 @@ class IBKRHistoricalProvider(HistoricalDataProvider):
             return None
 
         try:
-            from ib_insync import Stock
+            from ib_async import Stock
 
             stock = Stock(symbol, "SMART", "USD")
             qualified = self.ibkr.ib.qualifyContracts(stock)
-            if not qualified:
+            if not qualified or qualified[0] is None:
                 return None
 
             duration = f"{lookback_days + 30} D"
@@ -370,11 +370,11 @@ class IBKRHistoricalProvider(HistoricalDataProvider):
             return None
 
         try:
-            from ib_insync import Index
+            from ib_async import Index
 
             vix = Index("VIX", "CBOE")
             qualified = self.ibkr.ib.qualifyContracts(vix)
-            if not qualified:
+            if not qualified or qualified[0] is None:
                 return None
 
             bars = self.ibkr.ib.reqHistoricalData(

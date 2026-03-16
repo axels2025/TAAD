@@ -2751,7 +2751,7 @@ def quote(
         nakedtrader quote AAPL --option --strike 150 --expiration 2026-02-21
     """
     try:
-        from ib_insync import Stock, Option as IBOption
+        from ib_async import Stock, Option as IBOption
 
         console.print(f"[bold blue]Quote: {symbol}[/bold blue]\n")
 
@@ -2805,7 +2805,7 @@ def quote(
             contract = Stock(symbol, "SMART", "USD")
             qualified = client.ib.qualifyContracts(contract)
 
-            if not qualified:
+            if not qualified or qualified[0] is None:
                 console.print(f"[bold red]✗ Could not find stock: {symbol}[/bold red]")
                 client.disconnect()
                 raise typer.Exit(1)
@@ -2922,7 +2922,7 @@ def option_chain(
         nakedtrader chain AAPL --right C
     """
     try:
-        from ib_insync import Stock
+        from ib_async import Stock
         from rich.table import Table
 
         console.print(f"[bold blue]Option Chain: {symbol}[/bold blue]\n")
@@ -2936,7 +2936,7 @@ def option_chain(
         stock = Stock(symbol, "SMART", "USD")
         qualified_stock = client.ib.qualifyContracts(stock)
 
-        if not qualified_stock:
+        if not qualified_stock or qualified_stock[0] is None:
             console.print(f"[bold red]✗ Could not find stock: {symbol}[/bold red]")
             client.disconnect()
             raise typer.Exit(1)
@@ -4351,7 +4351,7 @@ def execute_two_tier(
                 import signal
 
                 # Register SIGINT handler to force clean shutdown.
-                # ib_insync holds the event loop open, so asyncio.run()
+                # ib_async holds the event loop open, so asyncio.run()
                 # can hang on Ctrl+C unless we disconnect IBKR first.
                 _original_sigint = signal.getsignal(signal.SIGINT)
 

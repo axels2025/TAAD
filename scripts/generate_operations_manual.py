@@ -304,7 +304,7 @@ def write_section_2(doc):
             ["Database", "PostgreSQL (prod) / SQLite (dev)", "Data persistence"],
             ["ORM", "SQLAlchemy 2.0", "Database abstraction"],
             ["Migrations", "Alembic", "Schema management"],
-            ["Broker API", "ib_insync 0.9.86", "Interactive Brokers integration"],
+            ["Broker API", "ib_async 0.9.86", "Interactive Brokers integration"],
             ["Market Data", "Barchart onDemand API", "Screening and scanning"],
             ["AI/LLM", "Anthropic Claude (Opus/Sonnet)", "Reasoning engine, reflection"],
             ["ML", "scikit-learn, scipy", "Pattern detection, statistics"],
@@ -1030,7 +1030,7 @@ def write_section_13(doc):
 
     doc.add_heading("Interactive Brokers (IBKR)", level=2)
     doc.add_paragraph(
-        "Connected via ib_insync library. Requires TWS or IB Gateway running locally. "
+        "Connected via ib_async library. Requires TWS or IB Gateway running locally. "
         "API capabilities used: order placement, real-time quotes, option chains, Greeks, "
         "whatIfOrder margin calculation, Adaptive Algo routing, Flex Query imports."
     )
@@ -1288,7 +1288,7 @@ def write_section_18(doc):
         ("Gamma", "The rate of change of delta per $1 change in the underlying. High gamma means delta can change rapidly, increasing risk as expiration approaches."),
         ("Historical Volatility (HV)", "A measure of how much a stock's price has moved in the past, typically over 20 trading days. Compared to implied volatility to assess option pricing."),
         ("IB Gateway", "A lightweight, headless version of TWS for API-only access. Recommended for production use as it doesn't require a display."),
-        ("ib_insync", "A Python library that provides a synchronous, Pythonic interface to the Interactive Brokers API. TAAD uses it for all broker interactions."),
+        ("ib_async", "A Python library that provides a synchronous, Pythonic interface to the Interactive Brokers API. TAAD uses it for all broker interactions."),
         ("Implied Volatility (IV)", "The market's expectation of future price movement, embedded in the option's price. Higher IV means higher premiums for sellers."),
         ("Iron Condor", "A four-leg options strategy. Not used by TAAD, which focuses on single-leg naked puts."),
         ("ITM (In-the-Money)", "A put option with a strike price above the current stock price. TAAD avoids ITM options."),

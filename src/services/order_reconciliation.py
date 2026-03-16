@@ -1181,7 +1181,7 @@ class OrderReconciliation:
         vix_at_import = None
         spy_at_import = None
         try:
-            from ib_insync import Index
+            from ib_async import Index
             vix_contract = Index("VIX", "CBOE")
             vix_qualified = self.client.qualify_contract(vix_contract)
             if vix_qualified:

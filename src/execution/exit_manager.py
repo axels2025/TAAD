@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from ib_insync import LimitOrder, MarketOrder
+from ib_async import LimitOrder, MarketOrder
 from loguru import logger
 
 from src.config.baseline_strategy import BaselineStrategy

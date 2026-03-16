@@ -198,10 +198,14 @@ class Phase2Validator:
             Current stock price
         """
         try:
-            from ib_insync import Stock
+            from ib_async import Stock
 
             contract = Stock(symbol, "SMART", "USD")
-            qualified = self.ibkr_client.ib.qualifyContracts(contract)[0]
+            qualified_list = self.ibkr_client.ib.qualifyContracts(contract)
+            if not qualified_list or qualified_list[0] is None:
+                logger.warning(f"Could not qualify contract for {symbol}")
+                return None
+            qualified = qualified_list[0]
             ticker = self.ibkr_client.ib.reqMktData(qualified)
 
             # Wait for price data

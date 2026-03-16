@@ -19,7 +19,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ib_insync import IB, util
+from ib_async import IB, util
 
 
 def connect_ibkr(client_id: int = 20) -> IB:

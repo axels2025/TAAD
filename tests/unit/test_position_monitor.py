@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-from ib_insync import Option
+from ib_async import Option
 
 from src.config.baseline_strategy import BaselineStrategy, ExitRules
 from src.execution.position_monitor import PositionAlert, PositionMonitor, PositionStatus

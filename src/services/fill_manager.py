@@ -421,7 +421,7 @@ class FillManager:
 
             # Place via adaptive executor — needs access to the executor
             # For now, use the IBKR client directly with a limit order
-            from ib_insync import LimitOrder
+            from ib_async import LimitOrder
 
             order = LimitOrder(
                 action="SELL",
@@ -507,7 +507,7 @@ class FillManager:
             await self.client.sleep(0.2)
 
             # Place new order at lower limit
-            from ib_insync import LimitOrder
+            from ib_async import LimitOrder
 
             remaining = pending.staged.staged_contracts - (pending.filled_qty or 0)
             if remaining <= 0:

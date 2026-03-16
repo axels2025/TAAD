@@ -64,7 +64,7 @@ class PendingOrder:
     """
 
     staged: StagedOpportunity
-    contract: any  # ib_insync Contract
+    contract: any  # ib_async Contract
     order_id: int
     initial_limit: float
     current_limit: float
@@ -319,11 +319,11 @@ class RapidFireExecutor:
     def _on_order_status(self, trade):
         """Event callback for order status changes.
 
-        This is called automatically by ib_insync when order status changes.
+        This is called automatically by ib_async when order status changes.
         Runs in parallel for all orders - no polling needed.
 
         Args:
-            trade: Trade object from ib_insync with updated status
+            trade: Trade object from ib_async with updated status
         """
         order_id = trade.order.orderId
 

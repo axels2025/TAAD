@@ -20,7 +20,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol
 
-from ib_insync import LimitOrder
+from ib_async import LimitOrder
 from loguru import logger
 
 from src.services.adaptive_order_executor import AdaptiveOrderExecutor

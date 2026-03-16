@@ -1,6 +1,6 @@
 """Interactive Brokers API client wrapper with retry logic.
 
-This module provides a robust wrapper around ib_insync with automatic
+This module provides a robust wrapper around ib_async with automatic
 reconnection, retry logic, and comprehensive error handling.
 """
 
@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from ib_insync import IB, Contract, Index, LimitOrder, Option, Order, Stock, Trade, util
+from ib_async import IB, Contract, Index, LimitOrder, Option, Order, Stock, Trade, util
 from loguru import logger
 
 from src.config.base import IBKRConfig
@@ -114,7 +114,7 @@ class Error200Filter(logging.Filter):
 
 
 class IBKRWarningFilter(logging.Filter):
-    """Filter to suppress WARNING level messages from ib_insync.
+    """Filter to suppress WARNING level messages from ib_async.
 
     This filter suppresses non-critical warnings that clutter the output.
     Only allows ERROR and CRITICAL messages through.
@@ -237,7 +237,7 @@ class IBKRErrorConsolidator(logging.Filter):
 
 
 class IBKRClient:
-    """Wrapper around ib_insync with retry logic and error handling.
+    """Wrapper around ib_async with retry logic and error handling.
 
     This client provides automatic reconnection and retry logic for
     robust interaction with Interactive Brokers API.
@@ -266,20 +266,20 @@ class IBKRClient:
         self._order_audit_log: list[OrderAuditEntry] = []
         self._account_id: str | None = None
 
-        # Disable ib_insync console logging to prevent error spam
+        # Disable ib_async console logging to prevent error spam
         if suppress_errors:
-            # Set ib_insync logging to ERROR level (suppress WARNING/INFO/DEBUG)
-            logging.getLogger('ib_insync.client').setLevel(logging.ERROR)
-            logging.getLogger('ib_insync.wrapper').setLevel(logging.ERROR)
-            logging.getLogger('ib_insync.ib').setLevel(logging.ERROR)
+            # Set ib_async logging to ERROR level (suppress WARNING/INFO/DEBUG)
+            logging.getLogger('ib_async.client').setLevel(logging.ERROR)
+            logging.getLogger('ib_async.wrapper').setLevel(logging.ERROR)
+            logging.getLogger('ib_async.ib').setLevel(logging.ERROR)
 
             # Add filters to consolidate and suppress common errors
-            wrapper_logger = logging.getLogger('ib_insync.wrapper')
+            wrapper_logger = logging.getLogger('ib_async.wrapper')
             wrapper_logger.addFilter(Error200Filter())
             wrapper_logger.addFilter(IBKRWarningFilter())
             wrapper_logger.addFilter(IBKRErrorConsolidator())  # New consolidated error handler
 
-            client_logger = logging.getLogger('ib_insync.client')
+            client_logger = logging.getLogger('ib_async.client')
             client_logger.addFilter(IBKRWarningFilter())
             client_logger.addFilter(IBKRErrorConsolidator())
 
@@ -393,17 +393,17 @@ class IBKRClient:
             >>> client.connect()
             True
         """
-        # Patch asyncio to work with ib_insync's event loop
+        # Patch asyncio to work with ib_async's event loop
         util.patchAsyncio()
 
         attempts = 0
         max_attempts = self.max_retries if retry else 1
 
-        # Temporarily suppress all ib_insync console output during connection
+        # Temporarily suppress all ib_async console output during connection
         # Save original log levels
-        client_logger = logging.getLogger('ib_insync.client')
-        wrapper_logger = logging.getLogger('ib_insync.wrapper')
-        ib_logger = logging.getLogger('ib_insync.ib')
+        client_logger = logging.getLogger('ib_async.client')
+        wrapper_logger = logging.getLogger('ib_async.wrapper')
+        ib_logger = logging.getLogger('ib_async.ib')
 
         original_client_level = client_logger.level
         original_wrapper_level = wrapper_logger.level
@@ -696,7 +696,7 @@ class IBKRClient:
 
         try:
             qualified_contracts = self.ib.qualifyContracts(contract)
-            if qualified_contracts:
+            if qualified_contracts and qualified_contracts[0] is not None:
                 return qualified_contracts[0]
             else:
                 logger.warning(f"Could not qualify contract: {contract}")
@@ -958,7 +958,7 @@ class IBKRClient:
             import pytz
 
             # Create a simple stock contract for the exchange
-            from ib_insync import Stock
+            from ib_async import Stock
             contract = Stock("SPY", exchange, "USD")
 
             # Get contract details which include trading hours
@@ -1104,7 +1104,7 @@ class IBKRClient:
             logger.warning("Cannot get margin: not connected to IBKR")
             return None
 
-        from ib_insync import MarketOrder
+        from ib_async import MarketOrder
 
         order = MarketOrder("SELL", quantity)
         order.tif = "DAY"  # Explicitly set Time-In-Force to avoid IBKR warning
@@ -1245,7 +1245,7 @@ class IBKRClient:
             reason: Human-readable reason for placement
 
         Returns:
-            Trade object from ib_insync
+            Trade object from ib_async
 
         Raises:
             Exception: If order placement fails
@@ -1456,7 +1456,7 @@ class IBKRClient:
         finally:
             # Always cancel market data subscription to free the data line
             # and ensure fresh subscriptions on subsequent calls. Without this,
-            # ib_insync reuses stale tickers that never received data.
+            # ib_async reuses stale tickers that never received data.
             try:
                 self.ib.cancelMktData(contract)
             except Exception:
@@ -1510,7 +1510,7 @@ class IBKRClient:
         that don't have bid/ask).
 
         Args:
-            ticker: Ticker object from ib_insync
+            ticker: Ticker object from ib_async
 
         Returns:
             True if valid market data is available
@@ -1548,7 +1548,8 @@ class IBKRClient:
         """
         self.ensure_connected()
 
-        return await self.ib.qualifyContractsAsync(*contracts)
+        results = await self.ib.qualifyContractsAsync(*contracts)
+        return [r for r in results if r is not None]
 
     # ═════════════════════════════════════════════════════════════════════════
     # SYNC WRAPPER METHODS
@@ -1576,7 +1577,7 @@ class IBKRClient:
             reason: Human-readable reason for placement
 
         Returns:
-            Trade object from ib_insync
+            Trade object from ib_async
 
         Raises:
             Exception: If order placement fails
@@ -1805,7 +1806,7 @@ class IBKRClient:
         """Get all trades for this session.
 
         Returns:
-            List of Trade objects from ib_insync
+            List of Trade objects from ib_async
 
         Example:
             >>> trades = client.get_trades()
@@ -1902,7 +1903,7 @@ class IBKRClient:
             ...     print(f"Order {fill.execution.orderId}: "
             ...           f"{fill.execution.side} @ ${fill.execution.avgPrice}")
         """
-        from ib_insync import ExecutionFilter
+        from ib_async import ExecutionFilter
 
         self.ensure_connected()
         fills = self.ib.reqExecutions(ExecutionFilter())

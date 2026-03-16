@@ -521,7 +521,7 @@ class TestLiveErrorHandling:
 
     def test_handles_invalid_contract(self, live_ibkr_client):
         """Test handling of invalid contract requests."""
-        from ib_insync import Stock
+        from ib_async import Stock
 
         # Create invalid contract
         invalid = Stock("", "", "")
