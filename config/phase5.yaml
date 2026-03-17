@@ -23,7 +23,7 @@ claude:
   max_tokens: 4096
   temperature: 0.2
   daily_cost_cap_usd: 10.0
-  max_retries: 3
+  max_retries: 1
   reasoning_system_prompt: ''
   position_exit_system_prompt: ''
   reflection_system_prompt: ''
@@ -61,7 +61,8 @@ learning:
   eod_reflection_frequency: daily
   hypothesis_generation_enabled: true
   hypothesis_model: claude-opus-4-6
-  learning_accounts: []
+  learning_accounts:
+  - U7130270:ibkr_import
 auto_scan:
   enabled: false
   delay_minutes: 5
@@ -73,33 +74,6 @@ exit_rules:
   stop_loss: -3.0
   time_exit_dte: -1
   let_expire_premium: 0.05
-regime_adaptation:
-  enabled: true
-  regime_overrides:
-    low:
-      profit_target: 0.50
-      stop_loss: -2.0
-      max_positions: 5
-    normal:
-      profit_target: 0.75
-      stop_loss: -3.0
-      max_positions: 6
-    elevated:
-      profit_target: 0.65
-      stop_loss: -3.0
-      max_positions: 5
-      position_size_pct: 0.8
-    high:
-      profit_target: 0.50
-      stop_loss: -2.0
-      max_positions: 3
-      position_size_pct: 0.5
-    extreme:
-      profit_target: 0.40
-      stop_loss: -1.5
-      max_positions: 2
-      position_size_pct: 0.25
-  max_regime_experiments: 2
 strategy:
   entry_days:
   - Monday

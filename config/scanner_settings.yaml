@@ -1,10 +1,10 @@
 filters:
   delta_min: 0.05
-  delta_max: 0.15
+  delta_max: 0.2
   delta_target: 0.065
   min_premium: 0.3
-  min_otm_pct: 0.05
-  max_dte: 7
+  min_otm_pct: 0.1
+  max_dte: 14
   dte_prefer_shortest: true
 ranking:
   safety: 40
@@ -14,29 +14,29 @@ ranking:
 budget:
   margin_budget_pct: 0.5
   margin_budget_default: 50000.0
-  max_positions: 25
-  max_positions_per_day: 25
-  max_per_sector: 5
+  max_positions: 50
+  max_positions_per_day: 10
+  max_per_sector: 10
   price_threshold: 90.0
-  max_contracts_expensive: 5
-  max_contracts_cheap: 10
-  risk_per_trade_pct: 0.05
-  loss_assumption_pct: 0.15
-  vix_scale_normal: 1.0
-  vix_scale_elevated: 0.75
+  max_contracts_expensive: 10
+  max_contracts_cheap: 20
+  risk_per_trade_pct: 0.02
+  loss_assumption_pct: 0.25
+  vix_scale_normal: 0.8
+  vix_scale_elevated: 0.5
   vix_scale_extreme: 0.25
 risk_governor:
-  max_margin_utilization: 0.5
+  max_margin_utilization: 0.8
   max_margin_per_trade_pct: 0.1
   max_daily_loss_pct: -0.02
   max_weekly_loss_pct: -0.05
   max_drawdown_pct: -0.1
-  max_position_loss: -2000.0
-  max_spread_pct: 0.10
-  max_sector_concentration: 0.30
+  max_position_loss: -500.0
+  max_spread_pct: 0.1
+  max_sector_concentration: 0.3
 earnings:
   enabled: true
-  additional_otm_pct: 0.15
+  additional_otm_pct: 0.1
   lookahead_days: 0
 scanner:
   num_rows: 100
