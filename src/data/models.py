@@ -1246,6 +1246,10 @@ class DaemonHealth(Base):
     autonomy_level = Column(Integer, default=1)
     ibkr_connected = Column(Boolean, default=False)
     message = Column(Text, nullable=True)  # Human-readable status message
+    # Scan progress: populated while auto-scan pipeline is running
+    scan_phase = Column(String(30), nullable=True)  # e.g. SCANNING, CHAINS, SCORING, AI, SELECTING
+    scan_symbol = Column(String(20), nullable=True)  # Current symbol being processed
+    scan_progress = Column(String(20), nullable=True)  # e.g. "12/50"
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     def __repr__(self) -> str:

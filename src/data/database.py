@@ -99,6 +99,18 @@ def _apply_schema_migrations(engine: Engine) -> None:
                 conn.commit()
             except Exception:
                 pass  # Column already exists
+
+            # Scan progress columns in daemon health
+            for col in (
+                "scan_phase VARCHAR(30)",
+                "scan_symbol VARCHAR(20)",
+                "scan_progress VARCHAR(20)",
+            ):
+                try:
+                    conn.execute(text(f"ALTER TABLE daemon_health ADD COLUMN {col}"))
+                    conn.commit()
+                except Exception:
+                    pass  # Column already exists
         else:
             # PostgreSQL supports IF NOT EXISTS
             conn.execute(
@@ -127,6 +139,17 @@ def _apply_schema_migrations(engine: Engine) -> None:
             conn.execute(text(
                 "ALTER TABLE daemon_health ADD COLUMN IF NOT EXISTS ibkr_connected BOOLEAN DEFAULT FALSE"
             ))
+            conn.commit()
+
+            # Scan progress columns in daemon health
+            for col in (
+                "scan_phase VARCHAR(30)",
+                "scan_symbol VARCHAR(20)",
+                "scan_progress VARCHAR(20)",
+            ):
+                conn.execute(text(
+                    f"ALTER TABLE daemon_health ADD COLUMN IF NOT EXISTS {col}"
+                ))
             conn.commit()
 
 

@@ -40,7 +40,7 @@ COMMON_ABBREVIATIONS = {
     "PM", "AM", "ET", "EST", "EDT", "UTC", "AEDT", "AEST",  # Time / timezones
     "QQQ", "IWM", "XSP", "XLE", "XLF", "XLK", "XLV",  # Common ETFs (US)
     "XJO", "NDQ",  # Common ASX ETFs / indices
-    "TAAD",  # Our system
+    "TAAD", "CRO",  # Our system
     "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN",  # Days
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",  # Months
@@ -279,6 +279,10 @@ class OutputValidator:
             "OWN", "SAY", "TOO", "TWO", "WAY", "WHO", "DAY", "GET", "HIS",
             "HOW", "ITS", "LET", "PUT", "SET", "TRY", "USE", "YET",
             "LOW", "HIGH", "MAX", "MIN", "NET", "PER", "PRE", "RUN",
+            "CAS", "NOR", "DID", "TOP", "END", "MIX", "GAP", "DUE",
+            "RAW", "KEY", "BIG", "FEW", "FAR", "ADD", "AGO", "AIM",
+            "CAP", "CUT", "DIP", "FIT", "HIT", "LOG", "MID", "ODD",
+            "PAY", "RED", "SAT", "TAG", "VIA",
             # 4-letter English words (appear in Claude's structured reasoning headers)
             "ALSO", "BACK", "BEEN", "BEST", "BOTH", "CALL", "CASE", "COME",
             "COST", "DATA", "DATE", "DAYS", "DOES", "DONE", "DOWN", "EACH",
@@ -300,8 +304,11 @@ class OutputValidator:
             "THOSE", "THREE", "TODAY", "TOTAL", "TRADE", "TREND", "UNDER",
             "UNTIL", "UPPER", "VALUE", "WATCH", "WHERE", "WHICH", "WHILE",
             "WHOLE", "WHOSE", "WOULD", "WORST",
-            # Plurals of trading terms that appear in options reasoning
+            # Plurals and domain terms that appear in options reasoning
             "PUTS", "CALLS", "SELLS", "BUYS",
+            "SHORT", "DELTA", "GAMMA", "THETA", "VEGA",
+            "STAGE", "BATCH", "CHAIN", "COVER", "NAKED",
+            "EARLY", "STALE", "FRESH",
         }
         unknown_symbols = found_symbols - known_symbols - COMMON_ABBREVIATIONS - short_words
 

@@ -19,12 +19,12 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from loguru import logger
 from sqlalchemy.orm import Session
 
-from src.data.models import ScanOpportunity, ScanResult
+from src.data.models import DaemonHealth, ScanOpportunity, ScanResult
 from src.utils.timezone import utc_now
 from src.services.earnings_service import EarningsInfo, get_cached_earnings
 from src.services.ibkr_scanner import (
@@ -388,6 +388,32 @@ def run_scan_and_persist(
     return scan.id, opportunities
 
 
+def _update_scan_progress(
+    db: Session,
+    phase: str | None,
+    symbol: str | None = None,
+    progress: str | None = None,
+) -> None:
+    """Write scan progress to DaemonHealth for dashboard visibility.
+
+    Args:
+        db: SQLAlchemy session.
+        phase: Current scan phase (SCANNING, CHAINS, SCORING, AI, SELECTING),
+               or None to clear progress.
+        symbol: Current symbol being processed.
+        progress: Progress string, e.g. "12/50".
+    """
+    try:
+        health = db.query(DaemonHealth).get(1)
+        if health:
+            health.scan_phase = phase
+            health.scan_symbol = symbol
+            health.scan_progress = progress
+            db.commit()
+    except Exception:
+        db.rollback()
+
+
 def run_auto_select_pipeline(
     scan_id: int,
     db: Session,
@@ -522,11 +548,19 @@ def run_auto_select_pipeline(
 
     # Step 5: Load chains batch
     max_dte = settings.filters.max_dte
+
+    def _chain_progress(symbol: str, current: int, total: int) -> None:
+        _update_scan_progress(db, "CHAINS", symbol, f"{current}/{total}")
+
+    _update_scan_progress(db, "CHAINS", symbols[0] if symbols else None, f"0/{len(symbols)}")
     try:
         service = IBKRScannerService()
-        all_chains = service.get_option_chains_batch(symbols, max_dte=max_dte)
+        all_chains = service.get_option_chains_batch(
+            symbols, max_dte=max_dte, on_progress=_chain_progress,
+        )
     except Exception as e:
         logger.error(f"Auto-select pipeline: batch chain load failed — {e}")
+        _update_scan_progress(db, None)  # Clear progress on failure
         return AutoSelectResult(
             success=False,
             error=f"Chain loading failed: {e}",
@@ -556,6 +590,7 @@ def run_auto_select_pipeline(
             logger.debug(f"Earnings fetch failed for {symbol}: {e}")
 
     # Step 6: Filter candidates + batch margin queries
+    _update_scan_progress(db, "SCORING")
     selector = AutoSelector(settings)
     all_candidates: dict[str, list] = {}
     margin_queries: list[dict] = []
@@ -645,6 +680,7 @@ def run_auto_select_pipeline(
             )
 
     # Step 8: Call Claude for AI recommendations
+    _update_scan_progress(db, "AI")
     symbol_data = build_symbol_data(opps)
     active_best = [r for r in best_results if r.status != "skipped"]
     best_strike_dicts = []
@@ -733,6 +769,7 @@ def run_auto_select_pipeline(
         portfolio_candidates.append(pc)
 
     # Step 10: Greedy portfolio selection within budget
+    _update_scan_progress(db, "SELECTING")
     selected, skipped, warnings = build_auto_select_portfolio(
         portfolio_candidates,
         available_budget=available_budget,
@@ -755,6 +792,8 @@ def run_auto_select_pipeline(
 
     elapsed = time.time() - t0
     used_by_selection = sum(s.total_margin for s in selected)
+
+    _update_scan_progress(db, None)  # Clear scan progress — pipeline complete
 
     logger.info(
         f"Auto-select pipeline complete: {len(selected)} selected, "

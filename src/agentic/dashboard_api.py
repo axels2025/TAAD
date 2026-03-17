@@ -258,6 +258,9 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 "ibkr_connected": getattr(health, "ibkr_connected", False) or False,
                 "stop_requested": Path("run/stop_requested").exists(),
                 "watchdog": watchdog,
+                "scan_phase": getattr(health, "scan_phase", None),
+                "scan_symbol": getattr(health, "scan_symbol", None),
+                "scan_progress": getattr(health, "scan_progress", None),
             }
 
     @app.get("/api/positions")
@@ -1174,7 +1177,7 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
                 "guardrail_blocks": blocks,
                 "guardrail_warnings": warnings,
                 "flagged_guards": flagged_guards,
-                "recent_findings": recent_findings[-10:],
+                "recent_findings": recent_findings[-50:],
             }
 
     # Pre-execution states that can be unstaged (includes EXECUTING for stuck rows)
@@ -1522,6 +1525,69 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .stat.yellow .value { color: var(--yellow); }
   .stat.red .value { color: var(--red); }
   .stat.dim .value { color: var(--text-dim); }
+  .stat.cyan .value { color: #4dd0e1; }
+
+  /* Scan progress popup */
+  .scan-progress-popup {
+    display: none;
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--bg2);
+    border: 1px solid rgba(77, 208, 225, 0.4);
+    border-radius: 10px;
+    padding: 16px 20px;
+    min-width: 260px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    z-index: 1000;
+    animation: slideUp 0.3s ease-out;
+  }
+  .scan-progress-popup.active { display: block; }
+  .scan-progress-popup .popup-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: #4dd0e1;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .scan-progress-popup .popup-header .scan-spinner {
+    width: 12px; height: 12px;
+    border: 2px solid rgba(77,208,225,0.3);
+    border-top-color: #4dd0e1;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  .scan-progress-popup .popup-symbol {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 1px;
+  }
+  .scan-progress-popup .popup-phase {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+  .scan-progress-popup .popup-bar {
+    margin-top: 10px;
+    height: 4px;
+    background: var(--bg3);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .scan-progress-popup .popup-bar .fill {
+    height: 100%;
+    background: linear-gradient(90deg, #4dd0e1, #00e676);
+    border-radius: 2px;
+    transition: width 0.5s ease;
+  }
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
   /* Tables */
   table { width: 100%; border-collapse: collapse; }
@@ -1726,6 +1792,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <span id="scan-banner-text">Scanning in progress...</span>
     <span class="scan-elapsed" id="scan-elapsed"></span>
   </div>
+</div>
+
+<!-- Scan progress popup (bottom-right) -->
+<div class="scan-progress-popup" id="scan-progress-popup">
+  <div class="popup-header"><div class="scan-spinner"></div> Finding New Trades</div>
+  <div class="popup-symbol" id="scan-popup-symbol">--</div>
+  <div class="popup-phase" id="scan-popup-phase">Initializing...</div>
+  <div class="popup-bar"><div class="fill" id="scan-popup-bar" style="width:0%"></div></div>
 </div>
 
 <!-- Output panel overlay (sync/reconcile results) -->
@@ -1976,6 +2050,18 @@ function fmtTime(ts) {
   return d.toLocaleTimeString('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
 
+function fmtDateTime(ts) {
+  if (!ts || ts === 'None') return '--';
+  let cleaned = ts.replace(/\s+[A-Z]{2,5}$/, '');
+  let iso = cleaned.replace(' ', 'T');
+  if (!iso.endsWith('Z') && !iso.includes('+')) iso += 'Z';
+  const d = new Date(iso);
+  if (isNaN(d)) return '--';
+  const tz = _tz === 'AEDT' ? 'Australia/Sydney' : (_tz === 'ET' ? 'America/New_York' : 'UTC');
+  const opts = { timeZone: tz, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
+  return d.toLocaleString('en-US', opts).replace(',', '');
+}
+
 function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -2078,6 +2164,58 @@ function hideScanBanner(result, isError) {
   banner.className = 'scan-banner active ' + (isError ? 'error' : 'done');
   text.textContent = result;
   setTimeout(() => { banner.className = 'scan-banner'; }, 5000);
+}
+
+const _SCAN_PHASE_LABELS = {
+  SCANNING: 'Running IBKR scanner...',
+  CHAINS: 'Loading option chains from IBKR',
+  SCORING: 'Filtering & scoring candidates...',
+  AI: 'Claude AI analysis...',
+  SELECTING: 'Building optimal portfolio...',
+};
+
+function _updateScanProgressPopup(status) {
+  const popup = document.getElementById('scan-progress-popup');
+  if (!popup) return;
+
+  if (!status.scan_phase) {
+    popup.classList.remove('active');
+    return;
+  }
+
+  popup.classList.add('active');
+  const symbolEl = document.getElementById('scan-popup-symbol');
+  const phaseEl = document.getElementById('scan-popup-phase');
+  const barEl = document.getElementById('scan-popup-bar');
+
+  symbolEl.textContent = status.scan_symbol || '...';
+
+  const phaseLabel = _SCAN_PHASE_LABELS[status.scan_phase] || status.scan_phase;
+  let progressText = phaseLabel;
+  let pct = 0;
+
+  if (status.scan_progress) {
+    const parts = status.scan_progress.split('/');
+    if (parts.length === 2) {
+      const cur = parseInt(parts[0], 10);
+      const total = parseInt(parts[1], 10);
+      if (total > 0) {
+        pct = Math.round((cur / total) * 100);
+        progressText = phaseLabel + ' \u2014 ' + cur + '/' + total;
+      }
+    }
+  } else if (status.scan_phase === 'SCORING') {
+    pct = 70;
+  } else if (status.scan_phase === 'AI') {
+    pct = 80;
+  } else if (status.scan_phase === 'SELECTING') {
+    pct = 95;
+  } else if (status.scan_phase === 'SCANNING') {
+    pct = 5;
+  }
+
+  phaseEl.textContent = progressText;
+  barEl.style.width = pct + '%';
 }
 
 async function triggerAutoScan() {
@@ -2475,7 +2613,7 @@ async function fetchData() {
         '<div class="empty" style="grid-column:1/-1">Greeks unavailable</div>';
     }
 
-    // Daemon focus — derived from staged + positions + alive state
+    // Daemon focus — derived from scan progress + staged + positions + alive state
     const focusEl = document.getElementById('focus-stat');
     if (focusEl) {
       let focusLabel, focusColor;
@@ -2483,6 +2621,8 @@ async function fetchData() {
         focusLabel = 'OFFLINE'; focusColor = 'red';
       } else if (status.status === 'paused') {
         focusLabel = 'PAUSED'; focusColor = 'yellow';
+      } else if (status.scan_phase) {
+        focusLabel = 'FINDING TRADES'; focusColor = 'cyan';
       } else {
         const activeStates = (staged.trades||[]).filter(t => ['VALIDATING','READY','CONFIRMED'].includes(t.state));
         const waitingStates = (staged.trades||[]).filter(t => t.state === 'STAGED');
@@ -2499,6 +2639,9 @@ async function fetchData() {
       focusEl.className = 'stat' + (focusColor ? ' ' + focusColor : '');
       focusEl.innerHTML = `<div class="value" style="font-size:14px;">${focusLabel}</div><div class="label">Focus</div>`;
     }
+
+    // Scan progress popup — show/hide based on scan_phase
+    _updateScanProgressPopup(status);
 
     // Daemon plan message
     const planEl = document.getElementById('daemon-plan');
@@ -2571,21 +2714,23 @@ async function fetchData() {
           <div class="stat"><div class="value">${gr.total_decisions||0}</div><div class="label">Decisions</div></div>
         </div>
         ${gr.recent_findings && gr.recent_findings.length ? (() => {
-          const findings = gr.recent_findings.slice(0,5);
+          const findings = gr.recent_findings;
           const unreadCount = findings.filter(f => !readFindings.has(f.decision_id + ':' + f.guard_name)).length;
           return '<div style="margin-top:10px;font-size:11px;">' +
             (unreadCount > 0 ? '<div style="margin-bottom:6px;text-align:right;"><button class="btn btn-control" onclick="markAllFindingsRead()" style="padding:2px 8px;font-size:10px;">Mark All Read</button></div>' : '') +
+            '<div style="max-height:300px;overflow-y:auto;">' +
             findings.map(f => {
               const key = f.decision_id + ':' + f.guard_name;
               const isNew = !readFindings.has(key);
-              return '<div data-finding-key="' + key + '" style="margin-bottom:6px;padding:4px 6px;border-radius:3px;' +
+              return '<a href="/decision/' + f.decision_id + '" data-finding-key="' + key + '" style="display:block;text-decoration:none;margin-bottom:6px;padding:4px 6px;border-radius:3px;' +
                 (isNew ? 'background:rgba(255,214,0,0.08);color:var(--text);' : 'color:var(--text-dim);') + '">' +
                 (isNew ? '<span style="color:var(--yellow);font-weight:600;margin-right:4px;">\u25cf</span>' : '') +
                 '<span class="tag ' + (f.severity === 'block' ? 'tag-no' : 'tag-pending') + '">' + f.severity.toUpperCase() + '</span> ' +
-                '<span style="color:var(--text-dim);margin:0 4px;">' + fmtTime(f.timestamp) + '</span> ' +
+                '<span style="color:var(--text-dim);margin:0 4px;">' + fmtDateTime(f.timestamp) + '</span> ' +
+                '<span style="color:var(--text-dim);margin-right:4px;">#' + f.decision_id + '</span>' +
                 esc(f.guard_name) + ': ' + esc(f.reason).substring(0,80) +
-                '</div>';
-            }).join('') + '</div>';
+                '</a>';
+            }).join('') + '</div></div>';
         })() : ''}`;
     } catch(e) { document.getElementById('guardrails-body').innerHTML = '<div class="empty">Guardrails not available</div>'; }
 
@@ -2595,10 +2740,10 @@ async function fetchData() {
     document.getElementById('dec-count').textContent = decisions.length;
     document.getElementById('decisions-body').innerHTML = decisions.length ? `
       <table>
-        <tr><th>ID</th><th>Time</th><th>Event</th><th>Action</th><th>Confidence</th><th>Exec</th><th>Reasoning</th></tr>
-        ${decisions.slice(0, 25).map(d => `<tr style="cursor:pointer" onclick="location.href='/decision/${d.id}'">
+        <tr><th>ID</th><th>Date/Time</th><th>Event</th><th>Action</th><th>Confidence</th><th>Exec</th><th>Reasoning</th></tr>
+        ${decisions.slice(0, 50).map(d => `<tr style="cursor:pointer" onclick="location.href='/decision/${d.id}'">
           <td style="color:var(--text-dim)">${d.id}</td>
-          <td style="color:var(--text-dim)">${fmtTime(d.timestamp)}</td>
+          <td style="color:var(--text-dim);white-space:nowrap;">${fmtDateTime(d.timestamp)}</td>
           <td>${d.event_type}</td>
           <td>${actionTag(d.action)}</td>
           <td>${confBar(d.confidence)}</td>

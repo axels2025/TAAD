@@ -407,6 +407,7 @@ class IBKRScannerService:
     def get_option_chains_batch(
         self, symbols: list[str], max_dte: int = 7,
         exchange: str = "SMART", currency: str = "USD",
+        on_progress: "Callable[[str, int, int], None] | None" = None,
     ) -> dict[str, dict]:
         """Fetch PUT option chains for multiple symbols in a single connection.
 
@@ -419,6 +420,8 @@ class IBKRScannerService:
             max_dte: Maximum days to expiration to include.
             exchange: IBKR exchange routing (SMART for US, ASX for ASX).
             currency: Currency code (USD, AUD).
+            on_progress: Optional callback(symbol, current_index, total)
+                called before each symbol is loaded.
 
         Returns:
             Dict mapping symbol to chain data (same format as get_option_chain).
@@ -434,6 +437,11 @@ class IBKRScannerService:
                 logger.info(
                     f"Batch chains: loading {symbol} ({i + 1}/{len(symbols)})"
                 )
+                if on_progress:
+                    try:
+                        on_progress(symbol, i + 1, len(symbols))
+                    except Exception:
+                        pass  # Never let callback errors break the scan
                 try:
                     results[symbol] = self._fetch_chain(
                         symbol, max_dte, exchange=exchange, currency=currency,

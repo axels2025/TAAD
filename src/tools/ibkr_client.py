@@ -2163,6 +2163,16 @@ class IBKRClient:
         """
         return self.ib.orderStatusEvent
 
+    @order_status_event.setter
+    def order_status_event(self, value):
+        """No-op setter to support ``+=`` / ``-=`` on the property.
+
+        Python translates ``obj.prop += x`` into ``obj.prop = obj.prop.__iadd__(x)``,
+        which requires a setter even though the iadd already mutated the Event
+        object in-place.
+        """
+        pass  # Event was already mutated in-place by __iadd__
+
     @property
     def exec_details_event(self):
         """Direct access to execution events for callbacks.
@@ -2171,6 +2181,11 @@ class IBKRClient:
             >>> client.exec_details_event += my_execution_callback
         """
         return self.ib.execDetailsEvent
+
+    @exec_details_event.setter
+    def exec_details_event(self, value):
+        """No-op setter to support ``+=`` / ``-=`` on the property."""
+        pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # AUDIT & DIAGNOSTICS

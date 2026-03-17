@@ -1529,8 +1529,8 @@ class TAADDaemon:
 
             logger.info("EOD Sync & Reconcile complete")
 
-            # Expire any remaining pre-execution staged candidates
-            self._auto_unstage_eod(db)
+            # Expire all remaining pre-execution staged candidates at close
+            self._auto_unstage_eod(db, stale_only=False)
 
         except Exception as e:
             logger.error(f"EOD sync failed: {e}", exc_info=True)
@@ -1627,26 +1627,50 @@ class TAADDaemon:
         if processed:
             logger.info(f"  Processed {processed} assignment(s)")
 
-    def _auto_unstage_eod(self, db: Session) -> None:
-        """Expire any remaining pre-execution staged candidates at EOD.
+    def _auto_unstage_eod(self, db: Session, *, stale_only: bool = True) -> None:
+        """Expire remaining pre-execution staged candidates.
 
-        Prevents stale staged orders from carrying over to the next trading day.
+        When ``stale_only=True`` (default), only candidates staged
+        *before* the current trading day are expired.  This is critical
+        for startup and MARKET_OPEN: a daemon restart mid-session
+        re-emits MARKET_OPEN, and without the date guard the freshly
+        staged trades from the current session would be nuked.
+
+        When ``stale_only=False`` (used at MARKET_CLOSE), all remaining
+        pre-execution candidates are expired regardless of when they
+        were staged.
 
         Args:
             db: Database session
+            stale_only: If True, only expire candidates from previous
+                trading days. If False, expire all.
         """
+        from sqlalchemy import or_
+
         from src.data.opportunity_state import OpportunityState
         from src.execution.opportunity_lifecycle import OpportunityLifecycleManager
 
         pre_exec_states = ["STAGED", "VALIDATING", "READY", "ADJUSTING", "CONFIRMED", "EXECUTING"]
-        stale = (
-            db.query(ScanOpportunity)
-            .filter(
-                ScanOpportunity.state.in_(pre_exec_states),
-                ScanOpportunity.executed == False,  # noqa: E712
-            )
-            .all()
+        query = db.query(ScanOpportunity).filter(
+            ScanOpportunity.state.in_(pre_exec_states),
+            ScanOpportunity.executed == False,  # noqa: E712
         )
+
+        if stale_only:
+            from src.config.exchange_profile import get_active_profile
+            from src.utils.timezone import trading_date
+
+            tz = get_active_profile().timezone
+            today_market = datetime.combine(trading_date(), datetime.min.time())
+            today_utc = today_market.replace(tzinfo=tz).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+            query = query.filter(
+                or_(
+                    ScanOpportunity.staged_at < today_utc,
+                    ScanOpportunity.staged_at.is_(None),
+                ),
+            )
+
+        stale = query.all()
         if not stale:
             return
 
@@ -1666,14 +1690,21 @@ class TAADDaemon:
 
         When the daemon crashes or order placement fails mid-execution,
         opportunities can get stuck in EXECUTING with no order actually
-        placed.  On startup, expire these so they don't occupy invisible
-        slots indefinitely (dashboard and unstage buttons couldn't see them).
+        placed.
+
+        Same-day candidates (staged today) with no trade_id are rolled
+        back to STAGED so the daemon can re-attempt execution.  Older
+        candidates are expired.
 
         Args:
             db: Database session
         """
+        from sqlalchemy import or_
+
+        from src.config.exchange_profile import get_active_profile
         from src.data.opportunity_state import OpportunityState
         from src.execution.opportunity_lifecycle import OpportunityLifecycleManager
+        from src.utils.timezone import trading_date
 
         stuck = (
             db.query(ScanOpportunity)
@@ -1686,19 +1717,48 @@ class TAADDaemon:
         if not stuck:
             return
 
+        # Compute today's cutoff in naive UTC
+        tz = get_active_profile().timezone
+        today_market = datetime.combine(trading_date(), datetime.min.time())
+        today_utc = today_market.replace(tzinfo=tz).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
         lifecycle = OpportunityLifecycleManager(db)
+        rolled_back = []
+        expired = []
+
         for opp in stuck:
-            lifecycle.transition(
-                opp.id,
-                OpportunityState.EXPIRED,
-                reason="Stuck in EXECUTING at daemon startup — no order was filled",
-                actor="system",
-            )
+            is_today = opp.staged_at is not None and opp.staged_at >= today_utc
+            has_order = opp.trade_id is not None
+
+            if is_today and not has_order:
+                # Same-day, no order placed — safe to re-stage
+                lifecycle.transition(
+                    opp.id,
+                    OpportunityState.STAGED,
+                    reason="Rolled back to STAGED after daemon restart (no order placed)",
+                    actor="system",
+                )
+                rolled_back.append(opp.symbol)
+            else:
+                lifecycle.transition(
+                    opp.id,
+                    OpportunityState.EXPIRED,
+                    reason="Stuck in EXECUTING at daemon startup — no order was filled",
+                    actor="system",
+                )
+                expired.append(opp.symbol)
+
         db.commit()
-        logger.warning(
-            f"Startup recovery: expired {len(stuck)} stuck EXECUTING "
-            f"opportunities: {[o.symbol for o in stuck]}"
-        )
+        if rolled_back:
+            logger.info(
+                f"Startup recovery: rolled back {len(rolled_back)} same-day "
+                f"EXECUTING → STAGED: {rolled_back}"
+            )
+        if expired:
+            logger.warning(
+                f"Startup recovery: expired {len(expired)} stuck EXECUTING "
+                f"opportunities: {expired}"
+            )
 
     def _auto_reject_stale_guardrail_blocks(self, db: Session) -> None:
         """Auto-reject guardrail escalations from prior days that were never reviewed.
@@ -3024,12 +3084,14 @@ class TAADDaemon:
 
         try:
             from src.services.auto_select_pipeline import (
+                _update_scan_progress,
                 run_auto_select_pipeline,
                 run_scan_and_persist,
                 stage_selected_candidates,
             )
 
             # Step 1: Run IBKR scanner
+            _update_scan_progress(db, "SCANNING")
             logger.info(f"Auto-scan: running scanner with preset '{cfg.scanner_preset}'...")
             scan_id, opportunities = run_scan_and_persist(
                 preset=cfg.scanner_preset, db=db
@@ -3038,6 +3100,7 @@ class TAADDaemon:
 
             if not opportunities:
                 logger.warning("Auto-scan: scanner returned 0 symbols, nothing to do")
+                _update_scan_progress(db, None)
                 self.memory.add_decision({
                     "timestamp": self._market_timestamp(),
                     "event_type": "AUTO_SCAN",
@@ -3112,6 +3175,10 @@ class TAADDaemon:
 
         except Exception as e:
             logger.error(f"Auto-scan failed: {e}", exc_info=True)
+            try:
+                _update_scan_progress(db, None)
+            except Exception:
+                pass
             self.memory.add_decision({
                 "timestamp": self._market_timestamp(),
                 "event_type": "AUTO_SCAN",

@@ -94,6 +94,7 @@ VALID_TRANSITIONS = {
         OpportunityState.EXECUTED,
         OpportunityState.FAILED,
         OpportunityState.EXPIRED,  # TTL cleanup for unfilled orders
+        OpportunityState.STAGED,  # Rollback on daemon restart (no order placed)
     },
     OpportunityState.EXECUTED: set(),  # Terminal state
     OpportunityState.FAILED: set(),  # Terminal state
