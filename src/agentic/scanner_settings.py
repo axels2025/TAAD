@@ -79,15 +79,15 @@ class BudgetSettings(BaseModel):
 
     # VIX-based position scaling
     vix_scale_normal: float = Field(
-        default=0.80, ge=0.1, le=1.0,
+        default=0.80, ge=0.1, le=2.0,
         description="Sizing multiplier when VIX 15-25",
     )
     vix_scale_elevated: float = Field(
-        default=0.50, ge=0.1, le=1.0,
+        default=0.50, ge=0.1, le=2.0,
         description="Sizing multiplier when VIX 25-35",
     )
     vix_scale_extreme: float = Field(
-        default=0.25, ge=0.0, le=1.0,
+        default=0.25, ge=0.0, le=2.0,
         description="Sizing multiplier when VIX > 35",
     )
 

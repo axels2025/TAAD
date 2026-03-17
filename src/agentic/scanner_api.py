@@ -52,7 +52,7 @@ class ScanRequest(BaseModel):
     location: str = "STK.US.MAJOR"
     min_price: float = 20.0
     max_price: float = 200.0
-    num_rows: int = 50
+    num_rows: Optional[int] = None
     market_cap_above: float = 0
     market_cap_below: float = 0
     avg_volume_above: int = 0
@@ -295,7 +295,7 @@ def create_scanner_router(verify_token) -> "APIRouter":
                 location=request.location if request.location != "STK.US.MAJOR" else preset.get("location", "STK.US.MAJOR"),
                 min_price=request.min_price if request.min_price != 20.0 else preset.get("min_price", 20.0),
                 max_price=request.max_price if request.max_price != 200.0 else preset.get("max_price", 200.0),
-                num_rows=request.num_rows if request.num_rows != 50 else preset.get("num_rows", 50),
+                num_rows=request.num_rows if request.num_rows is not None else preset.get("num_rows", 100),
                 market_cap_above=request.market_cap_above if request.market_cap_above != 0 else preset.get("market_cap_above", 0),
                 market_cap_below=request.market_cap_below if request.market_cap_below != 0 else preset.get("market_cap_below", 0),
                 avg_volume_above=request.avg_volume_above if request.avg_volume_above != 0 else preset.get("avg_volume_above", 0),
@@ -309,7 +309,7 @@ def create_scanner_router(verify_token) -> "APIRouter":
                 location=request.location,
                 min_price=request.min_price,
                 max_price=request.max_price,
-                num_rows=request.num_rows,
+                num_rows=request.num_rows if request.num_rows is not None else 100,
                 market_cap_above=request.market_cap_above,
                 market_cap_below=request.market_cap_below,
                 avg_volume_above=request.avg_volume_above,
@@ -1135,7 +1135,7 @@ _SCANNER_HTML = """<!DOCTYPE html>
         </div>
         <div class="form-group">
           <label>Max Results</label>
-          <input type="number" id="num_rows" value="50" min="10" max="100" step="10">
+          <input type="number" id="num_rows" value="100" min="10" max="500" step="10">
         </div>
         <div class="form-group">
           <label>Market Cap Above (M$)</label>
@@ -1448,7 +1448,7 @@ function applyPreset() {
   if (d.scan_code) document.getElementById('scan_code').value = d.scan_code;
   if (d.min_price != null) document.getElementById('min_price').value = d.min_price;
   if (d.max_price != null) document.getElementById('max_price').value = d.max_price;
-  if (d.num_rows != null) document.getElementById('num_rows').value = d.num_rows;
+  // num_rows is a user preference, not preset-specific — don't override
   if (d.market_cap_above != null) document.getElementById('market_cap_above').value = d.market_cap_above;
   if (d.avg_volume_above != null) document.getElementById('avg_volume_above').value = d.avg_volume_above;
   if (d.avg_opt_volume_above != null) document.getElementById('avg_opt_volume_above').value = d.avg_opt_volume_above;
@@ -1465,7 +1465,7 @@ async function runScan() {
     scan_code: document.getElementById('scan_code').value,
     min_price: parseFloat(document.getElementById('min_price').value) || 20,
     max_price: parseFloat(document.getElementById('max_price').value) || 200,
-    num_rows: parseInt(document.getElementById('num_rows').value) || 50,
+    num_rows: parseInt(document.getElementById('num_rows').value) || 100,
     market_cap_above: parseFloat(document.getElementById('market_cap_above').value) || 0,
     avg_volume_above: parseInt(document.getElementById('avg_volume_above').value) || 0,
     avg_opt_volume_above: parseInt(document.getElementById('avg_opt_volume_above').value) || 0,

@@ -1535,7 +1535,12 @@ _DASHBOARD_HTML_V2 = """<!DOCTYPE html>
   .sidebar.collapsed .sidebar-bottom-label,
   .sidebar.collapsed .market-clock-text { display: none; }
   .sidebar.collapsed .brand-text { font-size: var(--text-lg); }
+  .sidebar.collapsed .brand { display: none; }
+  .sidebar.collapsed .sidebar-header { justify-content: center; }
+  .sidebar.collapsed .sidebar-toggle { margin: 0; }
   .sidebar.collapsed .sidebar-actions-list { padding-left: 0; padding-right: 0; }
+  .sidebar.collapsed .nav-item { justify-content: center; padding-left: 0; padding-right: 0; }
+  .sidebar.collapsed .nav-icon { margin: 0; }
 
   .sidebar-header {
     display: flex; align-items: center; justify-content: space-between;

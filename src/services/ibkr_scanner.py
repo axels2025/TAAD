@@ -99,7 +99,7 @@ SCANNER_PRESETS: dict[str, dict] = {
         "location": "STK.US.MAJOR",
         "min_price": 20.0,
         "max_price": 200.0,
-        "num_rows": 50,
+        "num_rows": 100,
         "market_cap_above": 2000,
         "avg_volume_above": 500000,
         "avg_opt_volume_above": 1000,
@@ -112,7 +112,7 @@ SCANNER_PRESETS: dict[str, dict] = {
         "location": "STK.US.MAJOR",
         "min_price": 20.0,
         "max_price": 300.0,
-        "num_rows": 50,
+        "num_rows": 100,
         "market_cap_above": 5000,
         "avg_volume_above": 1000000,
         "avg_opt_volume_above": 5000,
@@ -125,7 +125,7 @@ SCANNER_PRESETS: dict[str, dict] = {
         "location": "STK.US.MAJOR",
         "min_price": 20.0,
         "max_price": 500.0,
-        "num_rows": 50,
+        "num_rows": 100,
         "market_cap_above": 5000,
         "avg_volume_above": 1000000,
         "avg_opt_volume_above": 5000,
@@ -138,7 +138,7 @@ SCANNER_PRESETS: dict[str, dict] = {
         "location": "STK.US.MAJOR",
         "min_price": 20.0,
         "max_price": 500.0,
-        "num_rows": 50,
+        "num_rows": 100,
         "market_cap_above": 2000,
         "avg_volume_above": 500000,
         "avg_opt_volume_above": 1000,
@@ -151,7 +151,7 @@ SCANNER_PRESETS: dict[str, dict] = {
         "location": "STK.US.MAJOR",
         "min_price": 20.0,
         "max_price": 300.0,
-        "num_rows": 50,
+        "num_rows": 100,
         "market_cap_above": 5000,
         "avg_volume_above": 500000,
         "avg_opt_volume_above": 500,
@@ -164,7 +164,7 @@ SCANNER_PRESETS: dict[str, dict] = {
         "location": "STK.US.MAJOR",
         "min_price": 20.0,
         "max_price": 300.0,
-        "num_rows": 50,
+        "num_rows": 100,
         "market_cap_above": 2000,
         "avg_volume_above": 500000,
         "avg_opt_volume_above": 1000,
@@ -177,7 +177,7 @@ SCANNER_PRESETS: dict[str, dict] = {
         "location": "STK.ASX",
         "min_price": 5.0,
         "max_price": 200.0,
-        "num_rows": 50,
+        "num_rows": 100,
         "market_cap_above": 0,
         "avg_volume_above": 200000,
         "avg_opt_volume_above": 100,
@@ -255,7 +255,10 @@ class IBKRScannerService:
     def run_scan(self, config: ScannerConfig) -> list[ScannerResult]:
         """Run a market scanner with the given configuration.
 
-        Connects to IBKR, executes the scan, parses results, and disconnects.
+        When num_rows > 50, automatically uses price-bucket splitting to
+        work around IBKR's 50-result cap on reqScannerData(). The price
+        range is divided into equal buckets, each scanned separately,
+        and results are deduplicated by symbol.
 
         Args:
             config: Scanner parameters (scan code, filters, etc.)
@@ -269,15 +272,92 @@ class IBKRScannerService:
         """
         self.connect()
         try:
-            return self._execute_scan(config)
+            if config.num_rows <= 50:
+                return self._execute_scan(config)
+            return self._execute_scan_bucketed(config)
         finally:
             self.disconnect()
 
-    def run_preset(self, preset_name: str) -> list[ScannerResult]:
+    def _execute_scan_bucketed(self, config: ScannerConfig) -> list[ScannerResult]:
+        """Run multiple scans with price-range buckets to bypass IBKR's 50-row cap.
+
+        Splits the price range into buckets so each sub-scan can return
+        up to 50 results. Results are deduplicated by symbol, keeping
+        the first occurrence (from the lower price bucket).
+        """
+        price_range = config.max_price - config.min_price
+        num_buckets = max(2, (config.num_rows + 49) // 50)  # ceil(num_rows / 50)
+        bucket_size = price_range / num_buckets
+
+        logger.info(
+            f"Bucketed scan: {num_buckets} buckets across "
+            f"${config.min_price:.0f}-${config.max_price:.0f} "
+            f"(${bucket_size:.0f} each) to target {config.num_rows} rows"
+        )
+
+        all_results: list[ScannerResult] = []
+        seen_symbols: set[str] = set()
+
+        for i in range(num_buckets):
+            bucket_min = config.min_price + (i * bucket_size)
+            bucket_max = config.min_price + ((i + 1) * bucket_size)
+            # Last bucket extends to max_price to avoid rounding gaps
+            if i == num_buckets - 1:
+                bucket_max = config.max_price
+
+            bucket_config = ScannerConfig(
+                scan_code=config.scan_code,
+                instrument=config.instrument,
+                location=config.location,
+                min_price=bucket_min,
+                max_price=bucket_max,
+                num_rows=50,  # IBKR cap per request
+                market_cap_above=config.market_cap_above,
+                market_cap_below=config.market_cap_below,
+                avg_volume_above=config.avg_volume_above,
+                avg_opt_volume_above=config.avg_opt_volume_above,
+                stock_type=config.stock_type,
+            )
+
+            try:
+                bucket_results = self._execute_scan(bucket_config)
+            except Exception as e:
+                logger.warning(
+                    f"Bucket {i+1}/{num_buckets} "
+                    f"(${bucket_min:.0f}-${bucket_max:.0f}) failed: {e}"
+                )
+                continue
+
+            # Deduplicate by symbol
+            new_count = 0
+            for r in bucket_results:
+                if r.symbol not in seen_symbols:
+                    seen_symbols.add(r.symbol)
+                    all_results.append(r)
+                    new_count += 1
+
+            logger.info(
+                f"Bucket {i+1}/{num_buckets} "
+                f"(${bucket_min:.0f}-${bucket_max:.0f}): "
+                f"{len(bucket_results)} results, {new_count} new unique"
+            )
+
+        logger.info(
+            f"Bucketed scan complete: {len(all_results)} unique symbols "
+            f"from {num_buckets} buckets"
+        )
+        return all_results
+
+    def run_preset(
+        self,
+        preset_name: str,
+        num_rows: int | None = None,
+    ) -> list[ScannerResult]:
         """Run a scan using a named preset.
 
         Args:
             preset_name: Key from SCANNER_PRESETS
+            num_rows: Override the preset's num_rows (e.g. from scanner_settings.yaml)
 
         Returns:
             List of ScannerResult objects
@@ -295,7 +375,7 @@ class IBKRScannerService:
             location=preset.get("location", "STK.US.MAJOR"),
             min_price=preset.get("min_price", 20.0),
             max_price=preset.get("max_price", 200.0),
-            num_rows=preset.get("num_rows", 50),
+            num_rows=num_rows if num_rows is not None else preset.get("num_rows", 50),
             market_cap_above=preset.get("market_cap_above", 0),
             market_cap_below=preset.get("market_cap_below", 0),
             avg_volume_above=preset.get("avg_volume_above", 0),
