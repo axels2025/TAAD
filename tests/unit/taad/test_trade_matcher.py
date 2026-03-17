@@ -3,50 +3,10 @@
 import pytest
 from datetime import date
 
-from src.data.models import Base
 from src.taad.models import IBKRRawImport, ImportSession, TradeMatchingLog
 from src.taad.trade_matcher import MatchedTrade, match_trades, persist_matches
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
-
-# TAAD models that use schema="import" (not supported in SQLite)
-_TAAD_MODELS = [ImportSession, IBKRRawImport, TradeMatchingLog]
-
-
-@pytest.fixture
-def db_session():
-    """Create an in-memory SQLite database for testing.
-
-    Temporarily removes schema qualifications since SQLite
-    doesn't support PostgreSQL schemas.
-    """
-    original_schemas = {}
-    for model in _TAAD_MODELS:
-        original_schemas[model] = model.__table__.schema
-        model.__table__.schema = None
-
-    try:
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        factory = sessionmaker(bind=engine)
-        session = factory()
-
-        import_session = ImportSession(
-            status="completed",
-            source_type="flex_query",
-            account_id="YOUR_ACCOUNT",
-        )
-        session.add(import_session)
-        session.flush()
-
-        yield session, import_session.id
-
-        session.close()
-        engine.dispose()
-    finally:
-        for model, schema in original_schemas.items():
-            model.__table__.schema = schema
+from sqlalchemy.orm import Session
 
 
 def _make_raw_import(
@@ -89,9 +49,9 @@ def _make_raw_import(
 
 
 class TestMatchTrades:
-    def test_simple_sto_btc_match(self, db_session):
+    def test_simple_sto_btc_match(self, db_session_with_import):
         """STO followed by BTC on same contract should match."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -114,9 +74,9 @@ class TestMatchTrades:
         assert matches[0].match_type == "sell_to_open+buy_to_close"
         assert matches[0].confidence_score == 1.0
 
-    def test_expiration_match(self, db_session):
+    def test_expiration_match(self, db_session_with_import):
         """STO with past expiry and no BTC should match as expiration."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -135,9 +95,9 @@ class TestMatchTrades:
         assert matches[0].close_import is None
         assert matches[0].match_type == "sell_to_open+expiration"
 
-    def test_no_match_for_open_position(self, db_session):
+    def test_no_match_for_open_position(self, db_session_with_import):
         """STO with future expiry and no BTC should not match."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         _make_raw_import(
             session, import_id,
@@ -153,9 +113,9 @@ class TestMatchTrades:
 
         assert len(matches) == 0
 
-    def test_partial_close(self, db_session):
+    def test_partial_close(self, db_session_with_import):
         """BTC for fewer contracts than STO = partial close."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -179,9 +139,9 @@ class TestMatchTrades:
         assert matches[0].confidence_score == 0.9  # Partial
         assert "Partial close" in matches[0].notes
 
-    def test_multiple_contracts_same_symbol(self, db_session):
+    def test_multiple_contracts_same_symbol(self, db_session_with_import):
         """Multiple STO and BTC on same contract should match in order."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto1 = _make_raw_import(
             session, import_id,
@@ -218,9 +178,9 @@ class TestMatchTrades:
         assert matches[1].open_import.id == sto2.id
         assert matches[1].close_import.id == btc2.id
 
-    def test_different_strikes_not_matched(self, db_session):
+    def test_different_strikes_not_matched(self, db_session_with_import):
         """STO and BTC at different strikes should not match."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         _make_raw_import(
             session, import_id,
@@ -242,9 +202,9 @@ class TestMatchTrades:
 
         assert len(matches) == 0
 
-    def test_skips_already_matched(self, db_session):
+    def test_skips_already_matched(self, db_session_with_import):
         """Records already marked as matched should be skipped."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -258,9 +218,9 @@ class TestMatchTrades:
         matches = match_trades(session, account_id="YOUR_ACCOUNT")
         assert len(matches) == 0
 
-    def test_account_filter(self, db_session):
+    def test_account_filter(self, db_session_with_import):
         """Only match records for the specified account."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         _make_raw_import(
             session, import_id,
@@ -278,9 +238,9 @@ class TestMatchTrades:
 
 
 class TestPersistMatches:
-    def test_persist_creates_log_and_marks_matched(self, db_session):
+    def test_persist_creates_log_and_marks_matched(self, db_session_with_import):
         """persist_matches should create TradeMatchingLog and mark records."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -319,9 +279,9 @@ class TestPersistMatches:
         assert logs[0].match_type == "sell_to_open+buy_to_close"
         assert logs[0].confidence_score == 1.0
 
-    def test_persist_expiration_match(self, db_session):
+    def test_persist_expiration_match(self, db_session_with_import):
         """Expiration match should have NULL close import."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,

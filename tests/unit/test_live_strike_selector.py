@@ -33,6 +33,7 @@ def make_opp(
         staged_contracts=5,
         staged_margin=4000.0,
         otm_pct=otm_pct,
+        option_type="PUT",
     )
 
 
@@ -174,13 +175,17 @@ class TestSelectBestStrike:
         result = self.selector._select_best_strike(candidates, 230.0)
         assert result is None
 
-    def test_rejects_low_volume(self):
-        """Strikes below min_volume are excluded."""
+    def test_low_volume_not_rejected(self):
+        """Low volume is NOT a rejection criterion (at 9:30 AM volume is 0).
+
+        Volume check was removed because at market open, options have zero
+        volume since nobody has traded yet. OI is used instead.
+        """
         candidates = {
             200.0: {"delta": 0.20, "bid": 0.50, "ask": 0.60, "volume": 5, "oi": 500},
         }
         result = self.selector._select_best_strike(candidates, 230.0)
-        assert result is None
+        assert result is not None  # Volume alone does not reject
 
     def test_rejects_low_oi(self):
         """Strikes below min_open_interest are excluded."""

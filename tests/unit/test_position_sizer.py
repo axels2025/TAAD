@@ -109,33 +109,37 @@ class TestPositionSizer:
 class TestVIXScaling:
     """Test VIX-aware position sizing."""
 
+    def _sizer(self):
+        """Create a PositionSizer instance for VIX scaling tests."""
+        return PositionSizer(account_equity=100_000, max_risk_pct=0.02)
+
     def test_vix_scaling_factor_low_vol(self):
         """VIX < 15 returns 1.0 (full sizing)."""
-        assert PositionSizer.get_vix_scaling_factor(12.0) == 1.0
+        assert self._sizer().get_vix_scaling_factor(12.0) == 1.0
 
     def test_vix_scaling_factor_normal(self):
         """VIX 15-25 returns 0.80 (20% reduction)."""
-        assert PositionSizer.get_vix_scaling_factor(20.0) == 0.80
+        assert self._sizer().get_vix_scaling_factor(20.0) == 0.80
 
     def test_vix_scaling_factor_elevated(self):
         """VIX 25-35 returns 0.50 (50% reduction)."""
-        assert PositionSizer.get_vix_scaling_factor(30.0) == 0.50
+        assert self._sizer().get_vix_scaling_factor(30.0) == 0.50
 
     def test_vix_scaling_factor_extreme(self):
         """VIX >= 35 returns 0.25 (75% reduction)."""
-        assert PositionSizer.get_vix_scaling_factor(38.0) == 0.25
+        assert self._sizer().get_vix_scaling_factor(38.0) == 0.25
 
     def test_vix_scaling_factor_boundary_15(self):
         """VIX exactly 15 → normal tier (0.80)."""
-        assert PositionSizer.get_vix_scaling_factor(15.0) == 0.80
+        assert self._sizer().get_vix_scaling_factor(15.0) == 0.80
 
     def test_vix_scaling_factor_boundary_25(self):
         """VIX exactly 25 → elevated tier (0.50)."""
-        assert PositionSizer.get_vix_scaling_factor(25.0) == 0.50
+        assert self._sizer().get_vix_scaling_factor(25.0) == 0.50
 
     def test_vix_scaling_factor_boundary_35(self):
         """VIX exactly 35 → extreme tier (0.25)."""
-        assert PositionSizer.get_vix_scaling_factor(35.0) == 0.25
+        assert self._sizer().get_vix_scaling_factor(35.0) == 0.25
 
     def test_vix_halt_returns_zero(self):
         """VIX >= 40 halts all new positions (returns 0 contracts)."""

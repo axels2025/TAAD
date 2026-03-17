@@ -499,6 +499,10 @@ class TestMarketOpenScanHook:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    not __import__("importlib").util.find_spec("fastapi"),
+    reason="FastAPI not installed",
+)
 class TestDashboardAutoScanEndpoints:
     """Tests for dashboard auto-scan endpoints."""
 

@@ -50,9 +50,15 @@ def test_vol_regime_elevated(market_service):
     assert regime == "elevated"
 
 
-def test_vol_regime_extreme(market_service):
-    """Test extreme volatility regime classification."""
+def test_vol_regime_high(market_service):
+    """Test high volatility regime classification (5-tier: 30-40 is high)."""
     regime = market_service._classify_vol_regime(30.0)
+    assert regime == "high"
+
+
+def test_vol_regime_extreme(market_service):
+    """Test extreme volatility regime classification (VIX > 40)."""
+    regime = market_service._classify_vol_regime(42.0)
     assert regime == "extreme"
 
 
@@ -94,8 +100,8 @@ def test_market_regime_neutral(market_service):
 
 
 def test_market_regime_volatile(market_service):
-    """Test volatile market regime overrides other signals."""
-    regime = market_service._classify_market_regime(0.02, 30.0)  # 2% up but high VIX
+    """Test volatile market regime overrides other signals (VIX > 30)."""
+    regime = market_service._classify_market_regime(0.02, 35.0)  # 2% up but VIX > 30
     assert regime == "volatile"
 
 

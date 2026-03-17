@@ -386,8 +386,8 @@ class TestPhase4StagingWorkflow:
 
     def test_invalid_staged_transitions(self):
         """Test invalid transitions from STAGED."""
-        # Cannot go directly to EXECUTING
-        assert not is_valid_transition(OpportunityState.STAGED, OpportunityState.EXECUTING)
+        # STAGED -> EXECUTING is now valid (autonomous daemon direct execution)
+        assert is_valid_transition(OpportunityState.STAGED, OpportunityState.EXECUTING)
         # Cannot go directly to CONFIRMED
         assert not is_valid_transition(OpportunityState.STAGED, OpportunityState.CONFIRMED)
         # Cannot go back to APPROVED
@@ -458,6 +458,7 @@ class TestPhase4StagingWorkflow:
         valid_next = get_valid_next_states(OpportunityState.STAGED)
         assert valid_next == {
             OpportunityState.VALIDATING,
+            OpportunityState.EXECUTING,
             OpportunityState.EXPIRED,
         }
 

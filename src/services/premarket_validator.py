@@ -118,6 +118,7 @@ class StagedOpportunity:
     staged_margin: float
     otm_pct: float
     state: str = "STAGED"
+    option_type: str | None = None  # "PUT" or "CALL"; defaults to PUT if None
 
     # Will be populated during validation
     current_stock_price: float | None = None

@@ -188,8 +188,15 @@ def init_database(database_url: str | None = None) -> Engine:
     # Create session factory
     _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False)
 
-    # Create all tables
-    Base.metadata.create_all(_engine)
+    # Create all tables (skip schema-qualified TAAD tables on SQLite —
+    # they require ATTACH DATABASE which only the TAAD test fixtures set up)
+    if _is_sqlite(database_url):
+        public_tables = [
+            t for t in Base.metadata.sorted_tables if t.schema is None
+        ]
+        Base.metadata.create_all(_engine, tables=public_tables)
+    else:
+        Base.metadata.create_all(_engine)
 
     # Apply idempotent column additions for schema evolution
     _apply_schema_migrations(_engine)

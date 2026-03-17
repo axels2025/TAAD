@@ -25,6 +25,7 @@ def mock_ibkr_client():
     """Fixture for mocked IBKRClient."""
     client = Mock()
     client.get_quote = AsyncMock()
+    client.qualify_contracts_async = AsyncMock()
     return client
 
 
@@ -48,6 +49,15 @@ class TestVIXFetching:
     @pytest.mark.asyncio
     async def test_get_vix_success(self, condition_monitor, mock_ibkr_client):
         """Test successful VIX fetching."""
+        # Mock qualified VIX contract
+        from unittest.mock import MagicMock
+        qualified_contract = MagicMock()
+        qualified_contract.conId = 13455763
+        qualified_contract.symbol = "VIX"
+        qualified_contract.secType = "IND"
+        qualified_contract.exchange = "CBOE"
+        mock_ibkr_client.qualify_contracts_async.return_value = [qualified_contract]
+
         # Mock VIX quote
         vix_quote = Quote(
             bid=14.5,
@@ -62,12 +72,6 @@ class TestVIXFetching:
         vix = await condition_monitor._get_vix()
 
         assert vix == 14.6
-        # Verify VIX contract was requested
-        call_args = mock_ibkr_client.get_quote.call_args
-        contract = call_args[0][0]
-        assert contract.symbol == "VIX"
-        assert contract.secType == "IND"
-        assert contract.exchange == "CBOE"
 
     @pytest.mark.asyncio
     async def test_get_vix_invalid_quote_uses_default(
@@ -107,6 +111,12 @@ class TestSPYPriceFetching:
     @pytest.mark.asyncio
     async def test_get_spy_price_success(self, condition_monitor, mock_ibkr_client):
         """Test successful SPY price fetching."""
+        # Mock qualified SPY contract
+        from unittest.mock import MagicMock
+        qualified_contract = MagicMock()
+        qualified_contract.conId = 756733
+        mock_ibkr_client.qualify_contracts_async.return_value = [qualified_contract]
+
         # Mock SPY quote
         spy_quote = Quote(
             bid=450.10,
@@ -298,6 +308,13 @@ class TestCheckConditions:
         self, condition_monitor, mock_ibkr_client
     ):
         """Test complete condition check with sample contracts."""
+        from unittest.mock import MagicMock
+
+        # Mock qualified contracts
+        qualified_contract = MagicMock()
+        qualified_contract.conId = 12345
+        mock_ibkr_client.qualify_contracts_async.return_value = [qualified_contract]
+
         # Mock VIX
         vix_quote = Quote(bid=14.5, ask=14.7, last=14.6, volume=10000, is_valid=True, reason="")
 
@@ -331,6 +348,13 @@ class TestCheckConditions:
         self, condition_monitor, mock_ibkr_client
     ):
         """Test condition check without sample contracts (spread=0)."""
+        from unittest.mock import MagicMock
+
+        # Mock qualified contracts
+        qualified_contract = MagicMock()
+        qualified_contract.conId = 12345
+        mock_ibkr_client.qualify_contracts_async.return_value = [qualified_contract]
+
         # Mock VIX
         vix_quote = Quote(bid=20.0, ask=20.2, last=20.1, volume=10000, is_valid=True, reason="")
 

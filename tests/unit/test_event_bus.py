@@ -52,7 +52,7 @@ class TestEventType:
     """Tests for the EventType enumeration."""
 
     def test_all_event_types_defined(self):
-        """Verify that all 13 event types are present in the enum."""
+        """Verify that all 14 event types are present in the enum."""
         expected = [
             "EMERGENCY_STOP",
             "TWS_DISCONNECTED",
@@ -62,6 +62,7 @@ class TestEventType:
             "TWS_RECONNECTED",
             "MARKET_OPEN",
             "MARKET_CLOSE",
+            "POSITION_EXIT_CHECK",
             "HUMAN_OVERRIDE",
             "SCHEDULED_CHECK",
             "EOD_REFLECTION",
@@ -111,10 +112,11 @@ class TestEventPriorities:
         assert EVENT_PRIORITIES[EventType.RISK_LIMIT_BREACH] == 2
 
     def test_medium_events_are_priority_3(self):
-        """TWS_RECONNECTED, MARKET_OPEN, MARKET_CLOSE must be priority 3."""
+        """TWS_RECONNECTED, MARKET_OPEN, MARKET_CLOSE, POSITION_EXIT_CHECK must be priority 3."""
         assert EVENT_PRIORITIES[EventType.TWS_RECONNECTED] == 3
         assert EVENT_PRIORITIES[EventType.MARKET_OPEN] == 3
         assert EVENT_PRIORITIES[EventType.MARKET_CLOSE] == 3
+        assert EVENT_PRIORITIES[EventType.POSITION_EXIT_CHECK] == 3
 
     def test_normal_events_are_priority_4(self):
         """HUMAN_OVERRIDE, SCHEDULED_CHECK must be priority 4."""
@@ -255,14 +257,13 @@ class TestGetPendingEvents:
         assert len(events) == 2
         assert all(e.status == "pending" for e in events)
 
-    def test_returns_processing_events(self, event_bus):
-        """Should also return events with status='processing'."""
+    def test_excludes_processing_events(self, event_bus):
+        """Processing events are NOT returned (already claimed by a handler)."""
         event = event_bus.emit(EventType.HEARTBEAT)
         event_bus.mark_processing(event)
 
         events = event_bus.get_pending_events()
-        assert len(events) == 1
-        assert events[0].status == "processing"
+        assert len(events) == 0  # Processing events are excluded
 
     def test_excludes_completed_events(self, event_bus):
         """Completed events should not appear in pending results."""
@@ -337,8 +338,8 @@ class TestGetPendingEvents:
         events = event_bus.get_pending_events(limit=100)
         assert len(events) == 2
 
-    def test_mixed_statuses_returns_only_actionable(self, event_bus):
-        """Only pending and processing events should be returned."""
+    def test_mixed_statuses_returns_only_pending(self, event_bus):
+        """Only pending events should be returned (not processing/completed/failed)."""
         pending = event_bus.emit(EventType.HEARTBEAT)
 
         processing = event_bus.emit(EventType.MARKET_OPEN)
@@ -354,10 +355,10 @@ class TestGetPendingEvents:
         events = event_bus.get_pending_events()
         event_ids = {e.id for e in events}
         assert pending.id in event_ids
-        assert processing.id in event_ids
+        assert processing.id not in event_ids  # Processing excluded
         assert completed.id not in event_ids
         assert failed.id not in event_ids
-        assert len(events) == 2
+        assert len(events) == 1  # Only the pending event
 
 
 # ---------------------------------------------------------------------------

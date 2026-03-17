@@ -80,17 +80,21 @@ class TestPortfolioConfig:
         assert config.high_iv_threshold == 0.60
 
     def test_from_env(self, monkeypatch):
-        """Test loading config from central Config singleton.
+        """Test loading config from scanner_settings.yaml via load_scanner_settings().
 
-        PortfolioConfig.from_env() now delegates to get_config() which
-        reads MAX_SECTOR_COUNT (not MAX_SECTOR_CONCENTRATION).
+        PortfolioConfig.from_env() reads from scanner_settings.yaml (hot-reloadable).
+        We mock load_scanner_settings to test the mapping logic.
         """
-        monkeypatch.setenv("MARGIN_BUDGET_PCT", "0.40")
-        monkeypatch.setenv("MARGIN_BUDGET_DEFAULT", "75000")
-        monkeypatch.setenv("MAX_POSITIONS", "8")
-        monkeypatch.setenv("MAX_SECTOR_COUNT", "2")
+        from unittest.mock import patch, MagicMock
 
-        config = PortfolioConfig.from_env()
+        mock_settings = MagicMock()
+        mock_settings.budget.margin_budget_pct = 0.40
+        mock_settings.budget.margin_budget_default = 75000.0
+        mock_settings.budget.max_positions = 8
+        mock_settings.budget.max_per_sector = 2
+
+        with patch("src.agentic.scanner_settings.load_scanner_settings", return_value=mock_settings):
+            config = PortfolioConfig.from_env()
 
         assert config.margin_budget_pct == 0.40
         assert config.margin_budget_default == 75000.0

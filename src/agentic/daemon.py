@@ -2760,7 +2760,7 @@ class TAADDaemon:
         Args:
             db: Database session
         """
-        today = date.today()
+        today = utc_now().date()
         try:
             failed_events = db.query(DaemonEvent).filter(
                 sa_func.date(DaemonEvent.created_at) == today,
@@ -3269,7 +3269,10 @@ class TAADDaemon:
                 pnl_buckets.append(0)
 
         # VIX regime bucket — matches the VIX Regime Table thresholds
-        vix = float(context.market_context.get("vix") or 0)
+        try:
+            vix = float(context.market_context.get("vix") or 0)
+        except (ValueError, TypeError):
+            vix = 0.0
         if vix < 15:
             vix_regime = "low"
         elif vix < 20:

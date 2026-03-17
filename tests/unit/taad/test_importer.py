@@ -3,15 +3,8 @@
 import pytest
 from datetime import date
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from src.data.models import Base
 from src.taad.importer import DuplicateExecIDError, ImportResult, run_import
 from src.taad.models import IBKRRawImport, ImportSession, TradeMatchingLog
-
-# TAAD models that use schema="import" (not supported in SQLite)
-_TAAD_MODELS = [ImportSession, IBKRRawImport, TradeMatchingLog]
 
 
 SAMPLE_FLEX_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -79,31 +72,6 @@ SAMPLE_FLEX_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </FlexStatement>
 </FlexStatements>
 </FlexStatementResponse>"""
-
-
-@pytest.fixture
-def db_session():
-    """Create an in-memory SQLite database for testing.
-
-    Temporarily removes schema qualifications since SQLite
-    doesn't support PostgreSQL schemas.
-    """
-    original_schemas = {}
-    for model in _TAAD_MODELS:
-        original_schemas[model] = model.__table__.schema
-        model.__table__.schema = None
-
-    try:
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        factory = sessionmaker(bind=engine)
-        session = factory()
-        yield session
-        session.close()
-        engine.dispose()
-    finally:
-        for model, schema in original_schemas.items():
-            model.__table__.schema = schema
 
 
 class TestRunImport:

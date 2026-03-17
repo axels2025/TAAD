@@ -8,6 +8,8 @@ import json
 import pytest
 from datetime import datetime, timedelta
 
+from src.utils.timezone import utc_now
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -22,7 +24,8 @@ def test_db_session():
     """Create a test database session with in-memory SQLite."""
     # Create in-memory database
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+    tables = [t for t in Base.metadata.sorted_tables if t.schema is None]
+    Base.metadata.create_all(engine, tables=tables)
 
     # Create session
     Session = sessionmaker(bind=engine)
@@ -390,8 +393,8 @@ class TestCompleteLifecycleFlow:
         manager = OpportunityLifecycleManager(test_db_session)
         repo = ScanRepository(test_db_session)
 
-        # Set expiration in the past
-        test_opportunity.expires_at = datetime.now() - timedelta(hours=1)
+        # Set expiration in the past (use utc_now to match DB convention)
+        test_opportunity.expires_at = utc_now() - timedelta(hours=1)
         test_db_session.commit()
 
         # Check for expired opportunities

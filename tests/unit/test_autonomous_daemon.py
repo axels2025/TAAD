@@ -2839,6 +2839,8 @@ class TestEodReflectionFreshnessExemption:
         d.exit_manager = None
         d.event_detector = None
         d._reconnect_attempts = 0
+        d.learning = MagicMock()
+        d.learning.run_eod_reflection = AsyncMock(return_value={"decisions_count": 0, "trades_count": 0})
 
         return d
 
@@ -2860,8 +2862,8 @@ class TestEodReflectionFreshnessExemption:
             daemon._process_event(event, db_session)
         )
 
-        # Claude reasoning should have been called (not blocked)
-        daemon.reasoning.reason.assert_called_once()
+        # Learning loop should have been called (not blocked by data freshness)
+        daemon.learning.run_eod_reflection.assert_called_once()
 
     def test_market_close_bypasses_data_freshness(self, daemon, db_session):
         """MARKET_CLOSE should proceed despite data_stale=True.

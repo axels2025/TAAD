@@ -355,7 +355,7 @@ class CostTracker:
 
     def get_daily_total(self) -> float:
         """Get today's total Claude API cost in USD."""
-        today = date.today()
+        today = utc_now().date()
         result = (
             self.db.query(sa_func.sum(ClaudeApiCost.cost_usd))
             .filter(sa_func.date(ClaudeApiCost.timestamp) == today)

@@ -164,6 +164,17 @@ def _default_guardrail_config():
     return GuardrailConfig()
 
 
+# Resolve forward reference so Phase5Config() works without load_phase5_config()
+def _rebuild_phase5_config():
+    try:
+        from src.agentic.guardrails.config import GuardrailConfig
+        Phase5Config.model_rebuild(_types_namespace={"GuardrailConfig": GuardrailConfig})
+    except Exception:
+        pass  # Circular import edge case — load_phase5_config() will rebuild later
+
+_rebuild_phase5_config()
+
+
 def load_phase5_config(config_path: Optional[str] = None) -> Phase5Config:
     """Load Phase 5 configuration from YAML file.
 
