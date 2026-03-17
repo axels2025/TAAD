@@ -219,6 +219,21 @@ class PositionMonitor:
                     f"exp {trade.expiration} — full premium kept "
                     f"(${trade.profit_loss or 0:.2f})"
                 )
+
+                # If this was a covered call, unlink from StockPosition
+                # (stock remains held for the next call)
+                if trade.option_type in ("CALL", "C"):
+                    try:
+                        from src.services.covered_call_detector import CoveredCallDetector
+                        detector = CoveredCallDetector(session)
+                        detector.unlink_by_trade_id(trade.trade_id)
+                        logger.info(
+                            f"  Covered call expired — stock position remains held "
+                            f"for {trade.symbol}"
+                        )
+                    except Exception as cc_err:
+                        logger.debug(f"  Covered call unlink failed: {cc_err}")
+
                 closed.append({
                     "symbol": trade.symbol,
                     "strike": trade.strike,
@@ -430,6 +445,17 @@ class PositionMonitor:
         positions = self.get_all_positions()
         alerts = []
 
+        # Pre-fetch covered call symbols (one DB query, not per-position)
+        covered_symbols: set[str] = set()
+        try:
+            from src.data.database import get_db_session
+            from src.services.covered_call_detector import CoveredCallDetector
+
+            with get_db_session() as _session:
+                covered_symbols = CoveredCallDetector(_session).get_covered_symbols()
+        except Exception:
+            pass  # If detection fails, treat all calls as naked
+
         for position in positions:
             # Check profit target (50% of max profit)
             profit_target = self.config.exit_rules.profit_target
@@ -500,23 +526,48 @@ class PositionMonitor:
                 otm_pct = calc_otm_pct(position.underlying_price, position.strike, position.option_type)
                 if otm_pct < 0.03:  # Less than 3% OTM (or ITM)
                     itm = is_itm(position.underlying_price, position.strike, position.option_type)
-                    severity = "critical" if itm or position.dte <= 3 else "warning"
-                    alerts.append(
-                        PositionAlert(
-                            position_id=position.position_id,
-                            alert_type="assignment_risk",
-                            severity=severity,
-                            message=(
-                                f"{position.symbol} ${position.strike} {position.option_type}: "
-                                f"ASSIGNMENT RISK — {'ITM' if itm else f'OTM {otm_pct:.1%}'} "
-                                f"with {position.dte} DTE "
-                                f"(stock=${position.underlying_price:.2f}) — "
-                                f"consider rolling or closing"
-                            ),
-                            current_value=otm_pct,
-                            threshold=0.03,
-                        )
+
+                    # Covered call: assignment is the INTENDED outcome (wheel strategy)
+                    is_covered = (
+                        position.option_type in ("C", "CALL")
+                        and position.symbol in covered_symbols
                     )
+
+                    if is_covered:
+                        alerts.append(
+                            PositionAlert(
+                                position_id=position.position_id,
+                                alert_type="covered_call_near_expiry",
+                                severity="info",
+                                message=(
+                                    f"{position.symbol} ${position.strike} COVERED CALL: "
+                                    f"{'ITM' if itm else f'OTM {otm_pct:.1%}'} "
+                                    f"with {position.dte} DTE — "
+                                    f"stock will be called away if ITM at expiry "
+                                    f"(intended wheel outcome)"
+                                ),
+                                current_value=otm_pct,
+                                threshold=0.03,
+                            )
+                        )
+                    else:
+                        severity = "critical" if itm or position.dte <= 3 else "warning"
+                        alerts.append(
+                            PositionAlert(
+                                position_id=position.position_id,
+                                alert_type="assignment_risk",
+                                severity=severity,
+                                message=(
+                                    f"{position.symbol} ${position.strike} {position.option_type}: "
+                                    f"ASSIGNMENT RISK — {'ITM' if itm else f'OTM {otm_pct:.1%}'} "
+                                    f"with {position.dte} DTE "
+                                    f"(stock=${position.underlying_price:.2f}) — "
+                                    f"consider rolling or closing"
+                                ),
+                                current_value=otm_pct,
+                                threshold=0.03,
+                            )
+                        )
 
             # Check delta breach (option moving closer to ITM)
             if position.delta is not None:

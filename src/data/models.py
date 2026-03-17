@@ -1076,8 +1076,14 @@ class StockPosition(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    # Covered call tracking (wheel strategy)
+    # Points to the currently-active short call Trade on this stock.
+    # Cleared when the call expires or is closed; set again when a new call is sold.
+    covered_call_trade_id = Column(String(50), ForeignKey("trades.trade_id"), nullable=True)
+
     # Relationships
     origin_trade = relationship("Trade", foreign_keys=[origin_trade_id])
+    covered_call_trade = relationship("Trade", foreign_keys=[covered_call_trade_id])
 
     def __repr__(self) -> str:
         """String representation of StockPosition."""

@@ -267,6 +267,7 @@ class TAADDaemon:
             await self._close_expired_positions(db)
             self._auto_unstage_eod(db)
             self._recover_stuck_executing(db)
+            self._link_covered_calls(db)
             if self.ibkr_client is not None:
                 await self._run_startup_reconcile(db)
 
@@ -1759,6 +1760,26 @@ class TAADDaemon:
                 f"Startup recovery: expired {len(expired)} stuck EXECUTING "
                 f"opportunities: {expired}"
             )
+
+    def _link_covered_calls(self, db: Session) -> None:
+        """Auto-link open CALL trades to their StockPosition on startup.
+
+        Ensures manually-created covered call Trade records are linked
+        to the correct StockPosition so the system recognizes them as
+        covered calls (not naked calls).
+
+        Args:
+            db: Database session
+        """
+        try:
+            from src.services.covered_call_detector import CoveredCallDetector
+
+            detector = CoveredCallDetector(db)
+            linked = detector.auto_link_unlinked_calls()
+            if not linked:
+                logger.debug("Covered call linking: no new pairs to link")
+        except Exception as e:
+            logger.debug(f"Covered call linking failed: {e}")
 
     def _auto_reject_stale_guardrail_blocks(self, db: Session) -> None:
         """Auto-reject guardrail escalations from prior days that were never reviewed.

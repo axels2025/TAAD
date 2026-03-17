@@ -43,6 +43,7 @@ class ReasoningContext:
 
     # Positions
     open_positions: list[dict] = field(default_factory=list)
+    held_stocks: list[dict] = field(default_factory=list)
     positions_summary: str = ""
 
     # Recent history
@@ -116,6 +117,17 @@ class ReasoningContext:
 
         sections.append(f"\n## Autonomy Level: L{self.autonomy_level}")
 
+        if self.held_stocks:
+            sections.append(f"\n## Held Stock Positions ({len(self.held_stocks)}) [source: stock_positions DB]")
+            for stock in self.held_stocks:
+                cc_tid = stock.get("covered_call_trade")
+                cc_label = f" | covered call: {cc_tid}" if cc_tid else " | NO covered call active"
+                sections.append(
+                    f"  - {stock.get('symbol', '?')} x{stock.get('shares', '?')} shares "
+                    f"cost_basis=${stock.get('cost_basis', 0):.2f} "
+                    f"(from put assignment {stock.get('origin_trade', '?')}){cc_label}"
+                )
+
         if self.open_positions:
             sections.append(f"\n## Open Positions ({len(self.open_positions)}) [source: trades DB + IBKR]")
             for pos in self.open_positions:
@@ -124,11 +136,15 @@ class ReasoningContext:
                 source = pos.get("pnl_source", "")
                 if source:
                     pnl_str = f"{pnl_str} ({source})"
+                # Covered call annotation
+                cc_tag = ""
+                if pos.get("is_covered_call"):
+                    cc_tag = " [COVERED CALL]" if pos.get("fully_covered") else " [PARTIALLY COVERED]"
                 sections.append(
                     f"  - [{pos.get('trade_id', '?')}] {pos.get('symbol', '?')} "
                     f"{pos.get('strike', '?')}{opt_type} "
                     f"exp={pos.get('expiration', '?')} DTE={pos.get('dte', '?')} "
-                    f"P&L={pnl_str}"
+                    f"P&L={pnl_str}{cc_tag}"
                 )
 
         if self.market_context:
@@ -391,6 +407,49 @@ class WorkingMemory:
             )
         except Exception as e:
             logger.warning(f"Could not query open positions: {e}")
+
+        # Query held stock positions and detect covered calls
+        try:
+            from src.data.models import StockPosition
+            from src.services.covered_call_detector import CoveredCallDetector
+
+            open_stocks = (
+                self.db.query(StockPosition)
+                .filter(StockPosition.closed_date.is_(None))
+                .all()
+            )
+            ctx.held_stocks = [
+                {
+                    "symbol": sp.symbol,
+                    "shares": sp.shares,
+                    "cost_basis": sp.cost_basis_per_share,
+                    "origin_trade": sp.origin_trade_id,
+                    "covered_call_trade": sp.covered_call_trade_id,
+                    "assigned_date": str(sp.assigned_date) if sp.assigned_date else None,
+                }
+                for sp in open_stocks
+            ]
+
+            # Annotate open_positions with covered call info
+            detector = CoveredCallDetector(self.db)
+            pairs = detector.detect_pairs()
+            cc_map = {
+                pair.call_trade.trade_id: {
+                    "stock_shares": pair.stock_position.shares,
+                    "stock_cost_basis": pair.stock_position.cost_basis_per_share,
+                    "fully_covered": pair.fully_covered,
+                }
+                for pair in pairs
+            }
+            for pos in ctx.open_positions:
+                cc_info = cc_map.get(pos.get("trade_id"))
+                if cc_info:
+                    pos["is_covered_call"] = True
+                    pos["covered_by_shares"] = cc_info["stock_shares"]
+                    pos["stock_cost_basis"] = cc_info["stock_cost_basis"]
+                    pos["fully_covered"] = cc_info["fully_covered"]
+        except Exception as e:
+            logger.debug(f"Could not query stock positions / covered calls: {e}")
 
         # Query active patterns
         try:

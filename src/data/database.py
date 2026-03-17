@@ -111,6 +111,15 @@ def _apply_schema_migrations(engine: Engine) -> None:
                     conn.commit()
                 except Exception:
                     pass  # Column already exists
+
+            # Covered call tracking on stock_positions
+            try:
+                conn.execute(text(
+                    "ALTER TABLE stock_positions ADD COLUMN covered_call_trade_id VARCHAR(50)"
+                ))
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
         else:
             # PostgreSQL supports IF NOT EXISTS
             conn.execute(
@@ -150,6 +159,13 @@ def _apply_schema_migrations(engine: Engine) -> None:
                 conn.execute(text(
                     f"ALTER TABLE daemon_health ADD COLUMN IF NOT EXISTS {col}"
                 ))
+            conn.commit()
+
+            # Covered call tracking on stock_positions
+            conn.execute(text(
+                "ALTER TABLE stock_positions ADD COLUMN IF NOT EXISTS "
+                "covered_call_trade_id VARCHAR(50)"
+            ))
             conn.commit()
 
 

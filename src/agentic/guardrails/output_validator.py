@@ -40,14 +40,92 @@ COMMON_ABBREVIATIONS = {
     "PM", "AM", "ET", "EST", "EDT", "UTC", "AEDT", "AEST",  # Time / timezones
     "QQQ", "IWM", "XSP", "XLE", "XLF", "XLK", "XLV",  # Common ETFs (US)
     "XJO", "NDQ",  # Common ASX ETFs / indices
-    "TAAD", "CRO",  # Our system
+    "TAAD", "CRO", "EVENT", "LOCK", "STATUS",  # Our system
     "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN",  # Days
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",  # Months
 }
 
-# Regex to extract potential ticker symbols: 1-5 uppercase letters bounded by word boundaries
-_TICKER_RE = re.compile(r"\b([A-Z]{1,5})\b")
+# Regex to extract potential ticker symbols from mixed-case text.
+# Matches 2-5 uppercase letter words that are surrounded by at least one
+# lowercase/digit/punctuation neighbor — i.e., they appear as isolated
+# tickers within normal prose ("checking ASTS position").
+#
+# All-caps phrases ("STEP 1 — EMERGENCY CHECK") are filtered out by
+# _extract_likely_tickers() which checks the surrounding word context.
+_TICKER_RE = re.compile(r"\b([A-Z]{2,5})\b")
+
+# Pattern that matches words composed entirely of uppercase + optional
+# separators (spaces, dashes, numbers, punctuation).  Used to detect
+# all-caps phrases like "STEP 1 — EMERGENCY CHECK" so we can exclude
+# uppercase words that are part of these headers.
+_ALLCAPS_SPAN_RE = re.compile(
+    r"(?:^|(?<=\n))"           # start of line
+    r"[A-Z][A-Z0-9 —\-:./]+"  # all-caps content
+    r"(?:$|(?=\n))"            # end of line
+    r"|"
+    r"(?:[A-Z]{2,}\s+){2,}"   # 2+ consecutive uppercase words mid-line
+)
+
+
+def _extract_likely_tickers(text: str) -> set[str]:
+    """Extract uppercase words that are likely stock tickers, not English.
+
+    Strategy: find all 2-5 letter uppercase words, then keep only those
+    where BOTH immediate neighbors contain lowercase letters (i.e., the
+    uppercase word is isolated within normal prose).  All-caps headers,
+    shouted phrases, and edge-of-header words are excluded.
+
+    Examples:
+        "checking ASTS position"     → {"ASTS"}  (surrounded by lowercase)
+        "STEP 1 — EMERGENCY CHECK"   → set()     (all-caps context)
+        "STEP 1: checking ASTS"      → {"ASTS"}  (STEP has uppercase neighbor)
+        "VIX=24.5 elevated regime"   → {"VIX"}   (= treated as separator)
+    """
+    # Pre-process: split on = so "VIX=24.5" becomes "VIX 24.5"
+    normalized = text.replace("=", " ")
+    words = normalized.split()
+    tickers: set[str] = set()
+
+    for i, word in enumerate(words):
+        # Strip punctuation for matching
+        clean = word.strip(".,;:!?()[]—–-\"'$#%")
+        if not _TICKER_RE.fullmatch(clean):
+            continue
+
+        # Check neighbors: a word is a likely ticker only if it is NOT
+        # adjacent to another uppercase word.  This excludes:
+        # - "STEP 1 — EMERGENCY CHECK" (all words have uppercase neighbors)
+        # - "STEP 1: checking ASTS" (STEP has "1" neighbor then uppercase)
+        prev_raw = words[i - 1].strip(".,;:!?()[]—–-\"'$#%") if i > 0 else ""
+        next_raw = words[i + 1].strip(".,;:!?()[]—–-\"'$#%") if i < len(words) - 1 else ""
+
+        def _looks_allcaps_context(w: str) -> bool:
+            """True if neighbor suggests an all-caps phrase context.
+
+            Matches uppercase words (2+ letters), pure numbers/ordinals
+            (headers like "STEP 1"), and em-dashes/colons that separate
+            header segments. Does NOT match $-prefixed values ("$85.0")
+            which indicate financial context around a real ticker.
+            """
+            if not w:
+                return False
+            # Pure numbers/ordinals (part of headers like "STEP 1")
+            if w.isdigit():
+                return True
+            # Uppercase word (2+ alpha chars)
+            alpha_chars = [c for c in w if c.isalpha()]
+            if len(alpha_chars) >= 2 and all(c.isupper() for c in alpha_chars):
+                return True
+            return False
+
+        if _looks_allcaps_context(prev_raw) or _looks_allcaps_context(next_raw):
+            continue
+
+        tickers.add(clean)
+
+    return tickers
+
 
 # Phrases in reasoning that suggest monitoring/inaction
 _MONITOR_PHRASES = re.compile(
@@ -257,60 +335,15 @@ class OutputValidator:
             if sym:
                 known_symbols.add(sym.upper())
 
-        # Extract symbols from reasoning text + key_factors
+        # Extract likely ticker symbols from reasoning text.
+        # Uses context-aware extraction that skips all-caps phrases
+        # (Claude's reasoning headers) and only flags isolated uppercase
+        # words surrounded by lowercase/mixed text.
         text = (decision.reasoning or "") + " " + " ".join(decision.key_factors or [])
-        found_symbols = set(_TICKER_RE.findall(text))
+        found_symbols = _extract_likely_tickers(text)
 
-        # Filter out common abbreviations, short words, and domain-specific tokens.
-        # Single letters appear in option notation (150P = PUT, 200C = CALL) and
-        # autonomy levels (L1, L2). Common English words appear when Claude
-        # uses natural language in uppercase context (e.g. "STEP 1 - POSITION CHECK").
-        short_words = {
-            # Single letters (option notation: P=PUT, C=CALL; autonomy: L=Level)
-            "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
-            "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-            # 2-letter common words
-            "AN", "AM", "AS", "AT", "BE", "BY", "DO", "GO",
-            "IF", "IN", "IS", "IT", "MY", "NO", "OF", "OK", "ON", "OR",
-            "SO", "TO", "UP", "US", "WE", "HE",
-            # 3-letter English words that appear in reasoning
-            "NOT", "AND", "BUT", "FOR", "THE", "HAS", "HAD", "ARE", "WAS",
-            "ALL", "ANY", "CAN", "MAY", "NEW", "NOW", "OLD", "OUR", "OUT",
-            "OWN", "SAY", "TOO", "TWO", "WAY", "WHO", "DAY", "GET", "HIS",
-            "HOW", "ITS", "LET", "PUT", "SET", "TRY", "USE", "YET",
-            "LOW", "HIGH", "MAX", "MIN", "NET", "PER", "PRE", "RUN",
-            "CAS", "NOR", "DID", "TOP", "END", "MIX", "GAP", "DUE",
-            "RAW", "KEY", "BIG", "FEW", "FAR", "ADD", "AGO", "AIM",
-            "CAP", "CUT", "DIP", "FIT", "HIT", "LOG", "MID", "ODD",
-            "PAY", "RED", "SAT", "TAG", "VIA",
-            # 4-letter English words (appear in Claude's structured reasoning headers)
-            "ALSO", "BACK", "BEEN", "BEST", "BOTH", "CALL", "CASE", "COME",
-            "COST", "DATA", "DATE", "DAYS", "DOES", "DONE", "DOWN", "EACH",
-            "EVEN", "EXIT", "FIND", "FIVE", "FROM", "FULL", "GIVE", "GOOD",
-            "HALF", "HAVE", "HELD", "HERE", "HOLD", "INTO", "JUST", "KEEP",
-            "LAST", "LESS", "LIKE", "LONG", "LOSS", "MADE", "MAKE", "MORE",
-            "MOST", "MUCH", "MUST", "NEAR", "NEED", "NEXT", "NINE", "NONE",
-            "ONCE", "ONLY", "OPEN", "OVER", "PAST", "PICK", "PLAN", "POST",
-            "RISK", "SEEN", "SHOW", "SIDE", "SIGN", "SOME", "STEP", "STOP",
-            "SURE", "TAKE", "THAN", "THAT", "THEM", "THEN", "THEY", "THIS",
-            "TIME", "TOOK", "VERY", "WAIT", "WELL", "WENT", "WERE", "WHAT",
-            "WHEN", "WILL", "WITH", "WORK", "YEAR", "ZERO",
-            # 5-letter English words (common in trading reasoning)
-            "ABOVE", "AFTER", "BEING", "BELOW", "CHECK", "CLEAR", "CLOSE",
-            "COULD", "ENTRY", "EVERY", "FIRST", "GIVEN", "GOING", "GREAT",
-            "LARGE", "LEVEL", "LIMIT", "LOSES", "LOWER", "MIGHT", "MONEY",
-            "NEVER", "OTHER", "POINT", "PRICE", "PRIME", "PRIOR", "QUICK",
-            "RANGE", "SINCE", "SMALL", "STILL", "STOCK", "THERE", "THESE",
-            "THOSE", "THREE", "TODAY", "TOTAL", "TRADE", "TREND", "UNDER",
-            "UNTIL", "UPPER", "VALUE", "WATCH", "WHERE", "WHICH", "WHILE",
-            "WHOLE", "WHOSE", "WOULD", "WORST",
-            # Plurals and domain terms that appear in options reasoning
-            "PUTS", "CALLS", "SELLS", "BUYS",
-            "SHORT", "DELTA", "GAMMA", "THETA", "VEGA",
-            "STAGE", "BATCH", "CHAIN", "COVER", "NAKED",
-            "EARLY", "STALE", "FRESH",
-        }
-        unknown_symbols = found_symbols - known_symbols - COMMON_ABBREVIATIONS - short_words
+        # Filter out known abbreviations (domain terms, exchanges, etc.)
+        unknown_symbols = found_symbols - known_symbols - COMMON_ABBREVIATIONS
 
         if not unknown_symbols:
             return [GuardrailResult(
@@ -321,14 +354,15 @@ class OutputValidator:
             )]
 
         results = []
-        # Check if unknown symbols appear in action-critical context
-        # CLOSE_POSITION gets "warning" not "block" because action_plausibility
-        # already validates the trade_id matches an actual open position.
-        action = decision.action
-        action_block = action in ("EXECUTE_TRADES", "STAGE_CANDIDATES")
+        # Always "warning" severity — never block.
+        # EXECUTE_TRADES and STAGE_CANDIDATES don't use symbols from reasoning;
+        # they operate on staged candidates from the database.  The
+        # action_plausibility guardrail validates that staged candidates exist.
+        # Blocking on symbol_crossref causes false positives on common English
+        # words (EVENT, UPON, SHORT, CAS, etc.) with zero safety benefit.
 
         for sym in unknown_symbols:
-            severity = "block" if action_block else "warning"
+            severity = "warning"
             results.append(GuardrailResult(
                 passed=False,
                 guard_name="symbol_crossref",

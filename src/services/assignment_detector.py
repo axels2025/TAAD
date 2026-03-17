@@ -131,6 +131,29 @@ class AssignmentDetector:
             if shares % 100 != 0:
                 continue
 
+            # Skip stocks already tracked as StockPositions (assignment
+            # was already processed — stock may now be part of a covered
+            # call strategy).
+            try:
+                from src.data.database import get_db_session
+                from src.data.models import StockPosition
+
+                with get_db_session() as _session:
+                    existing = _session.query(StockPosition).filter(
+                        StockPosition.symbol == symbol,
+                        StockPosition.closed_date.is_(None),
+                    ).first()
+                    if existing:
+                        dedup_key = f"{symbol}_{shares}_{pos.avgCost:.2f}"
+                        self._reported_assignments.add(dedup_key)
+                        logger.debug(
+                            f"Skipping {symbol} ({shares} shares) — "
+                            f"already tracked in StockPosition (id={existing.id})"
+                        )
+                        continue
+            except Exception as e:
+                logger.debug(f"StockPosition lookup failed for {symbol}: {e}")
+
             # Check if we have a matching option trade in the database
             event = self._check_against_trades(symbol, shares, pos.avgCost)
             if event:
