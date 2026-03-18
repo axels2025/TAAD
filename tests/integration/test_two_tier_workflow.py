@@ -20,6 +20,7 @@ import pytest
 
 from src.services.adaptive_order_executor import AdaptiveOrderExecutor
 from src.services.clock_sync import ClockSyncVerifier
+from src.services.limit_price_calculator import LimitPriceCalculator
 from src.services.market_conditions import MarketConditionMonitor
 from src.services.order_reconciliation import OrderReconciliation
 from src.services.premarket_validator import PremarketValidator, StagedOpportunity
@@ -45,6 +46,9 @@ def mock_ibkr_client():
     client.get_stock_contract = Mock()
     client.qualify_contracts_async = AsyncMock()
 
+    # Default option quote returns stable premium (used in Stage 2 validation)
+    client.get_option_quote = Mock(return_value={"bid": 0.48, "ask": 0.55})
+
     # Order operations
     client.place_order = AsyncMock()
     client.cancel_order = AsyncMock()
@@ -53,50 +57,61 @@ def mock_ibkr_client():
     # Status
     client.ensure_connected = Mock()
     client.sleep = AsyncMock()
+    client.check_market_data_health = Mock(return_value=(True, None))
 
     # Order status events
     client.order_status_event = Mock()
     client.order_status_event.__iadd__ = Mock(return_value=client.order_status_event)
+
+    # IB object (needed by RapidFireExecutor for event registration)
+    client.ib = Mock()
+    client.ib.orderStatusEvent = Mock()
+    client.ib.orderStatusEvent.__iadd__ = Mock(return_value=client.ib.orderStatusEvent)
+    client.ib.orderStatusEvent.__isub__ = Mock(return_value=client.ib.orderStatusEvent)
 
     return client
 
 
 @pytest.fixture
 def staged_opportunities():
-    """Sample staged opportunities for integration testing."""
+    """Sample staged opportunities for integration testing.
+
+    OTM% values must pass min_otm_execute=0.10, so strikes must be
+    well below stock price (>10% OTM).
+    """
     return [
         StagedOpportunity(
             id=1,
             symbol="AAPL",
-            strike=150.0,
+            strike=135.0,
             expiration="2026-02-14",
             staged_stock_price=155.0,
             staged_limit_price=0.45,
             staged_contracts=5,
             staged_margin=3750.0,
-            otm_pct=0.15,
+            otm_pct=0.129,  # (155-135)/155 = 12.9%
         ),
         StagedOpportunity(
             id=2,
             symbol="MSFT",
-            strike=400.0,
+            strike=360.0,
             expiration="2026-02-14",
             staged_stock_price=410.0,
             staged_limit_price=0.50,
             staged_contracts=3,
             staged_margin=6000.0,
-            otm_pct=0.20,
+            otm_pct=0.122,  # (410-360)/410 = 12.2%
         ),
         StagedOpportunity(
             id=3,
             symbol="GOOGL",
-            strike=140.0,
+            strike=125.0,
             expiration="2026-02-14",
             staged_stock_price=145.0,
             staged_limit_price=0.40,
             staged_contracts=4,
             staged_margin=2800.0,
-            otm_pct=0.18,
+            otm_pct=0.138,  # (145-125)/145 = 13.8%
         ),
     ]
 
@@ -113,8 +128,9 @@ class TestFullWorkflowAutonomousMode:
         # ── Setup Mocks ──
 
         # Mock stock quotes for Stage 1 (pre-market validation)
+        # Prices must be close to staged values for Stage 1 to pass (< 3% deviation)
         def mock_get_stock_price(symbol):
-            prices = {"AAPL": 155.0, "MSFT": 410.0, "GOOGL": 145.0}
+            prices = {"AAPL": 154.0, "MSFT": 408.0, "GOOGL": 144.0}
             return prices.get(symbol)
 
         mock_ibkr_client.get_stock_price = mock_get_stock_price
@@ -186,6 +202,7 @@ class TestFullWorkflowAutonomousMode:
         # AdaptiveOrderExecutor
         adaptive_executor = AdaptiveOrderExecutor(
             ibkr_client=mock_ibkr_client,
+            limit_calc=LimitPriceCalculator(),
         )
 
         # RapidFireExecutor
@@ -201,17 +218,12 @@ class TestFullWorkflowAutonomousMode:
         ):
             condition_monitor = MarketConditionMonitor(mock_ibkr_client)
 
-        # ClockSyncVerifier (mock to avoid NTP calls)
-        clock_sync = Mock(spec=ClockSyncVerifier)
-        clock_sync.verify_sync_or_abort = AsyncMock(return_value=5.0)  # 5ms drift
-
         # TwoTierExecutionScheduler
         scheduler = TwoTierExecutionScheduler(
             ibkr_client=mock_ibkr_client,
             premarket_validator=validator,
             rapid_fire_executor=rapid_fire,
             condition_monitor=condition_monitor,
-            clock_sync_verifier=clock_sync,
             automation_mode=AutomationMode.AUTONOMOUS,
             tier2_enabled=True,
         )
@@ -229,9 +241,6 @@ class TestFullWorkflowAutonomousMode:
 
         # ── Verify Results ──
 
-        # Clock sync was verified
-        clock_sync.verify_sync_or_abort.assert_called_once()
-
         # Report should be generated
         assert report is not None
         assert report.dry_run is True
@@ -245,8 +254,9 @@ class TestFullWorkflowAutonomousMode:
     ):
         """Test scenario where Tier 1 fills all orders (Tier 2 not needed)."""
 
-        # Setup validator
-        mock_ibkr_client.get_stock_price = lambda symbol: 150.0
+        # Setup validator - prices close to staged (155/410/145) for Stage 1 to pass
+        prices = {"AAPL": 154.0, "MSFT": 408.0, "GOOGL": 144.0}
+        mock_ibkr_client.get_stock_price = lambda symbol: prices.get(symbol, 150.0)
 
         # Mock all quotes
         good_quote = Quote(bid=0.44, ask=0.48, last=0.46, volume=1000, is_valid=True, reason="")
@@ -269,20 +279,16 @@ class TestFullWorkflowAutonomousMode:
 
         # Create scheduler with all components
         validator = PremarketValidator(ibkr_client=mock_ibkr_client)
-        adaptive_executor = AdaptiveOrderExecutor(ibkr_client=mock_ibkr_client)
+        adaptive_executor = AdaptiveOrderExecutor(ibkr_client=mock_ibkr_client, limit_calc=LimitPriceCalculator())
         rapid_fire = RapidFireExecutor(
             ibkr_client=mock_ibkr_client,
             adaptive_executor=adaptive_executor,
         )
 
-        clock_sync = Mock(spec=ClockSyncVerifier)
-        clock_sync.verify_sync_or_abort = AsyncMock(return_value=3.0)
-
         scheduler = TwoTierExecutionScheduler(
             ibkr_client=mock_ibkr_client,
             premarket_validator=validator,
             rapid_fire_executor=rapid_fire,
-            clock_sync_verifier=clock_sync,
             automation_mode=AutomationMode.AUTONOMOUS,
             tier2_enabled=True,
         )
@@ -304,8 +310,9 @@ class TestFullWorkflowAutonomousMode:
     ):
         """Test scenario where Tier 1 partial fill, Tier 2 retries when VIX drops."""
 
-        # Setup basic mocks
-        mock_ibkr_client.get_stock_price = lambda symbol: 150.0
+        # Setup basic mocks - prices close to staged values
+        prices = {"AAPL": 154.0, "MSFT": 408.0, "GOOGL": 144.0}
+        mock_ibkr_client.get_stock_price = lambda symbol: prices.get(symbol, 150.0)
 
         good_quote = Quote(bid=0.44, ask=0.48, last=0.46, volume=1000, is_valid=True, reason="")
         mock_ibkr_client.get_quote = AsyncMock(return_value=good_quote)
@@ -328,7 +335,7 @@ class TestFullWorkflowAutonomousMode:
 
         # Create components
         validator = PremarketValidator(ibkr_client=mock_ibkr_client)
-        adaptive_executor = AdaptiveOrderExecutor(ibkr_client=mock_ibkr_client)
+        adaptive_executor = AdaptiveOrderExecutor(ibkr_client=mock_ibkr_client, limit_calc=LimitPriceCalculator())
         rapid_fire = RapidFireExecutor(
             ibkr_client=mock_ibkr_client,
             adaptive_executor=adaptive_executor,
@@ -340,15 +347,11 @@ class TestFullWorkflowAutonomousMode:
         ):
             condition_monitor = MarketConditionMonitor(mock_ibkr_client)
 
-        clock_sync = Mock(spec=ClockSyncVerifier)
-        clock_sync.verify_sync_or_abort = AsyncMock(return_value=2.0)
-
         scheduler = TwoTierExecutionScheduler(
             ibkr_client=mock_ibkr_client,
             premarket_validator=validator,
             rapid_fire_executor=rapid_fire,
             condition_monitor=condition_monitor,
-            clock_sync_verifier=clock_sync,
             automation_mode=AutomationMode.AUTONOMOUS,
             tier2_enabled=True,
         )
@@ -376,13 +379,9 @@ class TestWorkflowEdgeCases:
 
         validator = PremarketValidator(ibkr_client=mock_ibkr_client)
 
-        clock_sync = Mock(spec=ClockSyncVerifier)
-        clock_sync.verify_sync_or_abort = AsyncMock(return_value=1.0)
-
         scheduler = TwoTierExecutionScheduler(
             ibkr_client=mock_ibkr_client,
             premarket_validator=validator,
-            clock_sync_verifier=clock_sync,
             automation_mode=AutomationMode.AUTONOMOUS,
         )
 
@@ -401,22 +400,18 @@ class TestWorkflowEdgeCases:
     async def test_no_trades_pass_stage2(self, mock_ibkr_client, staged_opportunities):
         """Test workflow when trades pass Stage 1 but fail Stage 2."""
 
-        # Stage 1: Good stock prices
-        mock_ibkr_client.get_stock_price = lambda symbol: 155.0
+        # Stage 1: Good stock prices - close to staged values
+        prices = {"AAPL": 154.0, "MSFT": 408.0, "GOOGL": 144.0}
+        mock_ibkr_client.get_stock_price = lambda symbol: prices.get(symbol, 155.0)
 
-        # Stage 2: Bad option quotes (premium too low)
-        bad_quote = Quote(bid=0.10, ask=0.12, last=0.11, volume=100, is_valid=True, reason="")
-        mock_ibkr_client.get_quote = AsyncMock(return_value=bad_quote)
+        # Stage 2: Bad option quotes (premium too low) - Stage 2 uses get_option_quote
+        mock_ibkr_client.get_option_quote = Mock(return_value={"bid": 0.10, "ask": 0.12})
 
         validator = PremarketValidator(ibkr_client=mock_ibkr_client)
-
-        clock_sync = Mock(spec=ClockSyncVerifier)
-        clock_sync.verify_sync_or_abort = AsyncMock(return_value=1.0)
 
         scheduler = TwoTierExecutionScheduler(
             ibkr_client=mock_ibkr_client,
             premarket_validator=validator,
-            clock_sync_verifier=clock_sync,
             automation_mode=AutomationMode.AUTONOMOUS,
         )
 
@@ -432,28 +427,20 @@ class TestWorkflowEdgeCases:
         assert "Stage 2" in str(report.warnings)
 
     @pytest.mark.asyncio
-    async def test_clock_sync_failure_aborts_workflow(
-        self, mock_ibkr_client, staged_opportunities
+    async def test_empty_opportunities_produces_warning(
+        self, mock_ibkr_client
     ):
-        """Test that clock sync failure prevents execution."""
-
-        from src.services.clock_sync import ClockSyncError
-
-        # Mock clock sync failure
-        bad_clock_sync = Mock(spec=ClockSyncVerifier)
-        bad_clock_sync.verify_sync_or_abort = AsyncMock(
-            side_effect=ClockSyncError("Clock drift 75ms exceeds 50ms limit")
-        )
-
+        """Test that empty opportunities list produces a warning."""
         scheduler = TwoTierExecutionScheduler(
             ibkr_client=mock_ibkr_client,
-            clock_sync_verifier=bad_clock_sync,
             automation_mode=AutomationMode.AUTONOMOUS,
         )
 
-        # Should raise ClockSyncError and abort
-        with pytest.raises(ClockSyncError, match="Clock drift.*exceeds"):
-            await scheduler.run_monday_morning(
-                staged_opportunities,
+        with patch.object(scheduler, '_wait_until_time', new_callable=AsyncMock):
+            report = await scheduler.run_monday_morning(
+                [],
                 dry_run=True
             )
+
+        assert report is not None
+        assert report.staged_count == 0

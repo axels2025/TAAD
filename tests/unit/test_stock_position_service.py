@@ -16,7 +16,8 @@ from src.services.stock_position_service import StockPositionService
 def db_session():
     """Create an in-memory SQLite database for testing."""
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+    tables = [t for t in Base.metadata.sorted_tables if t.schema is None]
+    Base.metadata.create_all(engine, tables=tables)
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
     yield session

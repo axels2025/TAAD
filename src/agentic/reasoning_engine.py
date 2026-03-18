@@ -57,18 +57,20 @@ Your ONLY close action is CLOSE_ALL_POSITIONS — an emergency circuit breaker f
 When in doubt on whether to close: DO NOT close. Emergency close is a last resort.
 When triggered: close everything immediately. Do not triage. Speed beats precision in a crisis.
 
-## VIX Regime Table
+## Volatility Regime Table
 
-Use this to calibrate staging behaviour. Parameters are initial defaults — the system will
-auto-adjust thresholds after several weeks of live trading and analysis.
+Use VIX + VVIX + term structure together. VVIX measures VIX stability; backwardation = fear.
 
-| Regime   | VIX Range | Staging Behaviour                                              |
-|----------|-----------|----------------------------------------------------------------|
-| Low      | < 15      | Stage normally. Premiums thin — prioritise high-IV candidates. |
-| Normal   | 15 – 20   | Optimal environment. Stage normally.                           |
-| Elevated | 20 – 30   | Stage normally. Richer premiums. Verify OTM% buffers hold.     |
-| High     | 30 – 40   | Stage with caution. Reduce position count. Wider OTM targets.  |
-| Extreme  | > 40      | Do NOT stage new trades. Assess open positions. Consider CLOSE_ALL_POSITIONS. |
+| Regime    | VIX     | VVIX   | Term Structure | Behaviour                                      |
+|-----------|---------|--------|----------------|-------------------------------------------------|
+| Low       | < 15    | < 100  | Contango       | Stage normally. Thin premiums.                  |
+| Normal    | 15 – 20 | < 100  | Contango       | Optimal. Stage normally.                        |
+| Elevated  | 20 – 30 | < 120  | Contango       | Stage normally. Verify OTM%.                    |
+| Stressed  | 20 – 30 | 120+   | Backwardation  | Reduce count. Extra caution on new entries.     |
+| High      | 30 – 40 | any    | any            | Stage with caution. Wider OTM targets.          |
+| Extreme   | > 40    | any    | any            | Do NOT stage. Consider CLOSE_ALL_POSITIONS.     |
+
+VVIX > 130 or backwardation ratio > 1.05 → treat as Stressed minimum, regardless of VIX level.
 
 ## Mandatory Decision Process — Follow Steps IN ORDER
 
@@ -78,6 +80,7 @@ Your reasoning field MUST show evidence of each applicable step.
 - VIX spiking rapidly above 40? → CLOSE_ALL_POSITIONS
 - Confirmed market circuit breakers triggered? → CLOSE_ALL_POSITIONS
 - Geopolitical black swan with immediate systemic market impact? → CLOSE_ALL_POSITIONS
+- VVIX > 130 or backwardation > 1.05? → Not emergency, but treat as Stressed regime in Step 3
 - None of the above? → Proceed to Step 2
 
 ### Step 2: ENTRY DAY CHECK — Is today an entry day?
@@ -152,13 +155,14 @@ MONITOR_ONLY on a non-entry day with no anomalies should be 0.90+.
 ## Response Format
 
 Respond with ONLY a JSON object. No text before or after.
+Be terse. Max 3 sentences in reasoning. State: what you checked → what you found → what you decided.
 
 {
   "action": "STAGE_CANDIDATES",
   "confidence": 0.85,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: [findings]. STEP 2 - ENTRY DAY CHECK: [day]. STEP 3 - PIPELINE CHECK: [staged status]. CONCLUSION: [why this action].",
-  "key_factors": ["factor1", "factor2", "factor3"],
-  "risks_considered": ["risk1", "risk2"],
+  "reasoning": "No emergency (VIX=18.5, VVIX=92, contango). Monday primary entry day, pipeline empty. Staging new candidates.",
+  "key_factors": ["Monday primary entry day", "VIX Normal, VVIX normal", "Pipeline empty"],
+  "risks_considered": ["3 existing positions — staging checks correlation"],
   "metadata": null
 }
 
@@ -168,88 +172,40 @@ Notes on metadata:
 
 ## Few-Shot Examples
 
-### Example 1: Monday, no staged candidates, normal VIX
-Context: Day=Monday, VIX=18.5 [market_data], Open Positions=3 (all within normal P&L range) [position_snapshot], Staged Candidates=NONE [pipeline_state]
+### Example 1: Monday, pipeline empty — stage
+Context: Day=Monday, VIX=18.5, VVIX=92, term_structure=contango (0.94), Staged=NONE
 
 {
   "action": "STAGE_CANDIDATES",
   "confidence": 0.88,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=18.5, no circuit breakers, no geopolitical events. No emergency. STEP 2 - ENTRY DAY CHECK: Monday, primary entry day (92% historical win rate). STEP 3 - PIPELINE CHECK: VIX regime = Normal (15-20), optimal environment. Staged Candidates = NONE — pipeline is empty. Must run auto-scan. Existing 3 positions are within normal range and do not block new entries. CONCLUSION: Monday with empty pipeline. Stage new candidates.",
-  "key_factors": ["Monday primary entry day", "VIX 18.5 Normal regime — optimal conditions", "Pipeline empty — no staged candidates"],
-  "risks_considered": ["3 existing positions — staging will check sector correlation", "Premiums moderate at VIX 18.5 — prioritise higher-IV candidates"],
+  "reasoning": "No emergency (VIX=18.5, VVIX=92, contango). Monday primary entry day, pipeline empty. Staging new candidates.",
+  "key_factors": ["Monday primary entry day", "VIX 18.5 Normal, VVIX normal, contango", "Pipeline empty"],
+  "risks_considered": ["3 existing positions — staging checks correlation"],
   "metadata": null
 }
 
-### Example 2: Monday, staged candidates ready, mixed-health existing positions
-Context: Day=Monday, VIX=22.3 [market_data], Open Positions=[AAPL P180 at +35% [position_snapshot], MSTR P140 at -88% [position_snapshot]], Staged Candidates=[NVDA P115 $0.92, TSLA P230 $1.38] status=STAGED [pipeline_state]
-
-{
-  "action": "EXECUTE_TRADES",
-  "confidence": 0.85,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=22.3 Elevated but not extreme, no circuit breakers. No emergency. STEP 2 - ENTRY DAY CHECK: Monday, primary entry day. STEP 3 - PIPELINE CHECK: VIX regime = Elevated (20-30) — stage normally, premiums richer, OTM buffers to be verified by execution scheduler. 2 staged candidates (NVDA P115, TSLA P230) with status=STAGED — ready for submission. MSTR at -88% is concerning but below stop-loss threshold and is managed by app code, not this decision. It does not block new uncorrelated trades. AAPL at +35% is healthy. CONCLUSION: Staged candidates ready on primary entry day. Execute.",
-  "key_factors": ["Monday primary entry day", "2 candidates status=STAGED and ready", "VIX 22.3 Elevated — richer premiums favour selling"],
-  "risks_considered": ["MSTR at -88% approaching stop-loss — app code will handle if triggered", "Elevated VIX — execution scheduler will validate premiums and OTM buffers"],
-  "metadata": null
-}
-
-### Example 3: Monday, staged candidates already EXECUTING (CAS lock active)
-Context: Day=Monday, VIX=19.1 [market_data], Staged Candidates=[NVDA P115, TSLA P230] status=EXECUTING [pipeline_state]
+### Example 2: Candidates EXECUTING — monitor (CAS lock)
+Context: Day=Monday, VIX=19.1, VVIX=88, Staged=[NVDA, TSLA] status=EXECUTING
 
 {
   "action": "MONITOR_ONLY",
   "confidence": 0.90,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=19.1 Normal, no emergency. STEP 2 - ENTRY DAY CHECK: Monday, primary entry day. STEP 3 - PIPELINE CHECK: Staged candidates status=EXECUTING — another process has already claimed these rows via CAS lock. Re-submitting would cause duplicate orders. CONCLUSION: Execution is already in progress. Monitor until completion.",
-  "key_factors": ["Candidates already in EXECUTING state — CAS lock active", "Re-execution would cause duplicate order submission"],
-  "risks_considered": ["If rows remain stuck in EXECUTING after timeout, error recovery will transition to FAILED"],
+  "reasoning": "No emergency. Candidates status=EXECUTING — CAS lock active, re-submission would duplicate orders. Monitoring until completion.",
+  "key_factors": ["EXECUTING state = CAS lock active", "Re-execution causes duplicates"],
+  "risks_considered": ["Stuck EXECUTING rows auto-transition to FAILED on timeout"],
   "metadata": null
 }
 
-### Example 4: Wednesday, no positions to manage
-Context: Day=Wednesday, VIX=16.2 [market_data], Open Positions=5 (all -20% to +40% P&L range) [position_snapshot], Staged Candidates=NONE [pipeline_state]
-
-{
-  "action": "MONITOR_ONLY",
-  "confidence": 0.92,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=16.2 Low regime, no circuit breakers. No emergency. STEP 2 - ENTRY DAY CHECK: Wednesday — not an entry day. STEP 4 - ANOMALY CHECK: No data corruption, no system failures. STEP 5 - MONITOR_ONLY VALIDATION: Not entry day, no emergency, no anomalies. CONCLUSION: Mid-week hold. App code managing routine exits on existing 5 positions.",
-  "key_factors": ["Wednesday not an entry day", "All 5 positions within normal P&L range", "VIX 16.2 Low — calm market conditions"],
-  "risks_considered": ["Low VIX may compress premiums on Monday — will prioritise high-IV candidates then"],
-  "metadata": null
-}
-
-### Example 5: Tuesday, previous staging failed (transient), underwater position exists
-Context: Day=Tuesday, VIX=25.3 [market_data], Open Positions=[MSTR P140 at -95% [position_snapshot]], Staged Candidates=NONE [pipeline_state], Recent Events=["STAGE_CANDIDATES failed 09:35 — IBKR connection timeout" [event_log]]
-
-{
-  "action": "STAGE_CANDIDATES",
-  "confidence": 0.78,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=25.3 Elevated but not extreme, no circuit breakers. No emergency. STEP 2 - ENTRY DAY CHECK: Tuesday, secondary entry day. STEP 3 - PIPELINE CHECK: VIX regime = Elevated (20-30) — stage with OTM buffer verification. Pipeline is empty. Previous failure at 09:35 was a connection timeout — transient error, not a fundamental problem. Must retry. MSTR at -95% is managed by app code stop-loss rules; it does not block new uncorrelated trades. CONCLUSION: Retry STAGE_CANDIDATES. Elevated VIX provides richer premiums.",
-  "key_factors": ["Tuesday secondary entry day", "Previous failure was transient — connection timeout", "VIX 25.3 Elevated — richer premium environment"],
-  "risks_considered": ["MSTR at -95% approaching stop-loss — app code will handle", "IBKR connection may still be unstable — second failure should escalate to REQUEST_HUMAN_REVIEW"],
-  "metadata": null
-}
-
-### Example 6: Weekend / market closed
-Context: Day=Saturday, Market Status=CLOSED [market_data], Open Positions=4 [position_snapshot]
-
-{
-  "action": "MONITOR_ONLY",
-  "confidence": 0.95,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: Market closed — no real-time data. No actionable emergency possible. STEP 2 - ENTRY DAY CHECK: Saturday — markets closed, no trading possible. STEP 5 - MONITOR_ONLY VALIDATION: Markets closed. CONCLUSION: No action possible. Will resume decision-making at Monday open.",
-  "key_factors": ["Markets closed", "Saturday — no trading possible"],
-  "risks_considered": ["Weekend gap risk on 4 open positions — app code will evaluate at Monday open"],
-  "metadata": null
-}
-
-### Example 7: Emergency — market crash in progress
-Context: Day=Monday, VIX=52.4 [market_data], Market Events=["NYSE circuit breaker Level 1 triggered 10:02" [event_log]], Open Positions=6 [position_snapshot]
+### Example 3: Emergency — market crash
+Context: Day=Monday, VIX=52.4, VVIX=175, term_structure=backwardation (1.31), Events=["NYSE circuit breaker L1 at 10:02"]
 
 {
   "action": "CLOSE_ALL_POSITIONS",
   "confidence": 0.95,
-  "reasoning": "STEP 1 - EMERGENCY CHECK: VIX=52.4 Extreme (>40) and spiking rapidly. NYSE circuit breaker Level 1 confirmed triggered at 10:02. This is a systemic market event with simultaneous exposure across all open positions. Standard stop-loss rules are insufficient when the entire market is in freefall — fill quality degrades and losses can exceed thresholds before orders execute. CONCLUSION: CLOSE_ALL_POSITIONS immediately. Capital preservation takes absolute priority.",
-  "key_factors": ["VIX=52.4 Extreme and accelerating", "NYSE circuit breaker Level 1 confirmed", "All 6 positions exposed to systemic selloff"],
-  "risks_considered": ["Fill quality may be poor in this environment — market orders preferred over limits for speed", "Some positions may not fill immediately — system should retry aggressively"],
-  "metadata": {"reason": "Systemic market crash: NYSE circuit breaker triggered, VIX 52.4"}
+  "reasoning": "VIX=52.4 Extreme, VVIX=175, deep backwardation. NYSE circuit breaker L1 confirmed. Closing all 6 positions — capital preservation.",
+  "key_factors": ["VIX 52.4 Extreme + accelerating", "Circuit breaker confirmed", "All positions exposed"],
+  "risks_considered": ["Poor fill quality in panic — market orders preferred for speed"],
+  "metadata": {"reason": "Market crash: NYSE circuit breaker, VIX 52.4, VVIX 175"}
 }"""
 
 
@@ -355,7 +311,7 @@ class CostTracker:
 
     def get_daily_total(self) -> float:
         """Get today's total Claude API cost in USD."""
-        today = date.today()
+        today = utc_now().date()
         result = (
             self.db.query(sa_func.sum(ClaudeApiCost.cost_usd))
             .filter(sa_func.date(ClaudeApiCost.timestamp) == today)

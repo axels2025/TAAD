@@ -39,9 +39,9 @@ class TestExpiredTransitionFromPreExecStates:
         """EXECUTED -> EXPIRED should NOT be valid (terminal state)."""
         assert not is_valid_transition(OpportunityState.EXECUTED, OpportunityState.EXPIRED)
 
-    def test_expired_transition_invalid_from_executing(self):
-        """EXECUTING -> EXPIRED should NOT be valid (already in-flight)."""
-        assert not is_valid_transition(OpportunityState.EXECUTING, OpportunityState.EXPIRED)
+    def test_expired_transition_valid_from_executing(self):
+        """EXECUTING -> EXPIRED is valid (TTL cleanup for unfilled orders)."""
+        assert is_valid_transition(OpportunityState.EXECUTING, OpportunityState.EXPIRED)
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +51,7 @@ class TestExpiredTransitionFromPreExecStates:
 @pytest.fixture
 def dashboard_client():
     """Create a FastAPI test client for the dashboard."""
+    pytest.importorskip("fastapi")
     from src.agentic.dashboard_api import create_dashboard_app
 
     app = create_dashboard_app(auth_token="")  # No auth for testing

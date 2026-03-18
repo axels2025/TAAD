@@ -60,7 +60,7 @@ class TestValidationConfig:
         assert config.max_premium_deviation_adjust == 0.50
 
         # General defaults
-        assert config.min_otm_execute == 0.12
+        assert config.min_otm_execute == 0.10
         assert config.min_premium_execute == 0.20
 
     def test_from_env(self, monkeypatch):
@@ -68,7 +68,7 @@ class TestValidationConfig:
         monkeypatch.setenv("MAX_DEVIATION_READY", "0.02")
         monkeypatch.setenv("MAX_DEVIATION_AUTO_ADJUST", "0.04")
         monkeypatch.setenv("MAX_DEVIATION_STALE", "0.08")
-        monkeypatch.setenv("MIN_OTM_EXECUTE", "0.15")
+        monkeypatch.setenv("MIN_OTM_PCT", "0.15")
 
         config = ValidationConfig.from_env()
 
@@ -418,7 +418,7 @@ class TestPremarketValidatorStage2:
         mock_ibkr.get_stock_price.return_value = 155.0
         mock_ibkr.get_option_quote.return_value = {"bid": 0.50, "ask": 0.58}
 
-        config = ValidationConfig(min_otm_execute=0.12)  # 12% minimum
+        config = ValidationConfig(min_otm_execute=0.10)  # 10% minimum
         validator = PremarketValidator(ibkr_client=mock_ibkr, config=config)
         opp = create_staged_opportunity(
             staged_stock_price=180.0,

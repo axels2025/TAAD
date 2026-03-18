@@ -4,35 +4,9 @@ import pytest
 from datetime import date
 from io import StringIO
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from unittest.mock import patch, MagicMock
 
-from src.data.models import Base
 from src.taad.models import IBKRRawImport, ImportSession, TradeMatchingLog
-
-_TAAD_MODELS = [ImportSession, IBKRRawImport, TradeMatchingLog]
-
-
-@pytest.fixture
-def db_session():
-    """Create an in-memory SQLite database for testing."""
-    original_schemas = {}
-    for model in _TAAD_MODELS:
-        original_schemas[model] = model.__table__.schema
-        model.__table__.schema = None
-
-    try:
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        factory = sessionmaker(bind=engine)
-        session = factory()
-        yield session
-        session.close()
-        engine.dispose()
-    finally:
-        for model, schema in original_schemas.items():
-            model.__table__.schema = schema
 
 
 def _create_import_session(session, account_id="YOUR_ACCOUNT"):

@@ -860,8 +860,8 @@ class TestStaleDataGuard:
 
         assert not decision.should_exit
         assert decision.reason == "stale_data"
-        assert "NO LIVE DATA" in decision.message
-        assert "profit target" in decision.message.lower()
+        assert "no live data" in decision.message.lower()
+        assert "skipped" in decision.message.lower()
 
     def test_stale_data_time_exit_still_triggers(self, exit_manager):
         """Time exit should fire even when market data is stale — it's date-driven."""

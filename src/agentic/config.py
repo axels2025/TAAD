@@ -31,7 +31,7 @@ class ClaudeConfig(BaseModel):
     reasoning_model: str = "claude-sonnet-4-5-20250929"
     reflection_model: str = "claude-sonnet-4-5-20250929"
     embedding_model: str = "text-embedding-3-small"
-    max_tokens: int = Field(default=4096, ge=256)
+    max_tokens: int = Field(default=1500, ge=256)
     temperature: float = Field(default=0.2, ge=0.0, le=1.0)
     daily_cost_cap_usd: float = Field(default=10.0, ge=0.0)
     max_retries: int = Field(default=3, ge=1)
@@ -162,6 +162,17 @@ def _default_guardrail_config():
     """Lazy import to avoid circular dependency."""
     from src.agentic.guardrails.config import GuardrailConfig
     return GuardrailConfig()
+
+
+# Resolve forward reference so Phase5Config() works without load_phase5_config()
+def _rebuild_phase5_config():
+    try:
+        from src.agentic.guardrails.config import GuardrailConfig
+        Phase5Config.model_rebuild(_types_namespace={"GuardrailConfig": GuardrailConfig})
+    except Exception:
+        pass  # Circular import edge case — load_phase5_config() will rebuild later
+
+_rebuild_phase5_config()
 
 
 def load_phase5_config(config_path: Optional[str] = None) -> Phase5Config:

@@ -492,13 +492,21 @@ class IBKRClient:
             self._is_connected = False
             logger.info("Disconnected from IBKR")
 
-    def check_market_data_health(self) -> tuple[bool, str]:
+    def check_market_data_health(self, retries: int = 3) -> tuple[bool, str]:
         """Check if market data connection is healthy.
 
         Tests market data by requesting a quote for SPY and checking for:
         - Valid data (not NaN)
         - No TWS conflicts (Error 10197)
         - Data arrives within reasonable time
+
+        Retries up to `retries` times to handle transient conditions like
+        IBKR data farm lazy-connect (Error 2108: "inactive but should be
+        available upon demand") which can cause the first request to timeout
+        even though data is available moments later.
+
+        Args:
+            retries: Number of attempts before declaring failure (default: 3)
 
         Returns:
             Tuple of (is_healthy, error_message)
@@ -510,38 +518,69 @@ class IBKRClient:
             >>> if not is_healthy:
             ...     print(f"Market data issue: {error}")
         """
+        import time as _time
+
         self.ensure_connected()
 
-        try:
-            # Test with SPY - most liquid symbol
-            spy_contract = self.get_stock_contract("SPY")
-            if not spy_contract:
-                return False, "Could not create test contract"
+        last_error = ""
+        for attempt in range(1, retries + 1):
+            try:
+                # Test with SPY - most liquid symbol
+                spy_contract = self.get_stock_contract("SPY")
+                if not spy_contract:
+                    return False, "Could not create test contract"
 
-            # Try to get market data
-            data = self.get_market_data(spy_contract, snapshot=True)
+                # Try to get market data
+                data = self.get_market_data(spy_contract, snapshot=True)
 
-            if data is None:
-                # Check if we got Error 10197 (competing live session)
-                # This error is logged but we need to detect it
-                return (
-                    False,
-                    "No market data available - possible TWS conflict (Error 10197). "
-                    "Close Trader Workstation and try again."
-                )
+                if data is None:
+                    last_error = (
+                        "No market data returned for SPY — data farm may be "
+                        "lazy-connecting (IBKR Error 2108) or a competing "
+                        "live session exists (Error 10197)."
+                    )
+                    if attempt < retries:
+                        logger.warning(
+                            f"Market data health check attempt {attempt}/{retries} "
+                            f"failed (no data), retrying in 2s..."
+                        )
+                        _time.sleep(2)
+                        continue
+                    return False, last_error
 
-            # Verify data has valid values
-            if data.get("bid") and data.get("ask") and data.get("last"):
-                logger.info("✓ Market data health check passed")
-                return True, ""
-            else:
-                return (
-                    False,
-                    "Market data incomplete - missing bid/ask/last prices"
-                )
+                # Verify data has valid values — accept bid/ask OR last
+                has_bid_ask = bool(data.get("bid") and data.get("ask"))
+                has_last = bool(data.get("last"))
+                if has_bid_ask or has_last:
+                    if attempt > 1:
+                        logger.info(
+                            f"✓ Market data health check passed on attempt {attempt}"
+                        )
+                    else:
+                        logger.info("✓ Market data health check passed")
+                    return True, ""
+                else:
+                    last_error = "Market data incomplete - missing bid/ask/last prices"
+                    if attempt < retries:
+                        logger.warning(
+                            f"Market data health check attempt {attempt}/{retries} "
+                            f"incomplete data, retrying in 2s..."
+                        )
+                        _time.sleep(2)
+                        continue
+                    return False, last_error
 
-        except Exception as e:
-            return False, f"Market data health check failed: {e}"
+            except Exception as e:
+                last_error = f"Market data health check failed: {e}"
+                if attempt < retries:
+                    logger.warning(
+                        f"Market data health check attempt {attempt}/{retries} "
+                        f"error: {e}, retrying in 2s..."
+                    )
+                    _time.sleep(2)
+                    continue
+
+        return False, last_error
 
     def is_connected(self) -> bool:
         """Check if client is connected.

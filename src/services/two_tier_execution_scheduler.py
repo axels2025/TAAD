@@ -438,10 +438,16 @@ class TwoTierExecutionScheduler:
         """Run pre-flight safety checks before execution.
 
         Validates:
-        - Market data health (no TWS conflicts)
-        - Total margin within limits
-        - Position count within limits
-        - All trades have valid parameters
+        - Market data health (no TWS conflicts) — WARNING only, not fatal
+        - Total margin within limits — FATAL
+        - Position count within limits — FATAL
+        - All trades have valid parameters — FATAL
+
+        Market data health is a soft check because:
+        1. Stage 2 already validated live quotes for these trades
+        2. IBKR data farms lazy-connect (Error 2108) causing transient failures
+        3. RapidFireExecutor has per-contract checks that catch real issues
+        4. A single SPY snapshot failure should not block 40+ validated trades
 
         Args:
             staged: List of trades to validate
@@ -452,13 +458,16 @@ class TwoTierExecutionScheduler:
                 errors: List of error messages (empty if safe)
         """
         errors = []
+        warnings = []
 
         # Check 1: Market data health (detects TWS conflicts)
+        # This is a WARNING, not a fatal block — the execution pipeline
+        # has its own per-contract validation that will catch real issues.
         logger.info("Pre-flight check 1: Market data health...")
         is_healthy, health_error = self.client.check_market_data_health()
         if not is_healthy:
-            errors.append(f"Market data unavailable: {health_error}")
-            logger.error(f"❌ {health_error}")
+            warnings.append(f"Market data warning: {health_error}")
+            logger.warning(f"⚠ Market data health check failed (non-fatal): {health_error}")
 
         # Check 2: Total margin within budget (NLV × margin_budget_pct)
         logger.info("Pre-flight check 2: Margin limits...")
@@ -521,15 +530,20 @@ class TwoTierExecutionScheduler:
         else:
             logger.info(f"✓ All {len(staged)} trades have valid parameters")
 
-        # Final result
+        # Final result — only fatal errors block execution
         is_safe = len(errors) == 0
 
-        if is_safe:
+        if is_safe and not warnings:
             logger.info("✅ All pre-flight checks passed")
+        elif is_safe and warnings:
+            logger.warning(
+                f"⚠ Pre-flight passed with {len(warnings)} warning(s) "
+                f"(non-blocking): {'; '.join(warnings)}"
+            )
         else:
             logger.error(f"❌ Pre-flight validation FAILED ({len(errors)} errors)")
 
-        return is_safe, errors
+        return is_safe, errors + warnings
 
     async def _run_autonomous_mode(
         self,

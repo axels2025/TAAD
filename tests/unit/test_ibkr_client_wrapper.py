@@ -289,6 +289,7 @@ class TestGetQuote:
         mock_ticker.bid = None
         mock_ticker.ask = None
         mock_ticker.last = None
+        mock_ticker.close = None
 
         client.ib.reqMktData.return_value = mock_ticker
 
@@ -305,6 +306,7 @@ class TestGetQuote:
         mock_ticker.bid = math.nan
         mock_ticker.ask = 0.48
         mock_ticker.last = None
+        mock_ticker.close = None
 
         client.ib.reqMktData.return_value = mock_ticker
 
@@ -320,6 +322,7 @@ class TestGetQuote:
         mock_ticker.bid = 0
         mock_ticker.ask = 0.48
         mock_ticker.last = None
+        mock_ticker.close = None
 
         client.ib.reqMktData.return_value = mock_ticker
 
@@ -334,6 +337,7 @@ class TestGetQuote:
         mock_ticker.bid = None
         mock_ticker.ask = None
         mock_ticker.last = None
+        mock_ticker.close = None
 
         client.ib.reqMktData.return_value = mock_ticker
 
@@ -586,6 +590,7 @@ class TestGetQuotesBatch:
         ticker2.bid = None
         ticker2.ask = 0.50
         ticker2.last = None
+        ticker2.close = None
         ticker2.volume = 0
 
         # Third ticker: valid quote
@@ -626,6 +631,7 @@ class TestGetQuotesBatch:
         ticker2.bid = None
         ticker2.ask = None
         ticker2.last = None
+        ticker2.close = None
         ticker2.volume = 0
 
         mock_ib.reqMktData.side_effect = [ticker1, ticker2]
@@ -707,6 +713,7 @@ class TestGetQuotesBatch:
         ticker.bid = None
         ticker.ask = None
         ticker.last = None
+        ticker.close = None
         ticker.volume = 0
 
         mock_ib.reqMktData.return_value = ticker

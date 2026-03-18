@@ -198,8 +198,8 @@ class DaemonWatchdog:
                 # Compute age — last_heartbeat is stored as naive UTC
                 now = utc_now()
                 hb = health.last_heartbeat
-                if hb.tzinfo is None:
-                    hb = hb.replace(tzinfo=UTC)
+                if hb.tzinfo is not None:
+                    hb = hb.replace(tzinfo=None)
                 age = (now - hb).total_seconds()
                 return float(age)
         except Exception as e:

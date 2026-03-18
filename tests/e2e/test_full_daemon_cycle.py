@@ -19,11 +19,23 @@ from src.agentic.config import (
     DaemonConfig,
     Phase5Config,
 )
+from src.agentic.guardrails.config import GuardrailConfig
 from src.agentic.daemon import TAADDaemon
 from src.agentic.event_bus import EventBus, EventType
 from src.agentic.reasoning_engine import DecisionOutput
 from src.data.database import close_database, init_database
 from src.data.models import DaemonEvent, DaemonHealth, DecisionAudit
+
+
+@pytest.fixture(autouse=True)
+def skip_ibkr_and_mock_market():
+    """Prevent daemon from attempting real IBKR connection and fake market open."""
+    with patch("src.agentic.daemon.IBKRClient") as MockClient, \
+         patch("src.agentic.daemon.MarketCalendar") as MockCal:
+        MockClient.side_effect = ConnectionError("IBKR not available in test")
+        MockCal.return_value.is_market_open.return_value = True
+        MockCal.return_value.is_trading_day.return_value = True
+        yield
 
 
 @pytest.fixture
@@ -54,19 +66,22 @@ def phase5_config(tmp_path):
             event_poll_interval_seconds=1,
             max_events_per_cycle=5,
         ),
+        guardrails=GuardrailConfig(
+            enabled=False,  # No IBKR in tests — disable all guardrails
+        ),
     )
 
 
 def _mock_monitor_decision():
-    """Create a MONITOR_ONLY decision output."""
-    return DecisionOutput(
+    """Create a list of MONITOR_ONLY decision outputs (matching reason() return type)."""
+    return [DecisionOutput(
         action="MONITOR_ONLY",
         confidence=0.95,
         reasoning="Markets calm, monitoring only",
         key_factors=["low_vix"],
         risks_considered=["gap_risk"],
         metadata={},
-    )
+    )]
 
 
 class TestFullDaemonCycle:
@@ -116,12 +131,13 @@ class TestFullDaemonCycle:
         assert event2.status == "completed"
         assert event3.status == "completed"
 
-        # Verify audit trail
+        # Verify audit trail (3 events -> 3 audits)
         audits = db_session.query(DecisionAudit).all()
         assert len(audits) == 3
         for audit in audits:
             assert audit.action == "MONITOR_ONLY"
-            assert audit.confidence == 0.95
+            # Confidence is 0.95 from Claude or 1.0 from fingerprint skip
+            assert audit.confidence in (0.95, 1.0)
 
         # Verify health counters
         assert daemon.health._events_processed == 3

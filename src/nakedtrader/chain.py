@@ -439,3 +439,132 @@ def get_chain_with_greeks(
         quotes=quotes,
         trading_class=trading_class,
     )
+
+
+def get_put_call_oi_ratio(
+    client: BrokerClient,
+    symbol: str,
+    expiration: str,
+    stock_price: float,
+    config: NakedTraderConfig | None = None,
+) -> float | None:
+    """Calculate put/call open interest ratio for near-ATM strikes.
+
+    Fetches ~5 near-ATM put and ~5 near-ATM call contracts, reads their
+    open interest, and returns put_OI / call_OI. Used to detect extreme
+    bearish positioning (ratio > 3.0 = heavy put buying).
+
+    Args:
+        client: Connected IBKR client
+        symbol: Underlying symbol (e.g. "TSLA")
+        expiration: Expiration date in YYYYMMDD format
+        stock_price: Current stock price (for ATM calculation)
+        config: Optional NakedTraderConfig for exchange settings
+
+    Returns:
+        put_OI / call_OI ratio, or None if insufficient data.
+        Values > 1.0 indicate more put than call open interest.
+    """
+    if config is None:
+        config = NakedTraderConfig.load()
+
+    profile = config.profile
+
+    # Build near-ATM strike range: stock_price ± 3%
+    lower = stock_price * 0.97
+    upper = stock_price * 1.03
+
+    # Get available strikes from chain definitions
+    try:
+        chain_defs = client.get_option_chain_definitions(symbol)
+    except Exception as e:
+        logger.debug(f"P/C ratio: could not get chain defs for {symbol}: {e}")
+        return None
+
+    if not chain_defs:
+        return None
+
+    # Find strikes near ATM
+    all_strikes: set[float] = set()
+    trading_class = ""
+    for chain in chain_defs:
+        if expiration in getattr(chain, "expirations", []):
+            trading_class = getattr(chain, "tradingClass", symbol)
+            for s in getattr(chain, "strikes", []):
+                if lower <= s <= upper:
+                    all_strikes.add(s)
+
+    if not all_strikes:
+        logger.debug(f"P/C ratio: no near-ATM strikes for {symbol} @ ${stock_price:.2f}")
+        return None
+
+    # Limit to 5 closest to ATM
+    sorted_strikes = sorted(all_strikes, key=lambda s: abs(s - stock_price))[:5]
+
+    # Build put + call contracts
+    put_contracts = []
+    call_contracts = []
+    for strike in sorted_strikes:
+        for right, container in [("P", put_contracts), ("C", call_contracts)]:
+            opt = client.get_option_contract(
+                symbol=symbol,
+                expiration=expiration,
+                strike=strike,
+                right=right,
+                exchange=profile.ibkr_exchange,
+                trading_class=trading_class,
+                currency=profile.currency,
+            )
+            container.append(opt)
+
+    # Batch qualify all contracts
+    all_contracts = put_contracts + call_contracts
+    try:
+        qualified = client.qualify_contracts_batch(*all_contracts)
+    except Exception as e:
+        logger.debug(f"P/C ratio: qualify failed for {symbol}: {e}")
+        return None
+
+    valid = [q for q in qualified if q and q.conId]
+    if len(valid) < 2:
+        return None
+
+    # Subscribe to market data and read open interest
+    tickers = []
+    for contract in valid:
+        try:
+            ticker = client.subscribe_market_data(contract)
+            tickers.append((contract, ticker))
+        except Exception:
+            pass
+
+    # Wait for OI data (up to 2 seconds)
+    time.sleep(2)
+
+    put_oi_total = 0
+    call_oi_total = 0
+    for contract, ticker in tickers:
+        oi = safe_field(ticker, "openInterest")
+        if oi is not None and oi > 0:
+            right = getattr(contract, "right", "")
+            if right == "P":
+                put_oi_total += int(oi)
+            elif right == "C":
+                call_oi_total += int(oi)
+
+        # Cancel subscription
+        try:
+            client.cancel_market_data(contract)
+        except Exception:
+            pass
+
+    if call_oi_total == 0:
+        logger.debug(f"P/C ratio: no call OI for {symbol}, cannot compute ratio")
+        return None
+
+    ratio = round(put_oi_total / call_oi_total, 2)
+    logger.info(
+        f"P/C OI ratio for {symbol}: {ratio:.2f} "
+        f"(put_OI={put_oi_total:,}, call_OI={call_oi_total:,})"
+    )
+    return ratio

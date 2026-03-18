@@ -3,54 +3,15 @@
 import pytest
 from datetime import date, datetime
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
-from src.data.models import Base, Trade
+from src.data.models import Trade
 from src.taad.models import IBKRRawImport, ImportSession, TradeMatchingLog
 from src.taad.trade_promoter import (
     PromotionResult,
     promote_matches_to_trades,
     _build_trade_from_match,
 )
-
-# TAAD models that use schema="import" (not supported in SQLite)
-_TAAD_MODELS = [ImportSession, IBKRRawImport, TradeMatchingLog]
-
-
-@pytest.fixture
-def db_session():
-    """Create an in-memory SQLite database for testing.
-
-    Temporarily removes schema qualifications since SQLite
-    doesn't support PostgreSQL schemas.
-    """
-    original_schemas = {}
-    for model in _TAAD_MODELS:
-        original_schemas[model] = model.__table__.schema
-        model.__table__.schema = None
-
-    try:
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        factory = sessionmaker(bind=engine)
-        session = factory()
-
-        import_session = ImportSession(
-            status="completed",
-            source_type="flex_query",
-            account_id="YOUR_ACCOUNT",
-        )
-        session.add(import_session)
-        session.flush()
-
-        yield session, import_session.id
-
-        session.close()
-        engine.dispose()
-    finally:
-        for model, schema in original_schemas.items():
-            model.__table__.schema = schema
 
 
 def _make_raw_import(
@@ -118,9 +79,9 @@ def _make_match_log(
 class TestBuildTradeFromMatch:
     """Test the low-level trade building logic."""
 
-    def test_btc_trade_builds_correctly(self, db_session):
+    def test_btc_trade_builds_correctly(self, db_session_with_import):
         """A sell_to_open+buy_to_close match should produce correct Trade fields."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -164,9 +125,9 @@ class TestBuildTradeFromMatch:
         assert trade.commission == 7.0
         assert abs(trade.profit_loss - 168.0) < 0.01
 
-    def test_expiration_trade_builds_correctly(self, db_session):
+    def test_expiration_trade_builds_correctly(self, db_session_with_import):
         """An expiration match should use expiry date as exit date."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -188,9 +149,9 @@ class TestBuildTradeFromMatch:
         # P&L: 0.80 * 2 * 100 = 160.00 (full premium, no commissions)
         assert abs(trade.profit_loss - 160.0) < 0.01
 
-    def test_no_exit_date_returns_none(self, db_session):
+    def test_no_exit_date_returns_none(self, db_session_with_import):
         """If no exit date can be determined, return None."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         # Construct an STO with no expiry and no close — edge case
         sto = _make_raw_import(
@@ -206,9 +167,9 @@ class TestBuildTradeFromMatch:
         trade = _build_trade_from_match(match_log, sto, None)
         assert trade is None
 
-    def test_call_option_type(self, db_session):
+    def test_call_option_type(self, db_session_with_import):
         """Call options should have option_type='CALL'."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -228,9 +189,9 @@ class TestBuildTradeFromMatch:
 class TestPromoteMatchesToTrades:
     """Test the full promotion pipeline."""
 
-    def test_promotes_unpromoted_matches(self, db_session):
+    def test_promotes_unpromoted_matches(self, db_session_with_import):
         """Should create Trade records for unpromoted matches."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -265,9 +226,9 @@ class TestPromoteMatchesToTrades:
         session.refresh(match_log)
         assert match_log.matched_trade_id == trade.trade_id
 
-    def test_skips_already_promoted(self, db_session):
+    def test_skips_already_promoted(self, db_session_with_import):
         """Matches with matched_trade_id already set should be skipped."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -288,9 +249,9 @@ class TestPromoteMatchesToTrades:
         assert result.promoted == 0
         assert result.total_processed == 0
 
-    def test_idempotent_rerun(self, db_session):
+    def test_idempotent_rerun(self, db_session_with_import):
         """Running promote twice should not create duplicate trades."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -322,9 +283,9 @@ class TestPromoteMatchesToTrades:
         ).all()
         assert len(trades) == 1
 
-    def test_dry_run_no_writes(self, db_session):
+    def test_dry_run_no_writes(self, db_session_with_import):
         """Dry run should not write any data."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         sto = _make_raw_import(
             session, import_id,
@@ -350,9 +311,9 @@ class TestPromoteMatchesToTrades:
         session.refresh(match_log)
         assert match_log.matched_trade_id is None
 
-    def test_account_filter(self, db_session):
+    def test_account_filter(self, db_session_with_import):
         """Account filter should only promote matching account trades."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         # Account A
         sto_a = _make_raw_import(
@@ -381,9 +342,9 @@ class TestPromoteMatchesToTrades:
         trade = session.query(Trade).filter(Trade.trade_source == "ibkr_import").first()
         assert trade.account_id == "U1111111"
 
-    def test_all_promoted_trades_are_closed(self, db_session):
+    def test_all_promoted_trades_are_closed(self, db_session_with_import):
         """Every promoted trade must have an exit_date (closed trade)."""
-        session, import_id = db_session
+        session, import_id = db_session_with_import
 
         # Create multiple matches of different types
         sto1 = _make_raw_import(
@@ -424,11 +385,11 @@ class TestPromoteMatchesToTrades:
 class TestTradeRepositorySourceFilter:
     """Test trade_source filtering in TradeRepository."""
 
-    def test_get_all_no_filter_returns_everything(self, db_session):
+    def test_get_all_no_filter_returns_everything(self, db_session_with_import):
         """get_all() with no source filter returns all trades."""
         from src.data.repositories import TradeRepository
 
-        session, _ = db_session
+        session, _ = db_session_with_import
 
         # Create trades with different sources
         _make_trade(session, "T1", "AAPL", trade_source="live")
@@ -438,11 +399,11 @@ class TestTradeRepositorySourceFilter:
         all_trades = repo.get_all()
         assert len(all_trades) == 2
 
-    def test_get_all_with_source_filter(self, db_session):
+    def test_get_all_with_source_filter(self, db_session_with_import):
         """get_all(trade_source=[...]) returns only matching trades."""
         from src.data.repositories import TradeRepository
 
-        session, _ = db_session
+        session, _ = db_session_with_import
 
         _make_trade(session, "T3", "AAPL", trade_source="live")
         _make_trade(session, "T4", "MSFT", trade_source="ibkr_import")
@@ -460,11 +421,11 @@ class TestTradeRepositorySourceFilter:
         both = repo.get_all(trade_source=["live", "ibkr_import"])
         assert len(both) == 3
 
-    def test_get_closed_trades_with_source_filter(self, db_session):
+    def test_get_closed_trades_with_source_filter(self, db_session_with_import):
         """get_closed_trades filters by trade_source correctly."""
         from src.data.repositories import TradeRepository
 
-        session, _ = db_session
+        session, _ = db_session_with_import
 
         _make_trade(session, "TC1", "AAPL", trade_source="live", closed=True)
         _make_trade(session, "TC2", "MSFT", trade_source="ibkr_import", closed=True)
@@ -478,11 +439,11 @@ class TestTradeRepositorySourceFilter:
         import_closed = repo.get_closed_trades(trade_source=["ibkr_import"])
         assert len(import_closed) == 2
 
-    def test_get_open_trades_with_source_filter(self, db_session):
+    def test_get_open_trades_with_source_filter(self, db_session_with_import):
         """get_open_trades filters by trade_source correctly."""
         from src.data.repositories import TradeRepository
 
-        session, _ = db_session
+        session, _ = db_session_with_import
 
         _make_trade(session, "TO1", "AAPL", trade_source="live", closed=False)
         _make_trade(session, "TO2", "MSFT", trade_source="ibkr_import", closed=True)
@@ -496,11 +457,11 @@ class TestTradeRepositorySourceFilter:
         import_open = repo.get_open_trades(trade_source=["ibkr_import"])
         assert len(import_open) == 0  # All imports are closed
 
-    def test_get_trades_by_source(self, db_session):
+    def test_get_trades_by_source(self, db_session_with_import):
         """get_trades_by_source returns only trades with exact source match."""
         from src.data.repositories import TradeRepository
 
-        session, _ = db_session
+        session, _ = db_session_with_import
 
         _make_trade(session, "TS1", "AAPL", trade_source="live")
         _make_trade(session, "TS2", "MSFT", trade_source="ibkr_import")

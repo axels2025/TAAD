@@ -16,6 +16,7 @@ Also re-exports two helpers used by scanner_api.py endpoints:
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -678,6 +679,48 @@ def run_auto_select_pipeline(
                     vix=vix,
                 )
             )
+
+    # Step 7b: Put/Call OI ratio filter — skip symbols with extreme put skew
+    if ibkr_connected:
+        try:
+            from src.nakedtrader.chain import get_put_call_oi_ratio
+
+            PC_RATIO_BLOCK = float(os.getenv("PC_RATIO_BLOCK", "3.0"))
+            PC_RATIO_WARN = float(os.getenv("PC_RATIO_WARN", "2.0"))
+
+            for result in best_results:
+                if result.status == "skipped":
+                    continue
+                try:
+                    pc_ratio = get_put_call_oi_ratio(
+                        client=service.client,
+                        symbol=result.symbol,
+                        expiration=result.expiration,
+                        stock_price=result.stock_price,
+                    )
+                    if pc_ratio is not None:
+                        if pc_ratio > PC_RATIO_BLOCK:
+                            logger.warning(
+                                f"P/C ratio filter: SKIPPING {result.symbol} "
+                                f"(ratio={pc_ratio:.1f} > {PC_RATIO_BLOCK}) — "
+                                f"extreme bearish positioning"
+                            )
+                            result.status = "skipped"
+                            result.skip_reason = (
+                                f"P/C OI ratio {pc_ratio:.1f} > {PC_RATIO_BLOCK} "
+                                f"(extreme bearish positioning)"
+                            )
+                        elif pc_ratio > PC_RATIO_WARN:
+                            logger.info(
+                                f"P/C ratio warning: {result.symbol} "
+                                f"ratio={pc_ratio:.1f} (elevated put skew)"
+                            )
+                except Exception as e:
+                    logger.debug(
+                        f"P/C ratio check failed for {result.symbol}: {e}"
+                    )
+        except Exception as e:
+            logger.warning(f"P/C ratio filter unavailable: {e}")
 
     # Step 8: Call Claude for AI recommendations
     _update_scan_progress(db, "AI")

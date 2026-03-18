@@ -152,10 +152,22 @@ class ReasoningContext:
             # spy_price is collected for the learning system but excluded
             # from Claude's prompt — it's not a decision variable and
             # generates noise ("UNKNOWN") outside market hours.
-            prompt_exclude = {"spy_price"}
-            for key, val in self.market_context.items():
-                if key not in prompt_exclude:
-                    sections.append(f"  - {key}: {val}")
+            # enriched_at is internal metadata, not useful for reasoning.
+            prompt_exclude = {"spy_price", "enriched_at"}
+            # Group volatility signals first for readability
+            vol_keys = [
+                "vix", "vvix", "vix3m", "term_structure",
+                "term_structure_ratio", "session_open_vix", "vix_change_pct",
+            ]
+            other_keys = [
+                k for k in self.market_context
+                if k not in vol_keys and k not in prompt_exclude
+            ]
+            for key in vol_keys:
+                if key in self.market_context and key not in prompt_exclude:
+                    sections.append(f"  - {key}: {self.market_context[key]}")
+            for key in other_keys:
+                sections.append(f"  - {key}: {self.market_context[key]}")
 
         if self.active_patterns:
             sections.append(f"\n## Active Patterns ({len(self.active_patterns)}) [source: pattern detector]")

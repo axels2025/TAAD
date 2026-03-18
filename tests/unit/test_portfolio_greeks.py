@@ -20,7 +20,8 @@ from src.services.portfolio_greeks import get_portfolio_greeks
 def db_session():
     """Create an in-memory SQLite database with schema."""
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+    tables = [t for t in Base.metadata.sorted_tables if t.schema is None]
+    Base.metadata.create_all(engine, tables=tables)
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
     yield session

@@ -2173,8 +2173,13 @@ class TestEnrichMarketData:
 
         mock_conditions = MagicMock()
         mock_conditions.vix = 18.5
+        mock_conditions.vvix = 90.0
+        mock_conditions.vix3m = 20.0
+        mock_conditions.term_structure = "contango"
+        mock_conditions.term_structure_ratio = 0.925
         mock_conditions.spy_price = 550.0
         mock_conditions.conditions_favorable = True
+        mock_conditions.warnings = []
 
         with patch(
             "src.agentic.daemon.MarketConditionMonitor", create=True
@@ -2839,6 +2844,8 @@ class TestEodReflectionFreshnessExemption:
         d.exit_manager = None
         d.event_detector = None
         d._reconnect_attempts = 0
+        d.learning = MagicMock()
+        d.learning.run_eod_reflection = AsyncMock(return_value={"decisions_count": 0, "trades_count": 0})
 
         return d
 
@@ -2860,8 +2867,8 @@ class TestEodReflectionFreshnessExemption:
             daemon._process_event(event, db_session)
         )
 
-        # Claude reasoning should have been called (not blocked)
-        daemon.reasoning.reason.assert_called_once()
+        # Learning loop should have been called (not blocked by data freshness)
+        daemon.learning.run_eod_reflection.assert_called_once()
 
     def test_market_close_bypasses_data_freshness(self, daemon, db_session):
         """MARKET_CLOSE should proceed despite data_stale=True.

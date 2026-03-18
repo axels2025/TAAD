@@ -2841,7 +2841,7 @@ class TAADDaemon:
         Args:
             db: Database session
         """
-        today = date.today()
+        today = utc_now().date()
         try:
             failed_events = db.query(DaemonEvent).filter(
                 sa_func.date(DaemonEvent.created_at) == today,
@@ -3357,7 +3357,10 @@ class TAADDaemon:
                 pnl_buckets.append(0)
 
         # VIX regime bucket — matches the VIX Regime Table thresholds
-        vix = float(context.market_context.get("vix") or 0)
+        try:
+            vix = float(context.market_context.get("vix") or 0)
+        except (ValueError, TypeError):
+            vix = 0.0
         if vix < 15:
             vix_regime = "low"
         elif vix < 20:
@@ -3459,6 +3462,10 @@ class TAADDaemon:
                 logger.info(f"VIX session baseline set to {session_open_vix:.1f}")
 
             ctx.market_context["vix"] = conditions.vix
+            ctx.market_context["vvix"] = conditions.vvix
+            ctx.market_context["vix3m"] = conditions.vix3m
+            ctx.market_context["term_structure"] = conditions.term_structure
+            ctx.market_context["term_structure_ratio"] = conditions.term_structure_ratio
             ctx.market_context["session_open_vix"] = session_open_vix
             # SPY is stored for the learning system but excluded from Claude's
             # prompt (not a decision variable — just noise).  Store None when
@@ -3502,12 +3509,65 @@ class TAADDaemon:
                         ),
                     )
 
+            # VVIX / Term structure notification tiers
+            if db is not None:
+                vvix = conditions.vvix
+                ts_ratio = conditions.term_structure_ratio
+
+                # VVIX notifications
+                if vvix <= 100:
+                    self._resolve_notification(db, "vvix_extreme")
+                    self._resolve_notification(db, "vvix_elevated")
+                elif vvix > 130:
+                    self._upsert_notification(
+                        db=db, key="vvix_extreme", category="risk",
+                        title=f"VVIX Extreme: {vvix:.0f}",
+                        message=(
+                            f"VVIX at {vvix:.0f} — VIX itself is unstable. "
+                            f"New entries blocked until VVIX < 130."
+                        ),
+                    )
+                elif vvix > 100:
+                    self._upsert_notification(
+                        db=db, key="vvix_elevated", category="risk",
+                        title=f"VVIX Elevated: {vvix:.0f}",
+                        message=(
+                            f"VVIX at {vvix:.0f} — VIX volatility above normal. "
+                            f"Monitoring for further deterioration."
+                        ),
+                    )
+
+                # Term structure notifications
+                if ts_ratio > 0 and ts_ratio <= 1.0:
+                    self._resolve_notification(db, "term_backwardation")
+                elif ts_ratio > 1.05:
+                    self._upsert_notification(
+                        db=db, key="term_backwardation", category="risk",
+                        title=f"VIX Term Structure: Backwardation ({ts_ratio:.2f})",
+                        message=(
+                            f"VIX ({conditions.vix:.1f}) > VIX3M ({conditions.vix3m:.1f}), "
+                            f"ratio {ts_ratio:.2f}. Market pricing imminent trouble. "
+                            f"New entries blocked until ratio < 1.05."
+                        ),
+                    )
+                elif ts_ratio > 1.0:
+                    self._upsert_notification(
+                        db=db, key="term_backwardation", category="risk",
+                        title=f"VIX Term Structure: Mild Backwardation ({ts_ratio:.2f})",
+                        message=(
+                            f"VIX ({conditions.vix:.1f}) > VIX3M ({conditions.vix3m:.1f}), "
+                            f"ratio {ts_ratio:.2f}. Monitoring for deterioration."
+                        ),
+                    )
+
             # Persist to working memory for cross-event continuity
             self.memory.update_market_context(ctx.market_context)
 
             spy_str = f"${conditions.spy_price:.2f}" if conditions.spy_price > 0 else "UNKNOWN"
             logger.info(
                 f"Market data enriched: VIX={conditions.vix:.1f}, "
+                f"VVIX={conditions.vvix:.0f}, VIX3M={conditions.vix3m:.1f}, "
+                f"term={conditions.term_structure}, "
                 f"SPY={spy_str}, "
                 f"favorable={conditions.conditions_favorable}"
             )

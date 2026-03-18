@@ -43,6 +43,7 @@ def mock_trade_repo():
     repo.get_trades_by_date = Mock(return_value=[])
     repo.get_open_positions = Mock(return_value=[])
     repo.update_trade = Mock(return_value=True)
+    repo.update = Mock(return_value=True)
     return repo
 
 
@@ -60,6 +61,8 @@ def create_mock_ib_trade(order_id, symbol, status, avg_fill_price=0.0, filled_qt
     trade = Mock()
     trade.order = Mock()
     trade.order.orderId = order_id
+    trade.order.permId = 0
+    trade.order.lmtPrice = 0
 
     trade.contract = Mock()
     trade.contract.symbol = symbol
@@ -72,6 +75,8 @@ def create_mock_ib_trade(order_id, symbol, status, avg_fill_price=0.0, filled_qt
     trade.orderStatus.avgFillPrice = avg_fill_price
     trade.orderStatus.filled = filled_qty
 
+    trade.fills = []
+
     return trade
 
 
@@ -82,6 +87,7 @@ def create_mock_db_trade(id, order_id, symbol, status, fill_price=None, commissi
     trade.order_id = order_id
     trade.symbol = symbol
     trade.status = status
+    trade.tws_status = status
     trade.fill_price = fill_price
     trade.commission = commission
     trade.contracts = 5
@@ -89,7 +95,9 @@ def create_mock_db_trade(id, order_id, symbol, status, fill_price=None, commissi
     trade.expiration = expiration or date(2026, 12, 31)  # Future date by default
     trade.option_type = "P"
     trade.entry_date = datetime(2026, 1, 15, 10, 0, 0)
-    trade.entry_premium = 1.50
+    trade.entry_premium = fill_price if fill_price is not None else 1.50
+    trade.exit_date = None
+    trade.exit_reason = None
     return trade
 
 
@@ -129,6 +137,7 @@ def create_mock_position(symbol, strike, expiration, right, quantity):
     position.contract.strike = strike
     position.contract.lastTradeDateOrContractMonth = expiration
     position.contract.right = right
+    position.contract.secType = "OPT"
     position.position = quantity
     return position
 
@@ -178,17 +187,11 @@ class TestStatusMismatchDetection:
         assert report.total_discrepancies == 1
         assert report.total_resolved == 1
 
-        # Verify database was updated
-        mock_trade_repo.update_trade.assert_called_once()
-        call_args = mock_trade_repo.update_trade.call_args
-        assert call_args[0][0] == 1  # trade ID
-        updates = call_args[1]
-        assert updates["status"] == "filled"
-        assert updates["fill_price"] == 0.45
-        assert updates["filled_quantity"] == 5
-        assert updates["commission"] == 1.25
-        assert updates["tws_status"] == "Filled"
-        assert "reconciled_at" in updates
+        # Verify database was updated via setattr + repo.update()
+        mock_trade_repo.update.assert_called_once_with(db_trade)
+        assert db_trade.tws_status == "Filled"
+        assert db_trade.commission == 1.25
+        assert hasattr(db_trade, "reconciled_at")
 
     @pytest.mark.asyncio
     async def test_detect_cancelled_status_mismatch(
@@ -224,12 +227,9 @@ class TestStatusMismatchDetection:
         assert report.total_discrepancies == 1
         assert report.total_resolved == 1
 
-        # Verify database was updated
-        mock_trade_repo.update_trade.assert_called_once()
-        call_args = mock_trade_repo.update_trade.call_args
-        updates = call_args[1]
-        assert updates["status"] == "cancelled"
-        assert updates["tws_status"] == "Cancelled"
+        # Verify database was updated via setattr + repo.update()
+        mock_trade_repo.update.assert_called_once_with(db_trade)
+        assert db_trade.tws_status == "Cancelled"
 
     @pytest.mark.asyncio
     async def test_no_discrepancy_when_status_matches(
@@ -239,12 +239,12 @@ class TestStatusMismatchDetection:
         mock_trade_repo,
     ):
         """Test no discrepancy when statuses match."""
-        # DB has order as 'filled'
+        # DB has order as 'Filled' with tws_status matching TWS
         db_trade = create_mock_db_trade(
             id=3,
             order_id=12347,
             symbol="GOOGL",
-            status="filled",
+            status="Filled",
             fill_price=0.40,
         )
         mock_trade_repo.get_trades_by_date.return_value = [db_trade]
@@ -279,12 +279,12 @@ class TestFillPriceUpdates:
         mock_trade_repo,
     ):
         """Test detection when fill price differs by >$0.01."""
-        # DB has fill price of $0.40
+        # DB has entry_premium of $0.40
         db_trade = create_mock_db_trade(
             id=4,
             order_id=12348,
             symbol="TSLA",
-            status="filled",
+            status="Filled",
             fill_price=0.40,
         )
         mock_trade_repo.get_trades_by_date.return_value = [db_trade]
@@ -307,12 +307,10 @@ class TestFillPriceUpdates:
         # Verify discrepancy was detected
         assert report.total_discrepancies == 1
 
-        # Verify database was updated with correct price
-        mock_trade_repo.update_trade.assert_called_once()
-        call_args = mock_trade_repo.update_trade.call_args
-        updates = call_args[1]
-        assert updates["fill_price"] == 0.45
-        assert updates["fill_price_discrepancy"] == pytest.approx(0.05, abs=1e-9)
+        # Verify database was updated with correct price via setattr
+        mock_trade_repo.update.assert_called_once_with(db_trade)
+        assert db_trade.entry_premium == 0.45
+        assert db_trade.fill_price_discrepancy == pytest.approx(0.05, abs=1e-9)
 
     @pytest.mark.asyncio
     async def test_no_mismatch_for_small_price_difference(
@@ -322,12 +320,12 @@ class TestFillPriceUpdates:
         mock_trade_repo,
     ):
         """Test no mismatch when price difference is <$0.01."""
-        # DB has fill price of $0.400
+        # DB has entry_premium of $0.400
         db_trade = create_mock_db_trade(
             id=5,
             order_id=12349,
             symbol="NVDA",
-            status="filled",
+            status="Filled",
             fill_price=0.400,
         )
         mock_trade_repo.get_trades_by_date.return_value = [db_trade]
@@ -367,7 +365,7 @@ class TestCommissionExtraction:
             id=6,
             order_id=12350,
             symbol="AAPL",
-            status="filled",
+            status="Filled",
             fill_price=0.45,
             commission=None,
         )
@@ -392,11 +390,9 @@ class TestCommissionExtraction:
             sync_date=date(2026, 2, 3),
         )
 
-        # Verify commission was added
-        mock_trade_repo.update_trade.assert_called_once()
-        call_args = mock_trade_repo.update_trade.call_args
-        updates = call_args[1]
-        assert updates["commission"] == 2.50
+        # Verify commission was added via setattr + repo.update()
+        mock_trade_repo.update.assert_called_once_with(db_trade)
+        assert db_trade.commission == 2.50
 
     @pytest.mark.asyncio
     async def test_commission_sum_from_multiple_fills(
@@ -411,7 +407,7 @@ class TestCommissionExtraction:
             id=7,
             order_id=12351,
             symbol="MSFT",
-            status="filled",
+            status="Filled",
             fill_price=0.50,
             commission=0,
         )
@@ -440,11 +436,9 @@ class TestCommissionExtraction:
             sync_date=date(2026, 2, 3),
         )
 
-        # Verify total commission (1.25 + 1.25 + 1.00 = 3.50)
-        mock_trade_repo.update_trade.assert_called_once()
-        call_args = mock_trade_repo.update_trade.call_args
-        updates = call_args[1]
-        assert updates["commission"] == 3.50
+        # Verify total commission (1.25 + 1.25 + 1.00 = 3.50) via setattr
+        mock_trade_repo.update.assert_called_once_with(db_trade)
+        assert db_trade.commission == 3.50
 
 
 class TestOrphanOrderDetection:
@@ -565,6 +559,7 @@ class TestPositionReconciliation:
             order_id=12354,
             symbol="AAPL",
             status="filled",
+            expiration=date(2026, 2, 14),
         )
         db_trade.contracts = 5
         mock_trade_repo.get_open_positions.return_value = [db_trade]
@@ -891,7 +886,7 @@ class TestEdgeCases:
         mock_ibkr_client.get_trades.return_value = [ib_trade]
 
         # Mock database update failure
-        mock_trade_repo.update_trade.side_effect = Exception("Database error")
+        mock_trade_repo.update.side_effect = Exception("Database error")
 
         # Execute reconciliation (should not crash)
         report = await reconciler.sync_all_orders(
