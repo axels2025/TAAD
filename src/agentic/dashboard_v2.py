@@ -217,6 +217,16 @@ def create_dashboard_app_v2(auth_token: str = "") -> "FastAPI":
         """HTML learning & self-improvement page."""
         return _inject_auth(get_learning_html())
 
+    # Include audit router
+    from src.agentic.audit_api import create_audit_router, get_audit_html
+
+    app.include_router(create_audit_router(verify_token))
+
+    @app.get("/audit", response_class=HTMLResponse)
+    def audit_page():
+        """HTML audit trail page."""
+        return _inject_auth(get_audit_html())
+
     @app.get("/api/status")
     def get_status(token: None = Depends(verify_token)):
         """Get daemon status with live process check."""
@@ -1879,6 +1889,10 @@ _DASHBOARD_HTML_V2 = """<!DOCTYPE html>
     <a href="/scanner-settings" class="nav-item">
       <span class="nav-icon">&#128295;</span>
       <span class="nav-label">Scan Config</span>
+    </a>
+    <a href="/audit" class="nav-item">
+      <span class="nav-icon">&#128203;</span>
+      <span class="nav-label">Audit</span>
     </a>
 
     <div class="sidebar-divider"></div>

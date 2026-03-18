@@ -216,6 +216,16 @@ def create_dashboard_app(auth_token: str = "") -> "FastAPI":
         """HTML learning & self-improvement page."""
         return _inject_auth(get_learning_html())
 
+    # Include audit router
+    from src.agentic.audit_api import create_audit_router, get_audit_html
+
+    app.include_router(create_audit_router(verify_token))
+
+    @app.get("/audit", response_class=HTMLResponse)
+    def audit_page():
+        """HTML audit trail page."""
+        return _inject_auth(get_audit_html())
+
     @app.get("/api/status")
     def get_status(token: None = Depends(verify_token)):
         """Get daemon status with live process check."""
@@ -1763,6 +1773,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <a href="/config" class="btn btn-control" style="text-decoration:none;">Settings</a>
     <a href="/guardrails" class="btn btn-control" style="text-decoration:none;">Guardrails</a>
     <a href="/prompts" class="btn btn-control" style="text-decoration:none;">Prompts</a>
+    <a href="/audit" class="btn btn-control" style="text-decoration:none;">Audit</a>
     <div class="dropdown">
       <button class="btn btn-control dropdown-toggle" onclick="toggleMenu()">Actions</button>
       <div class="dropdown-menu" id="actions-menu">
