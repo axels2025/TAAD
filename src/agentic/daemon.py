@@ -174,7 +174,7 @@ class TAADDaemon:
         # Phase 6: Initialize guardrail registry
         self.guardrails = GuardrailRegistry(self.config.guardrails)
         self.guardrails.register_context_validator(ContextValidator())
-        self.guardrails.register_output_validator(OutputValidator())
+        self.guardrails.register_output_validator(OutputValidator(entry_days=self.config.strategy.entry_days))
         self.guardrails.register_output_validator(NumericalGroundingChecker())
         self.execution_gate = ExecutionGate()
         self.guardrails.register_execution_gate(self.execution_gate)

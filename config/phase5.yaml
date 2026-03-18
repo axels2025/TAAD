@@ -78,6 +78,7 @@ strategy:
   entry_days:
   - Monday
   - Tuesday
+  - Wednesday
 cro:
   enabled: true
   model: claude-sonnet-4-5-20250929

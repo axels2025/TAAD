@@ -140,12 +140,28 @@ _EXECUTE_PHRASES = re.compile(
 )
 
 
+_DAY_NAME_TO_WEEKDAY = {
+    "Monday": 0, "Tuesday": 1, "Wednesday": 2,
+    "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6,
+}
+
+
 class OutputValidator:
     """Validates Claude's decision output against the context it received.
 
     Checks action plausibility, symbol cross-references, and
     reasoning-action coherence. All checks are pure Python.
     """
+
+    def __init__(self, entry_days: list[str] | None = None):
+        """Initialize with configured entry days.
+
+        Args:
+            entry_days: Day names when trading is allowed (e.g. ["Monday", "Tuesday"]).
+                        Defaults to Monday and Tuesday if not provided.
+        """
+        days = entry_days or ["Monday", "Tuesday"]
+        self._entry_weekdays = {_DAY_NAME_TO_WEEKDAY[d] for d in days if d in _DAY_NAME_TO_WEEKDAY}
 
     def validate(
         self,
@@ -272,9 +288,9 @@ class OutputValidator:
             try:
                 profile = get_active_profile()
                 now_market = datetime.now(profile.timezone)
-                day_of_week = now_market.weekday()  # 0=Monday, 1=Tuesday
+                day_of_week = now_market.weekday()  # 0=Monday, 1=Tuesday, ...
                 vix = (context.market_context or {}).get("vix")
-                if day_of_week in (0, 1) and vix is not None and vix < 40:
+                if day_of_week in self._entry_weekdays and vix is not None and vix < 40:
                     return GuardrailResult(
                         passed=True,
                         guard_name="action_plausibility",

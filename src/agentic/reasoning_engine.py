@@ -428,6 +428,20 @@ class ClaudeReasoningEngine:
         )
         prompt = prompt.replace(old_step2, step2_block)
 
+        # Replace Step 3 header to reflect configured entry days
+        entry_abbrev = "/".join(d[:3] for d in entry_days)
+        prompt = prompt.replace(
+            "### Step 3: STAGING/EXECUTION CHECK — Entry days only (Mon/Tue)",
+            f"### Step 3: STAGING/EXECUTION CHECK — Entry days only ({entry_abbrev})",
+        )
+
+        # Replace Step 5 hardcoded Mon/Tue reference
+        entry_day_list = " or ".join(entry_days)
+        prompt = prompt.replace(
+            "- Not Monday or Tuesday (or markets closed or VIX Extreme)",
+            f"- Not an entry day ({entry_day_list}) (or markets closed or VIX Extreme)",
+        )
+
         # Replace Role & Bias entry-day references
         entry_str = " and ".join(entry_days) if len(entry_days) <= 2 else ", ".join(entry_days)
         prompt = prompt.replace(
