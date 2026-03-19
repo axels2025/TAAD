@@ -419,7 +419,7 @@ def dashboard(
         raise typer.Exit(1)
 
     from src.agentic.config import load_phase5_config
-    from src.agentic.dashboard_api import create_dashboard_app
+    from src.agentic.dashboard_v2 import create_dashboard_app_v2 as create_dashboard_app
 
     init_database()
 
